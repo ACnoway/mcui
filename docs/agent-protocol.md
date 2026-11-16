@@ -1,6 +1,6 @@
 # Agent 身份、任务与配置协议（阶段 0 冻结基线）
 
-> 状态：阶段 0 已冻结签名编码与任务/序号/恢复语义基线，等待项目负责人及独立安全评审批准。V1 签名对象 schema、严格解析、JCS/Ed25519 校验及共享向量已实现于 `internal/protocol`；该包未连接 Master/Agent 运行时。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)；旧示例 JSON 仅作示意。Phase 1 只有空 Agent 身份与节点/审计读取，没有任务投递、执行或节点副作用接口。
+> 状态：阶段 0 已冻结签名编码与任务/序号/恢复语义基线，等待项目负责人确认及项目内安全检查。V1 签名对象 schema、严格解析、JCS/Ed25519 校验及共享向量已实现于 `internal/protocol`；该包未连接 Master/Agent 运行时。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)；旧示例 JSON 仅作示意。Phase 1 只有空 Agent 身份与节点/审计读取，没有任务投递、执行或节点副作用接口。
 
 ## 1. 信任边界与基本约束
 
@@ -91,7 +91,7 @@ Agent 或 Helper 状态丢失、回滚、损坏或身份重装时暂停所有新
 
 当前版本化共享向量位于 `internal/protocol/testdata/protocol-v1.json`：覆盖 task、config、cancel、skip 各一个签名正例，含乱序字段的等价输入和 9 个负例（含超出 10 分钟任务有效期）。正例提供完整 JSON、JCS 文本、签名字节、公开测试 seed、公钥、签名 hex/Base64；配置向量还提供精确原始字节、长度及 SHA-256。固定 seed 仅为公开测试材料，绝不能用于生产。
 
-Go 测试通过 `internal/protocol` 校验 schema、拒绝负例并比对规范化签名字节；`scripts/verify-protocol-vectors.mjs` 使用 Node.js `crypto` 与独立实现的 ECMAScript JSON 规范化逻辑校验同一向量。当前已有两种语言/密码实现的互操作证据。向量覆盖本项目协议字段边界，不等于全部 RFC 8785 通用测试套件；阶段退出还要求独立安全评审者复核向量、拒绝行为与规范边界。
+Go 测试通过 `internal/protocol` 校验 schema、拒绝负例并比对规范化签名字节；`scripts/verify-protocol-vectors.mjs` 使用 Node.js `crypto` 与独立实现的 ECMAScript JSON 规范化逻辑校验同一向量。当前已有两种语言/密码实现的互操作证据。向量覆盖本项目协议字段边界，不等于全部 RFC 8785 通用测试套件；阶段退出还要求项目内复核向量、拒绝行为与规范边界并记录结果。
 
 每个正向量必须给出：向量 ID、对象类别和域前缀的精确 UTF-8 十六进制、完整输入 JSON、删除顶层签名后的 JCS 精确 UTF-8 文本及十六进制、完整待签名字节十六进制、32 字节公钥十六进制、测试私钥材料及其格式、64 字节签名十六进制与规范 Base64、预期验签结果；配置向量另附原始配置字节十六进制、长度和 SHA-256，以及与任务绑定的字段。分别覆盖 task、config、cancel、skip，包含字段乱序、转义和合法边界整数；重序和等价 JSON 表示应得到一致 JCS 和签名输入。非 ASCII 测例属于独立 JCS 规范化组件测试，当前协议字段不允许非 ASCII，不能将其作为协议对象正向量。
 
@@ -101,7 +101,7 @@ Go 测试通过 `internal/protocol` 校验 schema、拒绝负例并比对规范�
 
 ## 8. 实现边界与发布阻断
 
-1. 本文的序号、取消/skip、时限/租约、ACK 和恢复规则现已冻结为实现基线；独立安全评审及组织批准仍未记录，故阶段 0 不能视为正式签核完成。
+1. 本文的序号、取消/skip、时限/租约、ACK 和恢复规则现已冻结为实现基线；项目内安全检查及负责人确认仍未记录，故阶段 0 不能视为正式签核完成。
 2. 任务签发服务、独立审批存储、任务/TUF 密钥与人员托管、可信时间告警、Node CA 生产参数及带外恢复仪式尚未实现。没有对应阶段批准前，禁止注册生产节点或开放任务/根变更接口。
 3. 当前任务 parser 与向量没有 Helper 步骤参数、制品摘要、架构或期望状态授权信封；这些字段必须在阶段 2 首次实现任务运行时前进入经评审的协议版本及跨实现向量。`core.status` 当前仅为 schema/向量，不存在投递 API、Agent 执行器或 Helper。
 4. Helper 固定动作策略已列明；Core 逐版本配置允许字段为空，默认拒绝。候选 Core 版本需按 [兼容矩阵](./core-compatibility.md) 实测后再拟定字段表。自更新、安装、配置、统计、真实恢复和制品信任运行时全部禁用。
