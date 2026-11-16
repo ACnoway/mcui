@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +80,9 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 	x.mux.HandleFunc("POST /api/v1/admin/login", x.login)
 	x.mux.HandleFunc("POST /api/v1/admin/logout", x.logout)
 	x.mux.HandleFunc("GET /api/v1/admin/me", x.me)
+	x.mux.HandleFunc("GET /api/v1/admin/admins", x.admins)
+	x.mux.HandleFunc("POST /api/v1/admin/admins", x.createAdmin)
+	x.mux.HandleFunc("POST /api/v1/admin/admins/disable", x.disableAdmin)
 	x.mux.HandleFunc("POST /api/v1/admin/invites", x.createInvite)
 	x.mux.HandleFunc("GET /api/v1/admin/nodes", x.nodes)
 	x.mux.HandleFunc("GET /api/v1/admin/nodes/{id}", x.nodeDetail)
@@ -187,7 +192,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 			return errors.New("initialized")
 		}
 		for _, a := range st.Admins {
-			if a.Username == in.Username {
+			if strings.EqualFold(a.Username, in.Username) {
 				return errors.New("username already exists")
 			}
 		}
@@ -378,6 +383,214 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		"can_disable_nodes":  ctx.Admin.Role == "security_admin" && (ctx.Admin.AllNodes || len(ctx.Admin.NodeGroups) > 0 || len(ctx.Admin.NodeIDs) > 0),
 		"csrf_token":         ctx.Session.CSRFToken, "mfa_recent": time.Now().Unix()-ctx.Session.MFAAt <= int64(sensitiveMFALimit.Seconds()),
 	})
+}
+
+type AdminView struct {
+	ID         string   `json:"id"`
+	Username   string   `json:"username"`
+	Role       string   `json:"role"`
+	NodeIDs    []string `json:"node_ids"`
+	NodeGroups []string `json:"node_groups"`
+	Disabled   bool     `json:"disabled"`
+}
+
+func adminView(a store.Admin) AdminView {
+	return AdminView{ID: a.ID, Username: a.Username, Role: a.Role, NodeIDs: append([]string{}, a.NodeIDs...), NodeGroups: append([]string{}, a.NodeGroups...), Disabled: a.Disabled}
+}
+
+func adminScopeWithin(actor, target store.Admin, st store.State) bool {
+	if target.AllNodes {
+		return actor.AllNodes
+	}
+	if len(target.NodeIDs)+len(target.NodeGroups) == 0 {
+		return false
+	}
+	for _, id := range target.NodeIDs {
+		node, ok := st.Nodes[id]
+		if !ok || !canReadNode(actor, node) {
+			return false
+		}
+	}
+	for _, group := range target.NodeGroups {
+		if !groupPattern.MatchString(group) || !canManageGroup(actor, group) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) admins(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.adminAuth(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if ctx.Admin.Role != "security_admin" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var out []AdminView
+	if err := s.store.View(func(st store.State) error {
+		actor, exists := st.Admins[ctx.Admin.ID]
+		if !exists || actor.Disabled || actor.Role != "security_admin" {
+			return errors.New("administrator unavailable")
+		}
+		for _, candidate := range st.Admins {
+			if candidate.ID == actor.ID || (candidate.Role != "security_admin" && adminScopeWithin(actor, candidate, st)) {
+				out = append(out, adminView(candidate))
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
+		return nil
+	}); err != nil {
+		http.Error(w, "unavailable", http.StatusInternalServerError)
+		return
+	}
+	if out == nil {
+		out = []AdminView{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func generateTOTPSecret() (string, error) {
+	secret := make([]byte, 20)
+	if _, err := rand.Read(secret); err != nil {
+		return "", err
+	}
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret), nil
+}
+
+func normalizeUnique(values []string, valid func(string) bool) ([]string, bool) {
+	if len(values) > 200 {
+		return nil, false
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if !valid(value) {
+			return nil, false
+		}
+		if _, exists := seen[value]; exists {
+			return nil, false
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out, true
+}
+
+func (s *Server) createAdmin(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireCSRF(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Username   string   `json:"username"`
+		Password   string   `json:"password"`
+		Role       string   `json:"role"`
+		NodeIDs    []string `json:"node_ids"`
+		NodeGroups []string `json:"node_groups"`
+		MFACode    string   `json:"mfa_code"`
+	}
+	if readJSON(r, &in) != nil || !usernamePattern.MatchString(in.Username) || len(in.Password) < 12 || len(in.Password) > 1024 || (in.Role != "auditor" && in.Role != "operator") {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	ids, idsOK := normalizeUnique(in.NodeIDs, func(v string) bool { return v != "" && len(v) <= 128 })
+	groups, groupsOK := normalizeUnique(in.NodeGroups, func(v string) bool { return groupPattern.MatchString(v) })
+	if !idsOK || !groupsOK || len(ids)+len(groups) == 0 {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if !s.stepUp(ctx, in.MFACode) {
+		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
+		return
+	}
+	secret, err := generateTOTPSecret()
+	if err != nil {
+		http.Error(w, "unavailable", http.StatusInternalServerError)
+		return
+	}
+	id, err := randomToken(16)
+	if err != nil {
+		http.Error(w, "unavailable", http.StatusInternalServerError)
+		return
+	}
+	saltBytes := make([]byte, 16)
+	if _, err = rand.Read(saltBytes); err != nil {
+		http.Error(w, "unavailable", http.StatusInternalServerError)
+		return
+	}
+	salt := base64.RawStdEncoding.EncodeToString(saltBytes)
+	now := time.Now().Unix()
+	err = s.store.Update(func(st *store.State) error {
+		actor, exists := st.Admins[ctx.Admin.ID]
+		if !exists || actor.Disabled || actor.Role != "security_admin" || !adminScopeWithin(actor, store.Admin{NodeIDs: ids, NodeGroups: groups}, *st) {
+			return store.ErrNotFound
+		}
+		for _, candidate := range st.Admins {
+			if strings.EqualFold(candidate.Username, in.Username) {
+				return errors.New("username already exists")
+			}
+		}
+		st.Admins[id] = store.Admin{ID: id, Username: in.Username, PasswordHash: salt + ":" + passwordHash(in.Password, salt), TOTPSecret: secret, Role: in.Role, NodeIDs: ids, NodeGroups: groups}
+		s.appendAudit(st, store.Audit{At: now, Actor: actor.ID, Action: "admin.create", ResourceType: "admin", Resource: id, Outcome: "success"})
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "scope not permitted", http.StatusForbidden)
+		return
+	}
+	if err != nil {
+		http.Error(w, "administrator creation unavailable", http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"admin": AdminView{ID: id, Username: in.Username, Role: in.Role, NodeIDs: ids, NodeGroups: groups}, "totp_secret": secret})
+}
+
+func (s *Server) disableAdmin(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireCSRF(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		AdminID string `json:"admin_id"`
+		MFACode string `json:"mfa_code"`
+	}
+	if readJSON(r, &in) != nil || in.AdminID == "" || in.AdminID == ctx.Admin.ID {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if !s.stepUp(ctx, in.MFACode) {
+		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
+		return
+	}
+	now := time.Now().Unix()
+	err := s.store.Update(func(st *store.State) error {
+		actor, actorOK := st.Admins[ctx.Admin.ID]
+		target, targetOK := st.Admins[in.AdminID]
+		if !actorOK || actor.Disabled || actor.Role != "security_admin" || !targetOK || target.Role == "security_admin" || !adminScopeWithin(actor, target, *st) {
+			return store.ErrNotFound
+		}
+		if target.Disabled {
+			return nil
+		}
+		target.Disabled = true
+		st.Admins[target.ID] = target
+		for sessionID, session := range st.Sessions {
+			if session.AdminID == target.ID {
+				delete(st.Sessions, sessionID)
+			}
+		}
+		s.appendAudit(st, store.Audit{At: now, Actor: actor.ID, Action: "admin.disable", ResourceType: "admin", Resource: target.ID, Outcome: "success"})
+		return nil
+	})
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

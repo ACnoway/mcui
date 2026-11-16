@@ -94,6 +94,12 @@
       "expected_reject": "schema"
     },
     {
+      "id": "task-lifetime-too-long",
+      "kind": "task",
+      "input_json": "{\"schema_version\":1,\"task_id\":\"task-status-001\",\"node_id\":\"node-001\",\"sequence\":1,\"operation\":\"core.status\",\"issued_at\":\"2026-11-16T00:00:00Z\",\"not_before\":\"2026-11-16T00:00:00Z\",\"expires_at\":\"2026-11-16T00:10:01Z\",\"payload\":{\"core\":\"xray\"},\"signing_key_id\":\"test-key-01\",\"signature_algorithm\":\"Ed25519\",\"signature\":\"OaZSs8d+CtEXPoblY5z6NTp0pksiA1jOJ7e2bcMh/4Bnx1havsY07M/CouuzImrlVliELUnMWchAHhn348nyBA==\"}",
+      "expected_reject": "schema"
+    },
+    {
       "id": "wrong-domain",
       "kind": "config",
       "input_json": "{\"schema_version\":1,\"task_id\":\"task-status-001\",\"node_id\":\"node-001\",\"sequence\":1,\"operation\":\"core.status\",\"issued_at\":\"2026-11-16T00:00:00Z\",\"not_before\":\"2026-11-16T00:00:00Z\",\"expires_at\":\"2026-11-16T00:10:00Z\",\"payload\":{\"core\":\"xray\"},\"signing_key_id\":\"test-key-01\",\"signature_algorithm\":\"Ed25519\",\"signature\":\"OaZSs8d+CtEXPoblY5z6NTp0pksiA1jOJ7e2bcMh/4Bnx1havsY07M/CouuzImrlVliELUnMWchAHhn348nyBA==\"}",

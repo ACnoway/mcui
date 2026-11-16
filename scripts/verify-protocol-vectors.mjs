@@ -149,6 +149,7 @@ function buildVectors() {
     { id: 'unknown-field', kind: 'task', input_json: vectors[0].input_json.replace('"signature":', '"extra":"value","signature":'), expected_reject: 'schema' },
     { id: 'fractional-sequence', kind: 'task', input_json: vectors[0].input_json.replace('"sequence":1,', '"sequence":1.0,'), expected_reject: 'schema' },
     { id: 'unsafe-integer', kind: 'task', input_json: vectors[0].input_json.replace('"sequence":1,', '"sequence":9007199254740992,'), expected_reject: 'schema' },
+    { id: 'task-lifetime-too-long', kind: 'task', input_json: vectors[0].input_json.replace('"expires_at":"2026-11-16T00:10:00Z"', '"expires_at":"2026-11-16T00:10:01Z"'), expected_reject: 'schema' },
     { id: 'wrong-domain', kind: 'config', input_json: vectors[0].input_json, expected_reject: 'schema-or-signature' },
     { id: 'noncanonical-base64', kind: 'task', input_json: vectors[0].input_json.replace(/"signature":"([^"]+)"/, (_m, sig) => `"signature":"${sig}="`), expected_reject: 'base64' },
   ]
@@ -195,6 +196,7 @@ function verifyNegativeCase(testCase, vectors) {
       if (input.operation !== 'core.status' || keys.length !== expected.length || expected.some(key => !Object.hasOwn(input, key))) return
       const sequence = testCase.input_json.match(/"sequence":([^,}]+)/)?.[1]
       if (!sequence || !/^(0|[1-9][0-9]*)$/.test(sequence) || !Number.isSafeInteger(input.sequence) || input.sequence < 1) return
+      if (Date.parse(input.expires_at) - Date.parse(input.issued_at) > 10 * 60 * 1000) return
       throw new Error('schema negative case unexpectedly passed')
     }
     const canonical = canonicalBody(input)

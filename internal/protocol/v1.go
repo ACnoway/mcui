@@ -25,6 +25,7 @@ const (
 	Skip            Kind = "skip"
 	maxMessageBytes      = 64 * 1024
 	maxSafeInteger       = uint64(9007199254740991)
+	maxTaskLifetime      = 10 * time.Minute
 )
 
 var (
@@ -275,6 +276,9 @@ func validateObject(kind Kind, object map[string]any) error {
 	}
 	if issued.After(notBefore) || !notBefore.Before(expires) {
 		return errors.New("invalid signed message time interval")
+	}
+	if kind == Task && expires.Sub(issued) > maxTaskLifetime {
+		return errors.New("task validity exceeds the maximum lifetime")
 	}
 	return nil
 }

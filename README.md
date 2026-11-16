@@ -8,7 +8,7 @@ Phase 0 design preparation and Phase 1 implementation are in progress. The work 
 
 ## Development checks
 
-The baseline selects Go 1.24.4 and pnpm 12.15.0; see [development baseline](docs/development-baseline.md). From the repository root:
+The baseline pins Go 1.27.4, Node.js 26.13.1, and pnpm 12.17.0; see [development baseline](docs/development-baseline.md). From the repository root:
 
 ```sh
 go vet ./...

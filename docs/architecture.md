@@ -1,10 +1,10 @@
 # 架构与安全决议（阶段 0）
 
-> 状态：本架构与安全边界仍待项目负责人及安全负责人审批，并非实现、测试或安全审计证明。阶段 0/1 的代码与测试状态见[实施状态记录](./phase-0-1-implementation.md)。阶段顺序和退出门槛以[分阶段流程](./phased-development-workflow.md)为准；本文件整合[项目大纲](./project-overview-and-development-workflow.md)与[Agent 草案](./agent-technical-design-v1.0.md)。安全假设见[威胁模型](./threat-model.md)，操作和审批见[权限矩阵](./panel-authz.md)。
+> 状态：架构与安全边界的工程基线已记录，仍待项目负责人及安全负责人批准；本文不是实现、测试或安全审计证明。阶段 0/1 的代码与测试状态见[实施状态记录](./phase-0-1-implementation.md)。阶段顺序和退出门槛以[分阶段流程](./phased-development-workflow.md)为准；本文件整合[项目大纲](./project-overview-and-development-workflow.md)与[Agent 草案](./agent-technical-design-v1.0.md)。安全假设见[威胁模型](./threat-model.md)，操作和审批见[权限矩阵](./panel-authz.md)。
 
 ## 1. 范围与部署
 
-目标是 Linux/systemd、amd64/arm64；具体发行版、systemd 最低版本和 Core 的版本/构建选项尚待锁定验证，未列入已支持范围。完整 V1 包含三种 Core 生命周期、配置与用户、可用统计及订阅；P0 先行并非完整 V1。阶段 1 只开放空 Agent 注册、身份与只读节点/审计，不允许任何有副作用的节点操作；后续能力按阶段验收逐项开启。
+首个验收目标为 Debian 13.7/systemd `257.13-1~deb13u1` amd64/arm64；三个 Core 首批测试候选版本见[兼容矩阵](./core-compatibility.md)。目标组合尚未逐架构实测，不构成已支持声明。完整 V1 包含三种 Core 生命周期、配置与用户、可用统计及订阅；P0 先行并非完整 V1。阶段 1 只开放空 Agent 注册、身份与只读节点/审计，不允许任何有副作用的节点操作；后续能力按阶段验收逐项开启。
 
 ```text
 浏览器 --HTTPS--> Master Web/API --受限接口--> 独立任务签发者
