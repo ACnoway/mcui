@@ -33,7 +33,7 @@
 
 | 日期 / 提交 | 环境 | 检查 | 结果 |
 |---|---|---|---|
-| 2026-11-16 / 提交待记 | 本地 Windows，Go 1.26.4，Node 24.22.1，pnpm 11.25.0 | `gofmt -l cmd internal`、`go vet ./...`、`go test ./...`、`go build ./...`、`node scripts/verify-protocol-vectors.mjs` | Go 格式/静态分析/构建与测试均通过；4 正例、8 反例通过。因本机无 `web/node_modules` 且 pnpm 低于锁定版本，未在本机执行 web 构建。 |
-| 待补 | SSH `ro`，项目路径 `/root/mcui` | Go 构建与测试、协议向量、pnpm 冻结安装/构建 | 待运行 |
+| `0f7ca50` / 2026-11-16 | 本地 Windows，Go 1.26.4，Node 24.22.1，pnpm 11.25.0 | `gofmt -l cmd internal`、`go vet ./...`、`go test ./...`、`go build ./...`、`node scripts/verify-protocol-vectors.mjs` | Go 格式/静态分析/构建与测试均通过；4 正例、8 反例通过。因本机无 `web/node_modules` 且 pnpm 低于锁定版本，未在本机执行 web 构建。 |
+| `bf49200` / 2026-11-16 | SSH `ro` 的 `/root/mcui`，Linux `6.12.107+deb13-cloud-amd64` x86_64，Go 1.24.4、Node 26.12.1、pnpm 12.15.0 | `bash scripts/check-static.sh`（经 `npm exec --package=pnpm@12.15.0` 提供 pnpm） | 通过：gofmt、`go vet`、`go build`、`go test`、4 正例/8 反例向量、冻结依赖安装、Vue 类型检查和 Vite 生产构建。 |
 
-验证完成后，记录推送提交、实际工具版本、命令和输出；未执行或失败均不能标记通过。本状态不授权阶段 2 运行时代码。
+以上远端记录针对已推送的代码与锁文件提交 `bf49200`。未执行或失败的项目均不能标记通过。本状态不授权阶段 2 运行时代码。
