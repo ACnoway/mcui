@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,34 +21,42 @@ type Client struct {
 	statePath                      string
 }
 type localState struct {
-	PrivateKey     string `json:"private_key"`
-	NodeID         string `json:"node_id,omitempty"`
-	NodeToken      string `json:"node_token,omitempty"`
-	CertificatePEM string `json:"certificate_pem,omitempty"`
+	PrivateKey string `json:"private_key"`
+	NodeID     string `json:"node_id,omitempty"`
+	NodeToken  string `json:"node_token,omitempty"`
 }
 
 func New(masterURL, name, group, invite string) (*Client, error) {
-	if masterURL == "" || name == "" || invite == "" {
-		return nil, errors.New("master URL, name, and invite are required")
+	u, e := url.Parse(masterURL)
+	if e != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname()))) {
+		return nil, errors.New("master must use HTTPS; HTTP is allowed only for loopback development")
 	}
-	path := filepath.Join("/var/lib/mcui-agent", "identity.json")
+	if name == "" || invite == "" {
+		return nil, errors.New("name and invite are required")
+	}
+	state := filepath.Join("/var/lib/mcui-agent", "identity.json")
 	if p := os.Getenv("MCUI_AGENT_STATE"); p != "" {
-		path = p
+		state = p
 	}
-	c := &Client{masterURL: masterURL, name: name, group: group, invite: invite, statePath: path, http: &http.Client{Timeout: 15 * time.Second}}
-	if err := c.loadOrCreate(); err != nil {
-		return nil, err
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	c := &Client{masterURL: strings.TrimRight(masterURL, "/"), name: name, group: group, invite: invite, statePath: state, http: &http.Client{Timeout: 15 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	if e = c.loadOrCreate(); e != nil {
+		return nil, e
 	}
 	return c, nil
 }
+func isLoopback(host string) bool { return host == "localhost" || host == "127.0.0.1" || host == "::1" }
 func (c *Client) loadOrCreate() error {
 	b, e := os.ReadFile(c.statePath)
 	if e == nil {
-		var st localState
-		if e = json.Unmarshal(b, &st); e != nil {
+		if e = os.Chmod(c.statePath, 0600); e != nil {
 			return e
 		}
-		raw, e := base64.RawStdEncoding.DecodeString(st.PrivateKey)
+		var s localState
+		if e = json.Unmarshal(b, &s); e != nil {
+			return e
+		}
+		raw, e := base64.RawStdEncoding.DecodeString(s.PrivateKey)
 		if e != nil || len(raw) != ed25519.PrivateKeySize {
 			return errors.New("invalid agent identity")
 		}
@@ -57,6 +66,9 @@ func (c *Client) loadOrCreate() error {
 	if !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
+	if e = os.MkdirAll(filepath.Dir(c.statePath), 0700); e != nil {
+		return e
+	}
 	_, key, e := ed25519.GenerateKey(rand.Reader)
 	if e != nil {
 		return e
@@ -64,43 +76,57 @@ func (c *Client) loadOrCreate() error {
 	c.key = key
 	return c.save(localState{PrivateKey: base64.RawStdEncoding.EncodeToString(key)})
 }
-func (c *Client) save(st localState) error {
-	if err := os.MkdirAll(filepath.Dir(c.statePath), 0700); err != nil {
-		return err
+func (c *Client) save(s localState) error {
+	if e := os.MkdirAll(filepath.Dir(c.statePath), 0700); e != nil {
+		return e
 	}
-	b, e := json.Marshal(st)
+	b, e := json.Marshal(s)
 	if e != nil {
 		return e
 	}
-	return os.WriteFile(c.statePath, b, 0600)
+	f, e := os.OpenFile(c.statePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if e != nil {
+		return e
+	}
+	if e = f.Chmod(0600); e == nil {
+		_, e = f.Write(b)
+	}
+	if e == nil {
+		e = f.Sync()
+	}
+	closeErr := f.Close()
+	if e != nil {
+		return e
+	}
+	return closeErr
 }
 func (c *Client) RunOnce() error {
-	if err := c.enrollIfNeeded(); err != nil {
-		return err
+	if e := c.enrollIfNeeded(); e != nil {
+		return e
 	}
-	if err := c.loadOrCreate(); err != nil {
-		return err
+	b, e := os.ReadFile(c.statePath)
+	if e != nil {
+		return e
 	}
-	b, err := os.ReadFile(c.statePath)
-	if err != nil {
-		return err
+	var s localState
+	if e = json.Unmarshal(b, &s); e != nil {
+		return e
 	}
-	var st localState
-	if err = json.Unmarshal(b, &st); err != nil {
-		return err
+	if s.NodeToken == "" || s.NodeID == "" {
+		return errors.New("incomplete agent identity")
 	}
-	req, err := http.NewRequest(http.MethodPost, c.masterURL+"/api/v1/agent/heartbeat", strings.NewReader(`{}`))
-	if err != nil {
-		return err
+	req, e := http.NewRequest(http.MethodPost, c.masterURL+"/api/v1/agent/heartbeat", strings.NewReader(`{}`))
+	if e != nil {
+		return e
 	}
-	req.Header.Set("Authorization", "Bearer "+st.NodeToken)
+	req.Header.Set("Authorization", "Bearer "+s.NodeToken)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
+	resp, e := c.http.Do(req)
+	if e != nil {
+		return e
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != 200 {
 		return errors.New("heartbeat rejected")
 	}
 	return nil
@@ -110,15 +136,15 @@ func (c *Client) enrollIfNeeded() error {
 	if e != nil {
 		return e
 	}
-	var st localState
-	if e = json.Unmarshal(b, &st); e != nil {
+	var s localState
+	if e = json.Unmarshal(b, &s); e != nil {
 		return e
 	}
-	if st.NodeID != "" && st.NodeToken != "" {
+	if s.NodeID != "" && s.NodeToken != "" {
 		return nil
 	}
 	pub := c.key.Public().(ed25519.PublicKey)
-	body, _ := json.Marshal(map[string]string{"invite": c.invite, "name": c.name, "group": c.group, "public_key": base64.StdEncoding.EncodeToString(pub)})
+	body, _ := json.Marshal(map[string]string{"invite": c.invite, "name": c.name, "public_key": base64.StdEncoding.EncodeToString(pub)})
 	req, e := http.NewRequest(http.MethodPost, c.masterURL+"/api/v1/agent/enroll", strings.NewReader(string(body)))
 	if e != nil {
 		return e
@@ -129,7 +155,7 @@ func (c *Client) enrollIfNeeded() error {
 		return e
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != 201 {
 		return errors.New("registration rejected")
 	}
 	var result struct {
@@ -139,8 +165,11 @@ func (c *Client) enrollIfNeeded() error {
 	if e = json.NewDecoder(resp.Body).Decode(&result); e != nil {
 		return e
 	}
-	st.NodeID = result.NodeID
-	st.NodeToken = result.NodeToken
-	return c.save(st)
+	if result.NodeID == "" || result.NodeToken == "" {
+		return errors.New("invalid registration response")
+	}
+	s.NodeID = result.NodeID
+	s.NodeToken = result.NodeToken
+	return c.save(s)
 }
 func (c *Client) NextDelay() time.Duration { return 15 * time.Second }

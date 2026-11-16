@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/store"
@@ -23,10 +24,17 @@ type Server struct {
 	store          *store.Store
 	bootstrapToken string
 	mux            *http.ServeMux
+	rateMu         sync.Mutex
+	attempts       map[string]attempt
+}
+type attempt struct {
+	count       int
+	start       time.Time
+	lockedUntil time.Time
 }
 
 func New(s *store.Store, bootstrapToken, webDir string) *Server {
-	x := &Server{store: s, bootstrapToken: bootstrapToken, mux: http.NewServeMux()}
+	x := &Server{store: s, bootstrapToken: bootstrapToken, mux: http.NewServeMux(), attempts: map[string]attempt{}}
 	x.mux.HandleFunc("GET /healthz", x.health)
 	x.mux.HandleFunc("POST /api/v1/bootstrap", x.bootstrap)
 	x.mux.HandleFunc("POST /api/v1/admin/login", x.login)
@@ -34,6 +42,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.mux.HandleFunc("POST /api/v1/admin/invites", x.createInvite)
 	x.mux.HandleFunc("GET /api/v1/admin/nodes", x.nodes)
 	x.mux.HandleFunc("GET /api/v1/admin/audit", x.audit)
+	x.mux.HandleFunc("POST /api/v1/admin/nodes/disable", x.disableNode)
 	x.mux.HandleFunc("POST /api/v1/agent/enroll", x.enroll)
 	x.mux.HandleFunc("POST /api/v1/agent/heartbeat", x.heartbeat)
 	if webDir != "" {
@@ -95,12 +104,21 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid bootstrap request", 400)
 		return
 	}
-	if _, e := base32Decode(strings.ToUpper(strings.TrimRight(in.TOTPSecret, "="))); e != nil {
+	if _, err := base32Decode(strings.ToUpper(strings.TrimRight(in.TOTPSecret, "="))); err != nil {
 		http.Error(w, "invalid TOTP secret", 400)
 		return
 	}
-	id, _ := randomToken(16)
-	salt, _ := randomToken(16)
+	id, err := randomToken(16)
+	if err != nil {
+		http.Error(w, "unavailable", 500)
+		return
+	}
+	saltBytes := make([]byte, 16)
+	if _, err = rand.Read(saltBytes); err != nil {
+		http.Error(w, "unavailable", 500)
+		return
+	}
+	salt := base64.RawStdEncoding.EncodeToString(saltBytes)
 	e := s.store.Update(func(st *store.State) error {
 		if len(st.Admins) > 0 {
 			return errors.New("initialized")
@@ -123,7 +141,31 @@ func passwordHash(p, s string) string {
 	h := argon2.IDKey([]byte(p), salt, 2, 64*1024, 2, 32)
 	return base64.RawStdEncoding.EncodeToString(h)
 }
+func (s *Server) allowAttempt(key string) bool {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	now := time.Now()
+	a := s.attempts[key]
+	if now.Before(a.lockedUntil) {
+		return false
+	}
+	if now.Sub(a.start) > time.Minute {
+		a = attempt{start: now}
+	}
+	a.count++
+	if a.count > 10 {
+		a.lockedUntil = now.Add(5 * time.Minute)
+		s.attempts[key] = a
+		return false
+	}
+	s.attempts[key] = a
+	return true
+}
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.allowAttempt(r.RemoteAddr) {
+		http.Error(w, "too many attempts", 429)
+		return
+	}
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -202,8 +244,11 @@ func (s *Server) authenticate(r *http.Request) (store.Admin, bool) {
 	return a, ok
 }
 func csrfOK(r *http.Request) bool {
-	o := r.Header.Get("Origin")
-	return o == "" || o == "http://"+r.Host || o == "https://"+r.Host
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		return origin == "http://"+r.Host || origin == "https://"+r.Host
+	}
+	return r.Header.Get("Sec-Fetch-Site") == "same-origin" || r.Header.Get("Sec-Fetch-Site") == "none"
 }
 func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.authenticate(r)
@@ -377,9 +422,15 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.View(func(st store.State) error { out = append(out, st.Audits...); return nil })
 	writeJSON(w, 200, out)
 }
+func (s *Server) appendAudit(st *store.State, event store.Audit) {
+	st.Audits = append(st.Audits, event)
+	if len(st.Audits) > 10000 {
+		st.Audits = append([]store.Audit(nil), st.Audits[len(st.Audits)-10000:]...)
+	}
+}
 func (s *Server) recordAudit(actor, action, resource, outcome string) error {
 	return s.store.Update(func(st *store.State) error {
-		st.Audits = append(st.Audits, store.Audit{At: time.Now().Unix(), Actor: actor, Action: action, Resource: resource, Outcome: outcome})
+		s.appendAudit(st, store.Audit{At: time.Now().Unix(), Actor: actor, Action: action, Resource: resource, Outcome: outcome})
 		return nil
 	})
 }
