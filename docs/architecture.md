@@ -1,6 +1,6 @@
 # 架构与安全决议（阶段 0）
 
-> 状态：设计提案，待项目负责人及安全负责人人工审批；并非实现、测试或安全审计证明。阶段顺序和退出门槛以 [分阶段流程](./phased-development-workflow.md) 为准；本文件整合 [项目大纲](./project-overview-and-development-workflow.md) 与 [Agent 草案](./agent-technical-design-v1.0.md)，其示例并非既有实现。安全假设见 [威胁模型](./threat-model.md)，操作和审批见 [权限矩阵](./panel-authz.md)。
+> 状态：本架构与安全边界仍待项目负责人及安全负责人审批，并非实现、测试或安全审计证明。阶段 0/1 的代码与测试状态见[实施状态记录](./phase-0-1-implementation.md)。阶段顺序和退出门槛以[分阶段流程](./phased-development-workflow.md)为准；本文件整合[项目大纲](./project-overview-and-development-workflow.md)与[Agent 草案](./agent-technical-design-v1.0.md)。安全假设见[威胁模型](./threat-model.md)，操作和审批见[权限矩阵](./panel-authz.md)。
 
 ## 1. 范围与部署
 

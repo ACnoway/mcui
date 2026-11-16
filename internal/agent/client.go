@@ -1,175 +1,455 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/ed25519"
-	"crypto/rand"
+	crand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/ACnoway/mcui/internal/security"
 )
+
+const maxResponseBytes = 64 * 1024
 
 type Client struct {
 	masterURL, name, group, invite string
-	key                            ed25519.PrivateKey
-	http                           *http.Client
+	serverRoots                    *x509.CertPool
 	statePath                      string
-}
-type localState struct {
-	PrivateKey string `json:"private_key"`
-	NodeID     string `json:"node_id,omitempty"`
-	NodeToken  string `json:"node_token,omitempty"`
+	failures                       int
 }
 
-func New(masterURL, name, group, invite string) (*Client, error) {
-	u, e := url.Parse(masterURL)
-	if e != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname()))) {
-		return nil, errors.New("master must use HTTPS; HTTP is allowed only for loopback development")
+type localState struct {
+	PrivateKey        string `json:"private_key"`
+	NodeID            string `json:"node_id,omitempty"`
+	CertificatePEM    string `json:"certificate_pem,omitempty"`
+	CertificateSerial string `json:"certificate_serial,omitempty"`
+	EnrollmentID      string `json:"enrollment_request_id,omitempty"`
+	PendingKey        string `json:"pending_private_key,omitempty"`
+	PendingCSR        string `json:"pending_csr_pem,omitempty"`
+	RotationID        string `json:"rotation_request_id,omitempty"`
+}
+
+func New(masterURL, name, group, invite, serverCAPath string) (*Client, error) {
+	u, err := url.Parse(masterURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, errors.New("Master must use HTTPS with a valid host")
 	}
-	if name == "" || invite == "" {
-		return nil, errors.New("name and invite are required")
+	if name == "" {
+		return nil, errors.New("node name is required")
 	}
-	state := filepath.Join("/var/lib/mcui-agent", "identity.json")
+	if serverCAPath == "" {
+		return nil, errors.New("a pre-trusted Master CA file is required")
+	}
+	caPEM, err := os.ReadFile(serverCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("read Master CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("Master CA file contains no certificates")
+	}
+	statePath := filepath.Join("/var/lib/mcui-agent", "identity.json")
 	if p := os.Getenv("MCUI_AGENT_STATE"); p != "" {
-		state = p
+		statePath = p
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	c := &Client{masterURL: strings.TrimRight(masterURL, "/"), name: name, group: group, invite: invite, statePath: state, http: &http.Client{Timeout: 15 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	if e = c.loadOrCreate(); e != nil {
-		return nil, e
+	c := &Client{masterURL: strings.TrimRight(masterURL, "/"), name: name, group: group, invite: invite, serverRoots: roots, statePath: statePath}
+	state, err := c.loadOrCreate()
+	if err != nil {
+		return nil, err
+	}
+	if state.CertificatePEM == "" && invite == "" {
+		return nil, errors.New("a one-time enrollment invitation is required for an unregistered Agent")
+	}
+	if state.CertificatePEM != "" {
+		if _, err := parseClientCertificate(state.CertificatePEM, state.PrivateKey, state.NodeID); err != nil {
+			return nil, err
+		}
 	}
 	return c, nil
 }
-func isLoopback(host string) bool { return host == "localhost" || host == "127.0.0.1" || host == "::1" }
-func (c *Client) loadOrCreate() error {
-	b, e := os.ReadFile(c.statePath)
-	if e == nil {
-		if e = os.Chmod(c.statePath, 0600); e != nil {
-			return e
+
+func (c *Client) loadOrCreate() (localState, error) {
+	stateDir := filepath.Dir(c.statePath)
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return localState{}, err
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Lstat(stateDir)
+		if err != nil {
+			return localState{}, err
 		}
-		var s localState
-		if e = json.Unmarshal(b, &s); e != nil {
-			return e
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return localState{}, errors.New("Agent identity directory must be a real directory")
 		}
-		raw, e := base64.RawStdEncoding.DecodeString(s.PrivateKey)
-		if e != nil || len(raw) != ed25519.PrivateKeySize {
-			return errors.New("invalid agent identity")
+		if err := os.Chmod(stateDir, 0700); err != nil {
+			return localState{}, err
 		}
-		c.key = ed25519.PrivateKey(raw)
-		return nil
 	}
-	if !errors.Is(e, os.ErrNotExist) {
-		return e
+	info, statErr := os.Lstat(c.statePath)
+	if statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return localState{}, errors.New("Agent identity path must be a regular file")
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+			return localState{}, errors.New("Agent identity file permissions must exclude group and other access")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return localState{}, statErr
 	}
-	if e = os.MkdirAll(filepath.Dir(c.statePath), 0700); e != nil {
-		return e
+	b, err := os.ReadFile(c.statePath)
+	if err == nil {
+		var state localState
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
+		if err = dec.Decode(&state); err != nil {
+			return localState{}, err
+		}
+		var trailing any
+		if dec.Decode(&trailing) != io.EOF {
+			return localState{}, errors.New("invalid Agent identity file")
+		}
+		if _, err = decodePrivateKey(state.PrivateKey); err != nil {
+			return localState{}, errors.New("invalid Agent identity")
+		}
+		return state, nil
 	}
-	_, key, e := ed25519.GenerateKey(rand.Reader)
-	if e != nil {
-		return e
+	if !errors.Is(err, os.ErrNotExist) {
+		return localState{}, err
 	}
-	c.key = key
-	return c.save(localState{PrivateKey: base64.RawStdEncoding.EncodeToString(key)})
+	_, key, err := ed25519.GenerateKey(crand.Reader)
+	if err != nil {
+		return localState{}, err
+	}
+	state := localState{PrivateKey: base64.RawStdEncoding.EncodeToString(key)}
+	if err := c.save(state); err != nil {
+		return localState{}, err
+	}
+	return state, nil
 }
-func (c *Client) save(s localState) error {
-	if e := os.MkdirAll(filepath.Dir(c.statePath), 0700); e != nil {
-		return e
+
+func decodePrivateKey(encoded string) (ed25519.PrivateKey, error) {
+	raw, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil || len(raw) != ed25519.PrivateKeySize {
+		return nil, errors.New("invalid Ed25519 private key")
 	}
-	b, e := json.Marshal(s)
-	if e != nil {
-		return e
+	return ed25519.PrivateKey(raw), nil
+}
+
+func (c *Client) save(state localState) error {
+	if err := os.MkdirAll(filepath.Dir(c.statePath), 0700); err != nil {
+		return err
 	}
-	f, e := os.OpenFile(c.statePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if e != nil {
-		return e
+	b, err := json.Marshal(state)
+	if err != nil {
+		return err
 	}
-	if e = f.Chmod(0600); e == nil {
-		_, e = f.Write(b)
+	// The Windows branch supports local development; Linux uses temp-file replacement plus directory fsync.
+	if runtime.GOOS == "windows" {
+		f, err := os.OpenFile(c.statePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			return err
+		}
+		if err = f.Chmod(0600); err == nil {
+			_, err = f.Write(b)
+		}
+		if err == nil {
+			err = f.Sync()
+		}
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		return closeErr
 	}
-	if e == nil {
-		e = f.Sync()
+	f, err := os.CreateTemp(filepath.Dir(c.statePath), ".mcui-identity-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err = f.Chmod(0600); err == nil {
+		_, err = f.Write(b)
+	}
+	if err == nil {
+		err = f.Sync()
 	}
 	closeErr := f.Close()
-	if e != nil {
-		return e
+	if err != nil {
+		return err
 	}
-	return closeErr
-}
-func (c *Client) RunOnce() error {
-	if e := c.enrollIfNeeded(); e != nil {
-		return e
+	if closeErr != nil {
+		return closeErr
 	}
-	b, e := os.ReadFile(c.statePath)
-	if e != nil {
-		return e
+	if err = os.Rename(tmp, c.statePath); err != nil {
+		return err
 	}
-	var s localState
-	if e = json.Unmarshal(b, &s); e != nil {
-		return e
-	}
-	if s.NodeToken == "" || s.NodeID == "" {
-		return errors.New("incomplete agent identity")
-	}
-	req, e := http.NewRequest(http.MethodPost, c.masterURL+"/api/v1/agent/heartbeat", strings.NewReader(`{}`))
-	if e != nil {
-		return e
-	}
-	req.Header.Set("Authorization", "Bearer "+s.NodeToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, e := c.http.Do(req)
-	if e != nil {
-		return e
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return errors.New("heartbeat rejected")
+	if dir, openErr := os.Open(filepath.Dir(c.statePath)); openErr == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return nil
 }
-func (c *Client) enrollIfNeeded() error {
-	b, e := os.ReadFile(c.statePath)
-	if e != nil {
-		return e
+
+func privateKeyPEM(key ed25519.PrivateKey) ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, err
 	}
-	var s localState
-	if e = json.Unmarshal(b, &s); e != nil {
-		return e
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}
+
+func parseClientCertificate(certificatePEM, privateKeyEncoded, nodeID string) (tls.Certificate, error) {
+	key, err := decodePrivateKey(privateKeyEncoded)
+	if err != nil {
+		return tls.Certificate{}, err
 	}
-	if s.NodeID != "" && s.NodeToken != "" {
-		return nil
+	keyPEM, err := privateKeyPEM(key)
+	if err != nil {
+		return tls.Certificate{}, err
 	}
-	pub := c.key.Public().(ed25519.PublicKey)
-	body, _ := json.Marshal(map[string]string{"invite": c.invite, "name": c.name, "public_key": base64.StdEncoding.EncodeToString(pub)})
-	req, e := http.NewRequest(http.MethodPost, c.masterURL+"/api/v1/agent/enroll", strings.NewReader(string(body)))
-	if e != nil {
-		return e
+	cert, err := tls.X509KeyPair([]byte(certificatePEM), keyPEM)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("invalid Agent certificate: %w", err)
+	}
+	if len(cert.Certificate) == 0 {
+		return tls.Certificate{}, errors.New("Agent certificate is empty")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	cert.Leaf = leaf
+	certID, err := security.NodeIDFromCertificate(leaf)
+	if err != nil || certID != nodeID {
+		return tls.Certificate{}, errors.New("Agent certificate identity does not match local state")
+	}
+	return cert, nil
+}
+
+func (c *Client) httpClient(state localState) (*http.Client, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: c.serverRoots}
+	if state.CertificatePEM != "" {
+		cert, err := parseClientCertificate(state.CertificatePEM, state.PrivateKey, state.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	return &http.Client{Timeout: 15 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, nil
+}
+
+func (c *Client) post(state localState, path string, body any) ([]byte, int, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, 0, err
+	}
+	client, err := c.httpClient(state)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.masterURL+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, e := c.http.Do(req)
-	if e != nil {
-		return e
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 201 {
-		return errors.New("registration rejected")
+	response, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if len(response) > maxResponseBytes {
+		return nil, resp.StatusCode, errors.New("Master response too large")
+	}
+	return response, resp.StatusCode, nil
+}
+
+func (c *Client) RunOnce() error {
+	err := c.runOnce()
+	if err != nil {
+		c.failures++
+	} else {
+		c.failures = 0
+	}
+	return err
+}
+
+func (c *Client) runOnce() error {
+	state, err := c.loadOrCreate()
+	if err != nil {
+		return err
+	}
+	if state.CertificatePEM == "" {
+		state, err = c.enroll(state)
+		if err != nil {
+			return err
+		}
+	}
+	cert, err := parseClientCertificate(state.CertificatePEM, state.PrivateKey, state.NodeID)
+	if err != nil {
+		return err
+	}
+	if time.Until(cert.Leaf.NotAfter) <= 7*24*time.Hour {
+		state, err = c.rotate(state)
+		if err != nil {
+			return err
+		}
+	}
+	_, status, err := c.post(state, "/api/v1/agent/heartbeat", map[string]string{})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("heartbeat rejected (HTTP %d)", status)
+	}
+	return nil
+}
+
+func (c *Client) enroll(state localState) (localState, error) {
+	if c.invite == "" {
+		return state, errors.New("enrollment invitation required")
+	}
+	if state.EnrollmentID == "" {
+		requestID, err := randomRequestID()
+		if err != nil {
+			return state, err
+		}
+		state.EnrollmentID = requestID
+		if err = c.save(state); err != nil {
+			return state, err
+		}
+	}
+	key, err := decodePrivateKey(state.PrivateKey)
+	if err != nil {
+		return state, err
+	}
+	csr, err := security.NewCSR(key)
+	if err != nil {
+		return state, err
+	}
+	body := map[string]string{
+		"invite": c.invite, "name": c.name, "request_id": state.EnrollmentID,
+		"csr_pem": base64.RawStdEncoding.EncodeToString(csr),
+	}
+	response, status, err := c.post(state, "/api/v1/agent/enroll", body)
+	if err != nil {
+		return state, err
+	}
+	if status != http.StatusCreated {
+		return state, fmt.Errorf("registration rejected (HTTP %d)", status)
 	}
 	var result struct {
-		NodeID    string `json:"node_id"`
-		NodeToken string `json:"node_token"`
+		NodeID         string `json:"node_id"`
+		CertificatePEM string `json:"certificate_pem"`
+		Serial         string `json:"serial"`
 	}
-	if e = json.NewDecoder(resp.Body).Decode(&result); e != nil {
-		return e
+	if err := json.Unmarshal(response, &result); err != nil || result.NodeID == "" || result.CertificatePEM == "" || result.Serial == "" {
+		return state, errors.New("invalid registration response")
 	}
-	if result.NodeID == "" || result.NodeToken == "" {
-		return errors.New("invalid registration response")
+	cert, err := parseClientCertificate(result.CertificatePEM, state.PrivateKey, result.NodeID)
+	if err != nil || cert.Leaf.SerialNumber.String() != result.Serial || !cert.Leaf.NotAfter.After(time.Now()) {
+		return state, errors.New("Master returned an invalid node certificate")
 	}
-	s.NodeID = result.NodeID
-	s.NodeToken = result.NodeToken
-	return c.save(s)
+	state.NodeID, state.CertificatePEM, state.CertificateSerial = result.NodeID, result.CertificatePEM, result.Serial
+	if err := c.save(state); err != nil {
+		return state, err
+	}
+	return state, nil
 }
-func (c *Client) NextDelay() time.Duration { return 15 * time.Second }
+
+func randomRequestID() (string, error) {
+	b := make([]byte, 24)
+	if _, err := crand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func (c *Client) rotate(state localState) (localState, error) {
+	if state.PendingKey == "" {
+		_, key, err := ed25519.GenerateKey(crand.Reader)
+		if err != nil {
+			return state, err
+		}
+		csr, err := security.NewCSR(key)
+		if err != nil {
+			return state, err
+		}
+		requestID, err := randomRequestID()
+		if err != nil {
+			return state, err
+		}
+		state.PendingKey = base64.RawStdEncoding.EncodeToString(key)
+		state.PendingCSR = base64.RawStdEncoding.EncodeToString(csr)
+		state.RotationID = requestID
+		if err := c.save(state); err != nil {
+			return state, err
+		}
+	}
+	csr, err := base64.RawStdEncoding.DecodeString(state.PendingCSR)
+	if err != nil {
+		return state, errors.New("invalid pending certificate request")
+	}
+	response, status, err := c.post(state, "/api/v1/agent/cert/rotate", map[string]string{
+		"request_id": state.RotationID, "csr_pem": base64.RawStdEncoding.EncodeToString(csr),
+	})
+	if err != nil {
+		return state, err
+	}
+	if status != http.StatusOK {
+		return state, fmt.Errorf("certificate rotation rejected (HTTP %d)", status)
+	}
+	var result struct {
+		CertificatePEM string `json:"certificate_pem"`
+		Serial         string `json:"serial"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil || result.CertificatePEM == "" || result.Serial == "" {
+		return state, errors.New("invalid certificate rotation response")
+	}
+	newCert, err := parseClientCertificate(result.CertificatePEM, state.PendingKey, state.NodeID)
+	if err != nil || newCert.Leaf.SerialNumber.String() != result.Serial || !newCert.Leaf.NotAfter.After(time.Now()) {
+		return state, errors.New("Master returned an invalid rotated certificate")
+	}
+	state.PrivateKey, state.CertificatePEM, state.CertificateSerial = state.PendingKey, result.CertificatePEM, result.Serial
+	state.PendingKey, state.PendingCSR, state.RotationID = "", "", ""
+	if err := c.save(state); err != nil {
+		return state, err
+	}
+	return state, nil
+}
+
+func (c *Client) NextDelay() time.Duration {
+	base := 15 * time.Second
+	if c.failures > 0 {
+		shift := c.failures - 1
+		if shift > 5 {
+			shift = 5
+		}
+		base *= time.Duration(1 << shift)
+		if base > 5*time.Minute {
+			base = 5 * time.Minute
+		}
+	}
+	jitter := time.Duration(mrand.Int64N(int64(base/5)+1)) - base/10
+	return base + jitter
+}

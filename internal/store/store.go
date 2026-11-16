@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -11,142 +13,391 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
+const schemaVersion = 1
+
 type State struct {
-	Admins   map[string]Admin   `json:"admins"`
-	Invites  map[string]Invite  `json:"invites"`
-	Nodes    map[string]Node    `json:"nodes"`
-	Sessions map[string]Session `json:"sessions"`
-	Audits   []Audit            `json:"audits"`
+	Admins      map[string]Admin      `json:"admins"`
+	Invites     map[string]Invite     `json:"invites"`
+	Nodes       map[string]Node       `json:"nodes"`
+	Sessions    map[string]Session    `json:"sessions"`
+	Enrollments map[string]Enrollment `json:"enrollments"`
+	Audits      []Audit               `json:"audits"`
 }
+
 type Admin struct {
-	ID           string `json:"id"`
-	Username     string `json:"username"`
-	PasswordHash string `json:"password_hash"`
-	TOTPSecret   string `json:"totp_secret"`
-	Role         string `json:"role"`
-	Disabled     bool   `json:"disabled"`
+	ID           string   `json:"id"`
+	Username     string   `json:"username"`
+	PasswordHash string   `json:"password_hash"`
+	TOTPSecret   string   `json:"totp_secret"`
+	Role         string   `json:"role"`
+	NodeIDs      []string `json:"node_ids,omitempty"`
+	NodeGroups   []string `json:"node_groups,omitempty"`
+	AllNodes     bool     `json:"all_nodes,omitempty"`
+	Disabled     bool     `json:"disabled"`
 }
+
 type Invite struct {
 	Hash      string `json:"hash"`
 	NodeGroup string `json:"node_group"`
 	ExpiresAt int64  `json:"expires_at"`
 	Used      bool   `json:"used"`
 }
+
 type Node struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Group         string `json:"group"`
-	PublicKey     string `json:"public_key"`
-	TokenHash     string `json:"token_hash,omitempty"`
-	Certificate   string `json:"certificate,omitempty"`
-	LastSeen      int64  `json:"last_seen"`
-	Disabled      bool   `json:"disabled"`
-	RevokedSerial string `json:"revoked_serial,omitempty"`
+	ID                string                      `json:"id"`
+	Name              string                      `json:"name"`
+	Group             string                      `json:"group"`
+	PublicKey         string                      `json:"public_key"`
+	Certificates      map[string]NodeCertificate  `json:"certificates,omitempty"`
+	CurrentSerial     string                      `json:"current_serial,omitempty"`
+	CertRequests      map[string]CertificateIssue `json:"cert_requests,omitempty"`
+	LastSeen          int64                       `json:"last_seen"`
+	Disabled          bool                        `json:"disabled"`
+	NeedsReenrollment bool                        `json:"needs_reenrollment,omitempty"`
 }
+
 type Session struct {
 	ID        string `json:"id"`
 	AdminID   string `json:"admin_id"`
 	ExpiresAt int64  `json:"expires_at"`
 	CreatedAt int64  `json:"created_at"`
+	LastSeen  int64  `json:"last_seen"`
+	MFAAt     int64  `json:"mfa_at"`
+	CSRFToken string `json:"csrf_token"`
 }
+
 type Audit struct {
-	At       int64  `json:"at"`
-	Actor    string `json:"actor"`
-	Action   string `json:"action"`
-	Resource string `json:"resource"`
-	Outcome  string `json:"outcome"`
+	At           int64  `json:"at"`
+	Actor        string `json:"actor"`
+	Action       string `json:"action"`
+	ResourceType string `json:"resource_type,omitempty"`
+	Resource     string `json:"resource"`
+	Outcome      string `json:"outcome"`
 }
+
+type NodeCertificate struct {
+	NotAfter   int64 `json:"not_after"`
+	ValidUntil int64 `json:"valid_until,omitempty"`
+	Revoked    bool  `json:"revoked,omitempty"`
+}
+
+type CertificateIssue struct {
+	CSRHash        string `json:"csr_hash"`
+	CertificatePEM string `json:"certificate_pem"`
+	Serial         string `json:"serial"`
+	NotAfter       int64  `json:"not_after"`
+}
+
+type Enrollment struct {
+	RequestID      string `json:"request_id"`
+	RequestHash    string `json:"request_hash"`
+	InviteHash     string `json:"invite_hash"`
+	CSRHash        string `json:"csr_hash"`
+	NodeID         string `json:"node_id"`
+	CertificatePEM string `json:"certificate_pem"`
+	Serial         string `json:"serial"`
+	NotAfter       int64  `json:"not_after"`
+	CreatedAt      int64  `json:"created_at"`
+}
+
 type Store struct {
 	mu sync.RWMutex
 	db *sql.DB
 }
 
+type executor interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 func Open(path string) (*Store, error) {
-	db, e := sql.Open("sqlite", path)
-	if e != nil {
-		return nil, e
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	for _, q := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), payload BLOB NOT NULL)", "INSERT OR IGNORE INTO app_state(id,payload) VALUES(1,'{}')"} {
-		if _, e = db.Exec(q); e != nil {
-			db.Close()
-			return nil, e
+	for _, query := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
+		if _, err := db.Exec(query); err != nil {
+			_ = db.Close()
+			return nil, err
 		}
 	}
-	s := &Store{db: db}
-	if e = s.Update(func(st *State) error { return nil }); e != nil {
-		db.Close()
-		return nil, e
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
-	return s, nil
+	return &Store{db: db}, nil
 }
-func emptyState() State {
-	return State{Admins: map[string]Admin{}, Invites: map[string]Invite{}, Nodes: map[string]Node{}, Sessions: map[string]Session{}, Audits: []Audit{}}
-}
-func decode(b []byte) (State, error) {
-	s := emptyState()
-	if string(b) == "{}" {
-		return s, nil
-	}
-	if e := json.Unmarshal(b, &s); e != nil {
-		return State{}, e
-	}
-	if s.Admins == nil {
-		s.Admins = map[string]Admin{}
-	}
-	if s.Invites == nil {
-		s.Invites = map[string]Invite{}
-	}
-	if s.Nodes == nil {
-		s.Nodes = map[string]Node{}
-	}
-	if s.Sessions == nil {
-		s.Sessions = map[string]Session{}
-	}
-	if s.Audits == nil {
-		s.Audits = []Audit{}
-	}
-	return s, nil
-}
-func (s *Store) Update(fn func(*State) error) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, e := s.db.Begin()
-	if e != nil {
-		return e
+
+func migrate(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
 	}
 	defer tx.Rollback()
-	var b []byte
-	if e = tx.QueryRow("SELECT payload FROM app_state WHERE id=1").Scan(&b); e != nil {
-		return e
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		return err
 	}
-	st, e := decode(b)
-	if e != nil {
-		return e
+	var current int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
+		return err
 	}
-	if e = fn(&st); e != nil {
-		return e
+	if current > schemaVersion {
+		return fmt.Errorf("database schema version %d is newer than this binary supports (%d)", current, schemaVersion)
 	}
-	b, e = json.Marshal(st)
-	if e != nil {
-		return e
-	}
-	if _, e = tx.Exec("UPDATE app_state SET payload=? WHERE id=1", b); e != nil {
-		return e
+	if current == 0 {
+		for _, query := range schemaV1 {
+			if _, err := tx.Exec(query); err != nil {
+				return err
+			}
+		}
+		state := emptyState()
+		var legacyExists int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='app_state'`).Scan(&legacyExists); err != nil {
+			return err
+		}
+		if legacyExists == 1 {
+			var payload []byte
+			if err := tx.QueryRow(`SELECT payload FROM app_state WHERE id=1`).Scan(&payload); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			} else if err == nil {
+				state, err = decode(payload)
+				if err != nil {
+					return fmt.Errorf("migrate legacy database state: %w", err)
+				}
+			}
+		}
+		if err := persistState(tx, state); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_migrations(version) VALUES(?)`, schemaVersion); err != nil {
+			return err
+		}
+		if legacyExists == 1 {
+			if _, err := tx.Exec(`DROP TABLE app_state`); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }
+
+var schemaV1 = []string{
+	`CREATE TABLE IF NOT EXISTS admins (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, role TEXT NOT NULL, disabled INTEGER NOT NULL, payload BLOB NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS invites (token_hash TEXT PRIMARY KEY, node_group TEXT NOT NULL, expires_at INTEGER NOT NULL, used INTEGER NOT NULL, payload BLOB NOT NULL)`,
+	`CREATE INDEX IF NOT EXISTS invites_expiry_idx ON invites(used, expires_at)`,
+	`CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, node_group TEXT NOT NULL, last_seen INTEGER NOT NULL, disabled INTEGER NOT NULL, payload BLOB NOT NULL)`,
+	`CREATE INDEX IF NOT EXISTS nodes_group_seen_idx ON nodes(node_group, last_seen)`,
+	`CREATE TABLE IF NOT EXISTS sessions (id_hash TEXT PRIMARY KEY, admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL, expires_at INTEGER NOT NULL, payload BLOB NOT NULL)`,
+	`CREATE INDEX IF NOT EXISTS sessions_admin_idx ON sessions(admin_id, expires_at)`,
+	`CREATE TABLE IF NOT EXISTS enrollments (request_id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES nodes(id), created_at INTEGER NOT NULL, payload BLOB NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS audit_logs (event_seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, resource_type TEXT NOT NULL, resource TEXT NOT NULL, action TEXT NOT NULL, outcome TEXT NOT NULL, payload BLOB NOT NULL)`,
+	`CREATE INDEX IF NOT EXISTS audit_resource_idx ON audit_logs(resource_type, resource, at)`,
+}
+
+func emptyState() State {
+	return State{Admins: map[string]Admin{}, Invites: map[string]Invite{}, Nodes: map[string]Node{}, Sessions: map[string]Session{}, Enrollments: map[string]Enrollment{}, Audits: []Audit{}}
+}
+
+func decode(payload []byte) (State, error) {
+	state := emptyState()
+	if string(payload) == "{}" || len(payload) == 0 {
+		return state, nil
+	}
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return State{}, err
+	}
+	if state.Admins == nil {
+		state.Admins = map[string]Admin{}
+	}
+	if state.Invites == nil {
+		state.Invites = map[string]Invite{}
+	}
+	if state.Nodes == nil {
+		state.Nodes = map[string]Node{}
+	}
+	if state.Sessions == nil {
+		state.Sessions = map[string]Session{}
+	}
+	if state.Enrollments == nil {
+		state.Enrollments = map[string]Enrollment{}
+	}
+	if state.Audits == nil {
+		state.Audits = []Audit{}
+	}
+	for id, node := range state.Nodes {
+		if len(node.Certificates) == 0 || node.CurrentSerial == "" {
+			node.NeedsReenrollment = true
+			state.Nodes[id] = node
+		}
+	}
+	return state, nil
+}
+
+func loadState(q executor) (State, error) {
+	state := emptyState()
+	if err := loadMap(q, `SELECT id, payload FROM admins ORDER BY id`, state.Admins); err != nil {
+		return State{}, err
+	}
+	if err := loadMap(q, `SELECT token_hash, payload FROM invites ORDER BY token_hash`, state.Invites); err != nil {
+		return State{}, err
+	}
+	if err := loadMap(q, `SELECT id, payload FROM nodes ORDER BY id`, state.Nodes); err != nil {
+		return State{}, err
+	}
+	if err := loadMap(q, `SELECT id_hash, payload FROM sessions ORDER BY id_hash`, state.Sessions); err != nil {
+		return State{}, err
+	}
+	if err := loadMap(q, `SELECT request_id, payload FROM enrollments ORDER BY request_id`, state.Enrollments); err != nil {
+		return State{}, err
+	}
+	rows, err := q.Query(`SELECT payload FROM audit_logs ORDER BY event_seq`)
+	if err != nil {
+		return State{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload []byte
+		var event Audit
+		if err := rows.Scan(&payload); err != nil {
+			return State{}, err
+		}
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return State{}, err
+		}
+		state.Audits = append(state.Audits, event)
+	}
+	return state, rows.Err()
+}
+
+func loadMap[T any](q executor, query string, destination map[string]T) error {
+	rows, err := q.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var payload []byte
+		var value T
+		if err := rows.Scan(&key, &payload); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(payload, &value); err != nil {
+			return err
+		}
+		destination[key] = value
+	}
+	return rows.Err()
+}
+
+func persistState(tx *sql.Tx, state State) error {
+	for _, table := range []string{"sessions", "enrollments", "invites", "nodes", "admins", "audit_logs"} {
+		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.Admins) {
+		value := state.Admins[id]
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO admins(id, username, role, disabled, payload) VALUES(?, ?, ?, ?, ?)`, id, value.Username, value.Role, value.Disabled, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.Invites) {
+		value := state.Invites[id]
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO invites(token_hash, node_group, expires_at, used, payload) VALUES(?, ?, ?, ?, ?)`, id, value.NodeGroup, value.ExpiresAt, value.Used, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.Nodes) {
+		value := state.Nodes[id]
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO nodes(id, node_group, last_seen, disabled, payload) VALUES(?, ?, ?, ?, ?)`, id, value.Group, value.LastSeen, value.Disabled, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.Sessions) {
+		value := state.Sessions[id]
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO sessions(id_hash, admin_id, created_at, last_seen, expires_at, payload) VALUES(?, ?, ?, ?, ?, ?)`, id, value.AdminID, value.CreatedAt, value.LastSeen, value.ExpiresAt, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.Enrollments) {
+		value := state.Enrollments[id]
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO enrollments(request_id, node_id, created_at, payload) VALUES(?, ?, ?, ?)`, id, value.NodeID, value.CreatedAt, payload); err != nil {
+			return err
+		}
+	}
+	for _, value := range state.Audits {
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO audit_logs(at, actor, resource_type, resource, action, outcome, payload) VALUES(?, ?, ?, ?, ?, ?, ?)`, value.At, value.Actor, value.ResourceType, value.Resource, value.Action, value.Outcome, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sortedKeys[T any](items map[string]T) []string {
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (s *Store) Update(fn func(*State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	state, err := loadState(tx)
+	if err != nil {
+		return err
+	}
+	if err := fn(&state); err != nil {
+		return err
+	}
+	if err := persistState(tx, state); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) View(fn func(State) error) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var b []byte
-	if e := s.db.QueryRow("SELECT payload FROM app_state WHERE id=1").Scan(&b); e != nil {
-		return e
+	state, err := loadState(s.db)
+	if err != nil {
+		return err
 	}
-	st, e := decode(b)
-	if e != nil {
-		return e
-	}
-	return fn(st)
+	return fn(state)
 }
+
 func (s *Store) Close() error { return s.db.Close() }

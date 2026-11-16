@@ -1,6 +1,6 @@
 # 威胁模型（阶段 0）
 
-> 状态：设计与验收提案，待安全负责人及项目负责人人工评审；下列均为要求和预期结果，不表示已实现、已实测或已审计。范围和阶段以 [分阶段流程](./phased-development-workflow.md) 为准，权限规则见 [panel-authz.md](./panel-authz.md)。
+> 状态：设计与验收提案，待安全负责人及项目负责人人工评审；下列是要求和预期结果，不表示整体风险控制已经实现、实测或审计。阶段 0/1 的实现边界见[实施状态](./phase-0-1-implementation.md)。阶段范围以[分阶段流程](./phased-development-workflow.md)为准，权限规则见[panel-authz.md](./panel-authz.md)。
 
 ## 1. 资产、攻击者、边界
 

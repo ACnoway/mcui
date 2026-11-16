@@ -1,38 +1,54 @@
-# MCUI Phase 1
+# MCUI Master and empty Agent
 
-A development-first Master + empty Agent baseline. The Agent package contains no proxy Core.
+MCUI is a multi-Core control plane in staged development. This repository currently contains the Master panel, a Core-free Agent identity client, and Phase 0 protocol schema/vector work. It does not contain task delivery, a Helper, Core installation, or Core configuration operations.
 
-## Development setup
+## Current stage
 
-Go 1.24.4 is selected for the initial project baseline. The web package manager is pnpm 12.15.0; dependency versions are pinned in `web/package.json` and `web/pnpm-lock.yaml`.
+Phase 0 design preparation and Phase 1 implementation are in progress. The work and its evidence are tracked in [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Human security review, the supported platform/Core matrix, backup recovery, and clean Linux deployment evidence remain release gates.
+
+## Development checks
+
+The baseline selects Go 1.24.4 and pnpm 12.15.0; see [development baseline](docs/development-baseline.md). From the repository root:
 
 ```sh
+go vet ./...
+go test ./...
+node scripts/verify-protocol-vectors.mjs
 cd web
 pnpm install --frozen-lockfile
 pnpm build
-cd ..
-go test ./...
+```
+
+## Local panel mode
+
+HTTP mode is loopback-only and for panel development. It cannot enroll Agents. Build the UI, then run:
+
+```sh
 go run ./cmd/panel -listen 127.0.0.1:8080 -db ./data/mcui.db -web ./web/dist
 ```
 
-Set `MCUI_BOOTSTRAP_TOKEN` to a one-time local bootstrap secret before starting the panel. Initialize the first administrator from `/` with a password (12+ characters) and a Base32 TOTP secret. The secret must be provisioned using a trusted local channel; do not use a public HTTP network for bootstrap or login.
+Provide a one-time `MCUI_BOOTSTRAP_TOKEN` through a trusted local mechanism, then initialize the first administrator in the panel with a 12+ character password and a Base32 TOTP secret. The bootstrap account is a global `security_admin`; scoped administrator provisioning is not yet available in the UI.
 
-Create a node invitation in the panel and run the Agent with `-master http://127.0.0.1:8080 -name <name> -group <group> -invite <token>`. The Agent generates an Ed25519 identity locally, consumes the invitation once, saves the returned bearer token with restrictive file permissions, then sends heartbeats.
+## TLS panel and Agent enrollment
 
-## Security and scope limitations
+Agent enrollment requires a TLS-enabled Master, an operator-provisioned Master server certificate, a pre-trusted CA file on the Agent, and a separate node-client CA. Private key files must be readable only by the Master account. See [Phase 1 operations](docs/phase-1-operations.md) for the exact flags and trust responsibilities.
 
-- The current HTTP transport is development-only and defaults to loopback. Do not bind to a public interface or use outside a trusted local environment. HTTP does not protect invitation, password, TOTP, cookie, or node bearer tokens in transit.
-- mTLS enrollment, certificate rotation/revocation, MFA rate limiting, full role/resource-scope authorization, persistent task delivery, database backup/recovery drills, and security acceptance tests remain out of scope for this initial scaffold and must be completed before production use.
-- Sessions are server-side and revocable, cookies are HttpOnly/SameSite and Secure when HTTPS is used. Browser persistence is not used for credentials.
-- SQLite currently stores a single serialized state document in one transaction. A normalized schema/migration set is still required before using this as a production database.
-- The bootstrap token must be high entropy and is disabled when unset. Rotate/remove it after the first administrator is created.
+The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-master-ca.pem>`, and on first registration `-invite-file <restricted-file>`. It generates an Ed25519 private key locally, submits a CSR, and persists its client certificate and key under `/var/lib/mcui-agent/identity.json` (or the `MCUI_AGENT_STATE` override). It authenticates heartbeats and certificate rotation with mTLS; it has no bearer-token runtime mode.
+
+## Security boundary
+
+- The Master exposes login, bootstrap, scoped node inventory/detail, audit, invitation, disable, mTLS enrollment, heartbeat, and certificate rotation endpoints. No task polling, task signing, Helper, or Core operation route exists.
+- TLS mode uses TLS 1.3 and validates Agent client certificates against the configured node CA. Configure it directly; reverse-proxy TLS termination is not supported by this baseline.
+- Existing nodes from the legacy bearer-token schema are marked for re-enrollment during migration. Legacy bearer-token hashes are not carried into the normalized schema.
+- SQLite entities are stored in versioned tables. The migration is covered by code tests; a backup and disaster-recovery procedure has not been implemented or rehearsed.
+- The node CA private key is loaded by the Master to issue/rotate node certificates. Keep it separate from the Master TLS key and from all future task/release signing keys. Offline key custody and disaster recovery remain design decisions.
+- This is not production release approval. See [Phase 0/1 status](docs/phase-0-1-implementation.md), the [phased workflow](docs/phased-development-workflow.md), and the design documents for open gates.
 
 ## Components
 
-- `cmd/panel`: Master web/API server
-- `cmd/agent`: non-root Agent enrollment and heartbeat client
-- `internal/store`: SQLite persistence boundary
-- `internal/master`: login, MFA, sessions, one-time node invites, read-only inventory/audit, disable endpoint
-- `web`: Vue dashboard
-
-No Core install, configuration, or other node side-effect operation is exposed.
+- `cmd/panel`: TLS-capable Master panel/API server; loopback-only development HTTP mode
+- `cmd/agent`: Core-free Agent enrollment, mTLS heartbeat, and certificate rotation client
+- `internal/store`: versioned SQLite schema and legacy-state migration
+- `internal/master`: bootstrap, MFA sessions, scoped reads, invites, disable, and mTLS identity endpoints
+- `internal/protocol`: Phase 0 signed-message schema validation and canonicalization; not connected to runtime task execution
+- `web`: Vue administration panel
