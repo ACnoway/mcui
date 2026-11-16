@@ -1,0 +1,38 @@
+[Unit]
+Description=MCUI empty Agent identity heartbeat
+Documentation=https://github.com/ACnoway/mcui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mcui-agent
+Group=mcui-agent
+UMask=0077
+EnvironmentFile=/etc/mcui-agent/agent.env
+StateDirectory=mcui-agent
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/mcui-agent -master ${MCUI_MASTER_URL} -name ${MCUI_AGENT_NAME} -group ${MCUI_AGENT_GROUP} -server-ca ${MCUI_SERVER_CA} -invite-file ${MCUI_INVITE_FILE}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/mcui-agent
+
+[Install]
+WantedBy=multi-user.target

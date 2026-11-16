@@ -3,6 +3,7 @@ package master
 import (
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base32"
 	"fmt"
 	"time"
@@ -36,7 +37,7 @@ func validTOTP(secret, code string, now time.Time) bool {
 		mac := hmacSHA1(key, msg)
 		off := mac[len(mac)-1] & 15
 		n := ((uint32(mac[off]) & 127) << 24) | (uint32(mac[off+1]) << 16) | (uint32(mac[off+2]) << 8) | uint32(mac[off+3])
-		if fmtCode(n%1000000) == code {
+		if subtle.ConstantTimeCompare([]byte(fmtCode(n%1000000)), []byte(code)) == 1 {
 			return true
 		}
 	}
