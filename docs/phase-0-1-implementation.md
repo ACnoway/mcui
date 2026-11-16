@@ -33,6 +33,6 @@
 |---|---|---|---|
 | `0f7ca50` / 2026-11-16 | 本地 Windows，Go 1.26.4，Node 24.22.1，pnpm 11.25.0 | `gofmt -l cmd internal`、`go vet ./...`、`go test ./...`、`go build ./...`、协议向量 | 历史记录：当时格式/分析/构建/测试通过；4 正例、8 反例通过。该环境版本不符合当前锁定工具链，且未执行前端构建。 |
 | `bf49200` / 2026-11-16 | SSH `ro` 的 `/root/mcui`，Linux amd64，Go 1.24.4、Node 26.12.1、pnpm 12.15.0 | `bash scripts/check-static.sh` | 历史记录：完整静态脚本通过，含冻结依赖安装和前端生产构建；未包含 Debian 干净 VM、systemd 行为/arm64 实机、独立审查或灾备演练。 |
-| 本次分支提交待定 | SSH `ro` 的 `/root/mcui` | 待推送后执行静态脚本、systemd unit 语法校验 | 结果将在完成远端执行后补记。 |
+| `9283224` / 2026-11-16 | SSH `ro` 的 `/root/mcui`，Linux 6.12.107 amd64、systemd 257.13-1~deb13u1、Go 1.27.4、Node 26.13.1、npm 11.20.0、pnpm 12.17.0 | `bash scripts/check-static.sh`；`systemd-analyze verify` | 通过：Go 格式/vet/build/test、Linux amd64/arm64 交叉构建、4 正例/9 反例向量、冻结 pnpm 安装、Vue 类型检查和 Vite 构建。两个 unit 使用临时 alternate root 与实际编译的 panel/agent 可执行文件校验通过；未安装或启动服务。 |
 
-未执行或失败的检查不计为通过。本文记录不构成阶段 0/1 正式签核，也不授权阶段 2 运行时代码。
+远端结果是 Linux amd64 主机上的交叉构建和 unit 语法/装载校验，不等于 Debian 13.7 amd64/arm64 干净 VM 安装、systemd 沙箱行为或 arm64 实机验证。未执行或失败的检查不计为通过。本文记录不构成阶段 0/1 正式签核，也不授权阶段 2 运行时代码。
