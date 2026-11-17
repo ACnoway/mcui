@@ -8,10 +8,12 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/store"
+	"github.com/ACnoway/mcui/internal/taskcontrol"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
 	"github.com/ACnoway/mcui/internal/tasksigner"
 )
@@ -30,19 +32,39 @@ type TaskRuntime struct {
 		tasksigner.SignStatus
 		tasksigner.ControlSigner
 	}
-	KeyID     string
-	PublicKey ed25519.PublicKey
-	Now       func() time.Time
+	KeyID      string
+	PublicKey  ed25519.PublicKey
+	Now        func() time.Time
+	TrustedNow func() (time.Time, error)
 }
 
 func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
-	if s == nil || runtime.Store == nil || runtime.Signer == nil || runtime.KeyID == "" || len(runtime.PublicKey) != ed25519.PublicKeySize || runtime.Now == nil {
+	if s == nil || runtime.Store == nil || runtime.Signer == nil || runtime.KeyID == "" || len(runtime.PublicKey) != ed25519.PublicKeySize || (runtime.Now == nil && runtime.TrustedNow == nil) {
 		return errors.New("incomplete task runtime configuration")
 	}
 	copy := runtime
 	copy.PublicKey = append(ed25519.PublicKey(nil), runtime.PublicKey...)
 	s.taskRuntime = &copy
 	return nil
+}
+
+func (runtime *TaskRuntime) currentTime() (time.Time, error) {
+	if runtime == nil {
+		return time.Time{}, errors.New("task runtime unavailable")
+	}
+	var now time.Time
+	var err error
+	if runtime.TrustedNow != nil {
+		now, err = runtime.TrustedNow()
+	} else if runtime.Now != nil {
+		now = runtime.Now()
+	} else {
+		err = errors.New("task runtime clock unavailable")
+	}
+	if err != nil || now.IsZero() {
+		return time.Time{}, errors.New("trusted task clock unavailable")
+	}
+	return now.UTC(), nil
 }
 
 type statusTaskRequest struct {
@@ -165,7 +187,7 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if existing, existingErr := runtime.Store.GetRecord(in.RequestID); existingErr == nil {
 		var envelope statusTaskEnvelope
-		if existing.NodeID != node.ID || protocol.VerifyV2Task(existing.Raw, runtime.PublicKey) != nil || json.Unmarshal(existing.Raw, &envelope) != nil || envelope.NodeID != node.ID || envelope.TaskID != in.RequestID || envelope.Operation != "core.status" || envelope.Payload.Core != in.Core {
+		if existing.NodeID != node.ID || protocol.VerifyV2Task(existing.Raw, runtime.PublicKey) != nil || json.Unmarshal(existing.Raw, &envelope) != nil || envelope.NodeID != node.ID || envelope.TaskID != in.RequestID || envelope.Operation != "core.status" || envelope.Payload.Core != in.Core || !s.hasTaskAuthorization(in.RequestID, ctx.Admin.ID, node.ID, in.Core) {
 			http.Error(w, "task request conflicts with an earlier request", http.StatusConflict)
 			return
 		}
@@ -175,11 +197,12 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task history unavailable", http.StatusInternalServerError)
 		return
 	}
-	now := runtime.Now().UTC().Truncate(time.Second)
-	if now.IsZero() {
+	now, timeErr := runtime.currentTime()
+	if timeErr != nil {
 		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	now = now.Truncate(time.Second)
 	// Persist authorization and its audit before creating a deliverable task.
 	// A failed signing call therefore cannot leave an entirely unaudited queue item.
 	if err := s.store.Update(func(st *store.State) error {
@@ -188,12 +211,29 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 		if !adminExists || current.Disabled || (current.Role != "security_admin" && current.Role != "operator") || !nodeExists || currentNode.Disabled || !canQueryCoreStatus(current, currentNode) {
 			return errors.New("task authorization changed")
 		}
+		authorized := false
 		for _, event := range st.Audits {
-			if event.Action == "task.status.authorize" && event.Resource == in.RequestID {
-				return errors.New("task request ID was already used")
+			if event.ResourceType != "task" || event.Resource != in.RequestID {
+				continue
+			}
+			if event.Action == "task.status.issue" && event.Outcome == "failed" {
+				return errors.New("task request ID has a recorded signing failure")
+			}
+			if event.Action == "task.status.issue" && (event.Outcome == "issued" || event.Outcome == "issued-recovered") {
+				return errors.New("task request ID has an issuance audit but no task record")
+			}
+			if event.Action == "task.status.authorize" {
+				if event.Actor == current.ID && event.NodeID == node.ID && event.Detail == in.Core && event.Outcome == "authorized" {
+					authorized = true
+					continue
+				}
+				return errors.New("task request ID was authorized for a different intent")
 			}
 		}
-		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: current.ID, Action: "task.status.authorize", ResourceType: "task", Resource: in.RequestID, NodeID: node.ID, Outcome: "authorized"})
+		if authorized {
+			return nil
+		}
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: current.ID, Action: "task.status.authorize", ResourceType: "task", Resource: in.RequestID, NodeID: node.ID, Detail: in.Core, Outcome: "authorized"})
 		return nil
 	}); err != nil {
 		http.Error(w, "task authorization changed or request ID already used", http.StatusConflict)
@@ -237,12 +277,108 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, s.decorateTaskView(toTaskView(record, runtime.PublicKey)))
 }
 
+func (s *Server) hasTaskAuthorization(taskID, actorID, nodeID, core string) bool {
+	if s == nil || s.store == nil || taskID == "" || actorID == "" || nodeID == "" || core == "" {
+		return false
+	}
+	found := false
+	_ = s.store.View(func(st store.State) error {
+		for _, event := range st.Audits {
+			if event.Action == "task.status.authorize" && event.ResourceType == "task" && event.Resource == taskID && event.Actor == actorID && event.NodeID == nodeID && (event.Detail == "" || event.Detail == core) && event.Outcome == "authorized" {
+				found = true
+				break
+			}
+		}
+		return nil
+	})
+	return found
+}
+
 func (s *Server) cancelStatusTask(w http.ResponseWriter, r *http.Request) {
 	s.createStatusControl(w, r, protocol.Cancel)
 }
 
 func (s *Server) skipExpiredStatusTask(w http.ResponseWriter, r *http.Request) {
 	s.createStatusControl(w, r, protocol.Skip)
+}
+
+func (s *Server) voidUnissuedStatusTask(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireCSRF(w, r)
+	if !ok {
+		return
+	}
+	runtime := s.taskRuntime
+	if runtime == nil {
+		http.Error(w, "task runtime unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var in taskControlRequest
+	if readJSON(r, &in) != nil || !validRequestID(in.RequestID) {
+		http.Error(w, "invalid task-control request", http.StatusBadRequest)
+		return
+	}
+	record, err := runtime.Store.GetRecord(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	node, allowed := s.authorizedStatusNode(ctx.Admin.ID, record.NodeID)
+	if !allowed || (ctx.Admin.Role != "security_admin" && ctx.Admin.Role != "operator") {
+		_ = s.recordAudit(ctx.Admin.ID, "task.status.void.denied", "node", record.NodeID, "denied")
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if !record.Active || !record.LeaseDeadline.IsZero() || len(record.Acks) != 0 {
+		http.Error(w, "only a never-delivered status task can be voided", http.StatusConflict)
+		return
+	}
+	now, timeErr := runtime.currentTime()
+	if timeErr != nil {
+		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var task statusTaskEnvelope
+	if protocol.VerifyV2Task(record.Raw, runtime.PublicKey) != nil || json.Unmarshal(record.Raw, &task) != nil || task.TaskID != record.TaskID || task.NodeID != node.ID || task.Sequence != record.Sequence || task.Operation != "core.status" {
+		http.Error(w, "task requires reconciliation", http.StatusConflict)
+		return
+	}
+	if err = s.store.Update(func(state *store.State) error {
+		admin, exists := state.Admins[ctx.Admin.ID]
+		currentNode, nodeExists := state.Nodes[node.ID]
+		if !exists || admin.Disabled || (admin.Role != "security_admin" && admin.Role != "operator") || !nodeExists || currentNode.Disabled || !canQueryCoreStatus(admin, currentNode) {
+			return errors.New("task-control authorization changed")
+		}
+		s.appendAudit(state, store.Audit{At: now.Unix(), Actor: admin.ID, Action: "task.status.void.authorize", ResourceType: "task", Resource: record.TaskID, NodeID: node.ID, Outcome: in.RequestID})
+		return nil
+	}); err != nil {
+		http.Error(w, "task-control authorization changed", http.StatusConflict)
+		return
+	}
+	unsigned, err := makeUnsignedTaskSkip(node.ID, record.Sequence, "VOID_UNISSUED", runtime.KeyID, now)
+	if err != nil {
+		http.Error(w, "task-control request unavailable", http.StatusInternalServerError)
+		return
+	}
+	signed, err := runtime.Signer.SignControl(protocol.Skip, unsigned)
+	if err != nil || protocol.Verify(protocol.Skip, signed, runtime.PublicKey) != nil {
+		_ = s.recordTaskAudit(ctx.Admin.ID, "task.status.void.issue", record.TaskID, node.ID, "failed")
+		http.Error(w, "task-control signer unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err = runtime.Store.VoidUnissued(node.ID, record.TaskID, signed, now, runtime.KeyID, runtime.PublicKey); err != nil {
+		http.Error(w, "task-control conflicts with current task state", http.StatusConflict)
+		return
+	}
+	if err = s.recordTaskAudit(ctx.Admin.ID, "task.status.void.issue", record.TaskID, node.ID, "voided"); err != nil {
+		http.Error(w, "task audit unavailable", http.StatusInternalServerError)
+		return
+	}
+	updated, err := runtime.Store.GetRecord(record.TaskID)
+	if err != nil {
+		http.Error(w, "task unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.decorateTaskView(toTaskView(updated, runtime.PublicKey)))
 }
 
 func (s *Server) createStatusControl(w http.ResponseWriter, r *http.Request, kind protocol.Kind) {
@@ -275,11 +411,12 @@ func (s *Server) createStatusControl(w http.ResponseWriter, r *http.Request, kin
 		http.Error(w, "task is already terminal", http.StatusConflict)
 		return
 	}
-	now := runtime.Now().UTC().Truncate(time.Second)
-	if now.IsZero() {
+	now, timeErr := runtime.currentTime()
+	if timeErr != nil {
 		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	now = now.Truncate(time.Second)
 	var task statusTaskEnvelope
 	if protocol.VerifyV2Task(record.Raw, runtime.PublicKey) != nil || json.Unmarshal(record.Raw, &task) != nil || task.TaskID != record.TaskID || task.NodeID != node.ID || task.Sequence != record.Sequence || task.Operation != "core.status" || !validCoreName(task.Payload.Core) {
 		http.Error(w, "task requires reconciliation", http.StatusConflict)
@@ -355,6 +492,19 @@ func makeUnsignedTaskControl(kind protocol.Kind, nodeID, taskID string, sequence
 		fields["reason"] = "EXPIRED"
 	}
 	return json.Marshal(fields)
+}
+
+func makeUnsignedTaskSkip(nodeID string, sequence int64, reason, keyID string, now time.Time) ([]byte, error) {
+	if nodeID == "" || sequence < 1 || keyID == "" || now.IsZero() || (reason != "VOID_UNISSUED" && reason != "EXPIRED" && reason != "CANCELED") {
+		return nil, taskdispatch.ErrInvalid
+	}
+	issued := now.UTC().Truncate(time.Second)
+	return json.Marshal(map[string]any{
+		"schema_version": 1, "node_id": nodeID, "sequence": sequence, "reason": reason,
+		"issued_at": issued.Format(time.RFC3339), "not_before": issued.Format(time.RFC3339),
+		"expires_at":     issued.Add(taskControlLifetime).Format(time.RFC3339),
+		"signing_key_id": keyID, "signature_algorithm": "Ed25519", "signature": tasksigner.PlaceholderSignature,
+	})
 }
 
 func makeUnsignedStatusTask(in statusTaskRequest, sequence int64, keyID string, now time.Time) ([]byte, error) {
@@ -502,9 +652,16 @@ func (s *Server) decorateTaskView(view taskView) taskView {
 }
 
 func (s *Server) recordTaskAudit(actor, action, taskID, nodeID, outcome string) error {
-	now := time.Now().Unix()
+	now := time.Now()
+	if s != nil && s.taskRuntime != nil {
+		trusted, err := s.taskRuntime.currentTime()
+		if err != nil {
+			return err
+		}
+		now = trusted
+	}
 	return s.store.Update(func(st *store.State) error {
-		s.appendAudit(st, store.Audit{At: now, Actor: actor, Action: action, ResourceType: "task", Resource: taskID, NodeID: nodeID, Outcome: outcome})
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: actor, Action: action, ResourceType: "task", Resource: taskID, NodeID: nodeID, Outcome: outcome})
 		return nil
 	})
 }
@@ -533,6 +690,15 @@ func toTaskView(record taskdispatch.Record, publicKey ed25519.PublicKey) taskVie
 		out.Acks = append(out.Acks, view)
 		out.Status = ack.Status
 	}
+	if !record.Active && len(record.Acks) == 0 && record.ControlKind == string(protocol.Skip) {
+		var skip struct {
+			Sequence uint64 `json:"sequence"`
+			Reason   string `json:"reason"`
+		}
+		if protocol.Verify(protocol.Skip, record.ControlRaw, publicKey) == nil && json.Unmarshal(record.ControlRaw, &skip) == nil && skip.Sequence == uint64(record.Sequence) && skip.Reason == "VOID_UNISSUED" {
+			out.Status = "VOIDED"
+		}
+	}
 	return out
 }
 
@@ -547,14 +713,40 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task runtime unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	now := runtime.Now().UTC()
-	delivery, err := runtime.Store.Lease(node.ID, now, runtime.KeyID, runtime.PublicKey)
+	now, timeErr := runtime.currentTime()
+	if timeErr != nil {
+		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var err error
+	var expectedSequence int64
+	var expectedSequenceSet bool
+	if value := r.URL.Query().Get("next_sequence"); value != "" {
+		expectedSequence, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || expectedSequence < 1 || expectedSequence > taskdispatch.MaxSequence {
+			http.Error(w, "invalid expected task sequence", http.StatusBadRequest)
+			return
+		}
+		expectedSequenceSet = true
+	}
+	var delivery taskdispatch.Delivery
+	if expectedSequenceSet {
+		delivery, err = runtime.Store.LeaseExpected(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
+			unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)
+			if buildErr != nil {
+				return nil, buildErr
+			}
+			return runtime.Signer.SignControl(protocol.Skip, unsigned)
+		})
+	} else {
+		delivery, err = runtime.Store.Lease(node.ID, now, runtime.KeyID, runtime.PublicKey)
+	}
 	if errors.Is(err, taskdispatch.ErrNotFound) || errors.Is(err, taskdispatch.ErrLeaseActive) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if err != nil {
-		if errors.Is(err, taskdispatch.ErrConflict) {
+		if errors.Is(err, taskdispatch.ErrConflict) || errors.Is(err, taskdispatch.ErrSequence) {
 			http.Error(w, "task requires reconciliation", http.StatusConflict)
 			return
 		}
@@ -563,14 +755,25 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 	}
 	response := map[string]any{
 		"task_id": delivery.TaskID, "sequence": delivery.Sequence,
-		"task": json.RawMessage(delivery.Raw), "lease_id": delivery.LeaseID,
+		"lease_id":            delivery.LeaseID,
 		"last_status_version": delivery.LastStatusVersion,
-		"lease_deadline":      delivery.Deadline.UTC().Format(time.RFC3339Nano),
 		"server_time":         now.Format(time.RFC3339Nano),
+	}
+	if len(delivery.Raw) > 0 {
+		response["task"] = json.RawMessage(delivery.Raw)
+	}
+	if !delivery.Deadline.IsZero() {
+		response["lease_deadline"] = delivery.Deadline.UTC().Format(time.RFC3339Nano)
 	}
 	if delivery.ControlKind != "" {
 		response["control_kind"] = delivery.ControlKind
 		response["control"] = json.RawMessage(delivery.ControlRaw)
+	}
+	if delivery.SequenceRecovery {
+		response["sequence_recovery"] = true
+	}
+	if delivery.SequenceSkip {
+		response["sequence_skip"] = true
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -601,14 +804,25 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stored task requires reconciliation", http.StatusConflict)
 		return
 	}
-	if !validStatusAck(envelope.Payload.Core, in.Status, in.Result, runtime.Now()) {
+	trustedNow, timeErr := runtime.currentTime()
+	if timeErr != nil {
+		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !validStatusAck(envelope.Payload.Core, in.Status, in.Result, trustedNow) {
 		http.Error(w, "invalid task result", http.StatusBadRequest)
 		return
 	}
-	if err = runtime.Store.Acknowledge(node.ID, taskdispatch.Ack{
+	ack := taskdispatch.Ack{
 		NodeID: node.ID, TaskID: in.TaskID, Sequence: in.Sequence,
 		StatusVersion: in.StatusVersion, Status: in.Status, Result: []byte(in.Result),
-	}); err != nil {
+	}
+	if !record.Active && len(record.Acks) == 0 && record.ControlKind == string(protocol.Skip) {
+		if err = runtime.Store.AcknowledgeVoid(node.ID, ack, trustedNow, runtime.KeyID, runtime.PublicKey); err != nil {
+			http.Error(w, "task ACK rejected", http.StatusConflict)
+			return
+		}
+	} else if err = runtime.Store.Acknowledge(node.ID, ack); err != nil {
 		http.Error(w, "task ACK rejected", http.StatusConflict)
 		return
 	}
@@ -617,7 +831,7 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 		if !exists || current.Disabled {
 			return store.ErrNotFound
 		}
-		s.appendAudit(st, store.Audit{At: runtime.Now().Unix(), Actor: node.ID, Action: "task.status.ack", ResourceType: "task", Resource: in.TaskID, NodeID: node.ID, Outcome: in.Status})
+		s.appendAudit(st, store.Audit{At: trustedNow.Unix(), Actor: node.ID, Action: "task.status.ack", ResourceType: "task", Resource: in.TaskID, NodeID: node.ID, Outcome: in.Status})
 		return nil
 	}); err != nil {
 		http.Error(w, "task ACK audit unavailable", http.StatusInternalServerError)
@@ -654,7 +868,11 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "helper authorization denied", http.StatusForbidden)
 		return
 	}
-	now := runtime.Now().UTC()
+	now, timeErr := runtime.currentTime()
+	if timeErr != nil {
+		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	previous, err := runtime.Store.ValidateLease(envelope.NodeID, envelope.TaskID, envelope.Sequence, in.LeaseID, in.Task, now, runtime.KeyID, runtime.PublicKey)
 	if err != nil {
 		http.Error(w, "helper authorization denied", http.StatusForbidden)

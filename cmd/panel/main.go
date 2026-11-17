@@ -18,6 +18,7 @@ import (
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
 	"github.com/ACnoway/mcui/internal/tasksigner"
+	"github.com/ACnoway/mcui/internal/trustedtime"
 )
 
 func main() {
@@ -112,8 +113,12 @@ func main() {
 			log.Fatalf("open task database: %v", err)
 		}
 		defer tasks.Close()
-		if err = srv.ConfigureTaskRuntime(master.TaskRuntime{Store: tasks, Signer: signer, KeyID: *taskKeyID, PublicKey: publicKey, Now: time.Now}); err != nil {
+		trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+		if err = srv.ConfigureTaskRuntime(master.TaskRuntime{Store: tasks, Signer: signer, KeyID: *taskKeyID, PublicKey: publicKey, TrustedNow: trustedClock.Now}); err != nil {
 			log.Fatalf("configure task runtime: %v", err)
+		}
+		if err = srv.ReconcileTaskRuntime(); err != nil {
+			log.Fatalf("reconcile task/audit history: %v", err)
 		}
 		log.Printf("read-only status-task runtime enabled with signing key %s", *taskKeyID)
 	}

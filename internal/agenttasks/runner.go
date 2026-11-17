@@ -12,6 +12,10 @@ import (
 	"github.com/ACnoway/mcui/internal/taskledger"
 )
 
+var ErrTrustedTime = errors.New("independent trusted time is unavailable or inconsistent")
+
+const maxTrustedTimeSkew = 30 * time.Second
+
 type StatusExecutor interface {
 	ExecuteStatus(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error)
 }
@@ -23,10 +27,21 @@ type Ack struct {
 }
 
 type Runner struct {
-	processor *Processor
-	ledger    *taskledger.Ledger
-	executor  StatusExecutor
-	now       func() time.Time
+	processor  *Processor
+	ledger     *taskledger.Ledger
+	executor   StatusExecutor
+	now        func() time.Time
+	trustedNow func() (time.Time, error)
+}
+
+// SetTrustedClock installs the independent NTS-validated wall-clock check used
+// for production task processing. It must be called before the Runner is used.
+func (r *Runner) SetTrustedClock(now func() (time.Time, error)) error {
+	if r == nil || now == nil || r.trustedNow != nil {
+		return errors.New("invalid or duplicate trusted clock")
+	}
+	r.trustedNow = now
+	return nil
 }
 
 var statusValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
@@ -76,7 +91,11 @@ func (r *Runner) ProcessStatusTaskAt(ctx context.Context, raw []byte, leaseID st
 	if r == nil || ctx == nil || leaseID == "" || lastStatusVersion < 0 || serverNow.IsZero() {
 		return nil, errors.New("invalid status-task delivery")
 	}
-	task, err := r.processor.ReceiveAt(ctx, raw, serverNow)
+	now, err := r.deliveryTime(serverNow)
+	if err != nil {
+		return nil, err
+	}
+	task, err := r.processor.ReceiveAt(ctx, raw, now)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +104,7 @@ func (r *Runner) ProcessStatusTaskAt(ctx context.Context, raw []byte, leaseID st
 		return nil, errors.New("invalid persisted status task")
 	}
 	if task.State == taskledger.Pending {
-		started, startErr := r.ledger.Start(task.Sequence, serverNow)
+		started, startErr := r.ledger.Start(task.Sequence, now)
 		if errors.Is(startErr, taskledger.ErrNotYet) {
 			return acknowledgments(task, lastStatusVersion), nil
 		}
@@ -138,13 +157,17 @@ func (r *Runner) ProcessControlTask(ctx context.Context, taskRaw []byte, control
 	if r == nil || ctx == nil || leaseID == "" || lastStatusVersion < 0 || serverNow.IsZero() || len(controlRaw) == 0 {
 		return nil, errors.New("invalid controlled task delivery")
 	}
-	task, err := r.processor.ReceiveAt(ctx, taskRaw, serverNow)
+	now, err := r.deliveryTime(serverNow)
+	if err != nil {
+		return nil, err
+	}
+	task, err := r.processor.ReceiveAt(ctx, taskRaw, now)
 	if err != nil {
 		return nil, err
 	}
 	switch controlKind {
 	case string(protocol.Cancel):
-		err = r.processor.ApplyCancel(ctx, controlRaw, serverNow, task.ID, task.Sequence)
+		err = r.processor.ApplyCancel(ctx, controlRaw, now, task.ID, task.Sequence)
 		if err != nil && !errors.Is(err, taskledger.ErrTooLate) {
 			return nil, err
 		}
@@ -154,7 +177,7 @@ func (r *Runner) ProcessControlTask(ctx context.Context, taskRaw []byte, control
 		}
 	case string(protocol.Skip):
 		taskID, sequence := task.ID, task.Sequence
-		skipped, skipErr := r.processor.ApplySkip(ctx, controlRaw, serverNow, taskID, sequence)
+		skipped, skipErr := r.processor.ApplySkip(ctx, controlRaw, now, taskID, sequence)
 		if errors.Is(skipErr, taskledger.ErrTooLate) {
 			task, err = r.ledger.Get(sequence)
 		} else if skipErr != nil {
@@ -173,6 +196,45 @@ func (r *Runner) ProcessControlTask(ctx context.Context, taskRaw []byte, control
 		return nil, errors.New("task control did not produce an ACK state")
 	}
 	return acks, nil
+}
+
+// ProcessSequenceSkip consumes a taskless signed VOID_UNISSUED slot and
+// returns the durable terminal ACK that the Master uses to close its record.
+func (r *Runner) ProcessSequenceSkip(ctx context.Context, controlRaw []byte, sequence int64, lastStatusVersion int64, serverNow time.Time) ([]Ack, error) {
+	if r == nil || ctx == nil || sequence < 1 || lastStatusVersion < 0 || serverNow.IsZero() || len(controlRaw) == 0 {
+		return nil, errors.New("invalid sequence skip delivery")
+	}
+	now, err := r.deliveryTime(serverNow)
+	if err != nil {
+		return nil, err
+	}
+	task, err := r.processor.ApplySequenceSkip(ctx, controlRaw, now, sequence)
+	if err != nil {
+		return nil, err
+	}
+	acks := acknowledgments(task, lastStatusVersion)
+	if len(acks) == 0 {
+		return nil, errors.New("sequence skip did not produce a terminal ACK")
+	}
+	return acks, nil
+}
+
+func (r *Runner) deliveryTime(serverNow time.Time) (time.Time, error) {
+	if r.trustedNow == nil {
+		return serverNow.UTC(), nil
+	}
+	now, err := r.trustedNow()
+	if err != nil || now.IsZero() || absDuration(now.Sub(serverNow)) > maxTrustedTimeSkew {
+		return time.Time{}, ErrTrustedTime
+	}
+	return now.UTC(), nil
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func validStatusObservation(raw []byte, core string) bool {

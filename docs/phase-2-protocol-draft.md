@@ -1,6 +1,6 @@
 # 阶段 2 状态任务协议（开发基线）
 
-用户于 2026-11-17 在会话中批准下述只读 V2 方案作为阶段 2 开发基线；这不构成生产上线或阶段退出批准，也不是独立安全评审记录。本文描述 `internal/protocol/v2.go` 和 `internal/protocol/testdata/protocol-v2.json` 中的互操作协议，不修改或替代已冻结的 V1 基线。Admin 状态任务 API、隔离 signer、Agent mTLS 投递/ACK、pending cancel、expired skip 和 Helper 固定只读执行已有运行时实现；整体构建、端到端安全验收和正式阶段退出仍须完成。具体边界见[阶段 2 进度](./phase-2-progress.md)。
+用户于 2026-11-17 在会话中批准下述只读 V2 方案作为阶段 2 开发基线；这不构成生产上线或阶段退出批准，也不是独立安全评审记录。本文描述 `internal/protocol/v2.go` 和 `internal/protocol/testdata/protocol-v2.json` 中的互操作协议，不修改或替代已冻结的 V1 基线。Admin 状态任务 API、隔离 signer、Agent mTLS 投递/ACK、pending cancel、expired skip、受限序号恢复、NTS 时间校验、启动时任务/审计对账和 Helper 固定只读执行已有运行时实现；本次远程构建验证结果及正式阶段退出状态记录于[阶段 2 进度](./phase-2-progress.md)。
 
 ## 提议的状态任务
 
@@ -14,8 +14,8 @@
 
 `VerifyV2Task` 仅检查草案结构和调用方传入的公钥对应的签名。它不选择或验证受信密钥及用途，不检查本机身份、当前可信时间、序号、审批、撤销、对端凭据或持久化重放账本，也不执行任何动作。签名正确不等于具有执行授权。
 
-现有角色文档对高危任务发起人的要求仍见[权限基线](./panel-authz.md)与本文件第 5.2 节。**本阶段已决定：只读 `core.status` 查询不单独审批**；Master 实现逐请求验证 `security_admin`/`operator` 身份、节点对象范围及只读操作权限并写授权审计。此决定不适用于后续高危任务。独立密钥生产保管流程、外部可信时钟和跨数据库恢复检查点仍未落实。
+现有角色文档对高危任务发起人的要求仍见[权限基线](./panel-authz.md)与本文件第 5.2 节。**本阶段已决定：只读 `core.status` 查询不单独审批**；Master 实现逐请求验证 `security_admin`/`operator` 身份、节点对象范围及只读操作权限并写授权审计。此决定不适用于后续高危任务。Master、Agent 和 Helper 已通过 chrony 检查 `time.cloudflare.com` 的 NTS 认证、样本新鲜度和 tracking 误差；部署前必须按[操作说明](./phase-2-operations.md)配置 chrony。独立密钥生产保管流程、两库同时回滚检测和跨数据库原子事务仍未落实。
 
 ## 验证与待办
 
-共享向量使用公开测试 seed，严禁用于生产。Go 测试和 `scripts/verify-protocol-v2-vectors.mjs` 对同一组签名向量和反例进行解析及签名校验；常规检查脚本运行两者。向量通过只能证明所测互操作情况，不等于完整规范或系统安全验收通过。V1 cancel/skip 与 V2 状态任务分开签名：当前只实现未开始状态任务的 cancel 和基于原任务过期终态的 `EXPIRED` skip；不实现 `VOID_UNISSUED`、通用序号缺口恢复或独立 skip 槽。阶段 2 仍需完成独立可信时间、序号缺口、重启恢复、租约过期、真实 Helper socket/service 和授权安全验证；不能将用户对开发基线的批准表述为生产授权。
+共享向量使用公开测试 seed，严禁用于生产。Go 测试和 `scripts/verify-protocol-v2-vectors.mjs` 对同一组签名向量和反例进行解析及签名校验；常规检查脚本运行两者。向量通过只能证明所测互操作情况，不等于完整规范或系统安全验收通过。V1 cancel/skip 与 V2 状态任务分开签名：运行时支持未开始状态任务 cancel、基于原任务过期终态的 `EXPIRED` skip、已签发未投递槽的 `VOID_UNISSUED`，以及可证明过期终态历史槽的序号补取；未知缺口和独立 `CANCELED` skip 仍失败关闭。任务库与审计库启动对账可修复单侧崩溃导致的后置审计缺失，但没有跨库原子提交或外部单调检查点。正式退出仍需真实 Helper socket/service、断电/恢复演练和项目内安全验证；不能将用户对开发基线的批准表述为生产授权。

@@ -18,6 +18,7 @@ import (
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/taskauth"
 	"github.com/ACnoway/mcui/internal/taskledger"
+	"github.com/ACnoway/mcui/internal/trustedtime"
 )
 
 func main() {
@@ -98,6 +99,9 @@ func main() {
 			log.Fatalf("open Agent task ledger: %v", err)
 		}
 		defer ledger.Close()
+		if err = client.SetTaskSequenceProvider(func() (int64, error) { return ledger.Next() }); err != nil {
+			log.Fatalf("configure Agent sequence provider: %v", err)
+		}
 		executor, err := agent.NewUnixStatusExecutor(*helperSocket)
 		if err != nil {
 			log.Fatalf("configure Helper client: %v", err)
@@ -114,6 +118,10 @@ func main() {
 			}
 			runner, e := agenttasks.NewRunner(processor, ledger, executor, time.Now)
 			if e != nil {
+				return nil, e
+			}
+			trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+			if e = runner.SetTrustedClock(trustedClock.Now); e != nil {
 				return nil, e
 			}
 			return agentTaskHandler{runner: runner}, nil
@@ -138,6 +146,11 @@ func (h agentTaskHandler) ProcessStatusTask(ctx context.Context, raw []byte, lea
 
 func (h agentTaskHandler) ProcessControlTask(ctx context.Context, taskRaw []byte, controlKind string, controlRaw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
 	acks, err := h.runner.ProcessControlTask(ctx, taskRaw, controlKind, controlRaw, leaseID, lastStatusVersion, serverNow)
+	return convertTaskAcks(acks, err)
+}
+
+func (h agentTaskHandler) ProcessSequenceSkip(ctx context.Context, controlRaw []byte, sequence int64, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
+	acks, err := h.runner.ProcessSequenceSkip(ctx, controlRaw, sequence, lastStatusVersion, serverNow)
 	return convertTaskAcks(acks, err)
 }
 

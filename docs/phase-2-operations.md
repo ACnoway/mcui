@@ -13,6 +13,28 @@
 
 生产密钥必须由经批准的独立流程产生、保管、备份和轮换。不要使用测试向量 seed。Signer 私钥不得复制给 Master、Agent 或 Helper；只分发状态签名公钥。Signer token 至少 32 字节随机值，只用于两个本机账号之间的 HTTP bearer 认证。
 
+### 1.1 配置认证 NTS 时间
+
+Master、Agent 和 Helper 的任务时限判断依赖本机 chrony。选用 Cloudflare 官方 NTS 服务 `time.cloudflare.com`；NTS 通过 TLS 建立密钥，并认证 NTP 时间包。应用只接受它被 chrony 选为当前来源且 `authdata` 证明 NTS 正在工作，不会因 NTS 失败改用未认证来源。
+
+安装并配置 chrony。修改 `/etc/chrony/chrony.conf`，确认没有其他未认证 `pool`/`server` 源参与时间选择，并保留本机 loopback command socket：
+
+```conf
+server time.cloudflare.com iburst nts
+opencommands authdata sources tracking
+```
+
+不要把 chrony command socket 绑定到外部接口，也不要添加宽泛的 `cmdallow`。`opencommands` 仅开放应用需要的只读监控命令；chronyd 默认只监听 loopback 命令地址。重启服务后，以 root 检查：
+
+```sh
+systemctl enable --now chrony
+chronyc -h 127.0.0.1 -N sources
+chronyc -h 127.0.0.1 -N authdata
+chronyc -h 127.0.0.1 -N tracking
+```
+
+确认 `sources` 的 `*` 行为 `time.cloudflare.com`，`authdata` 的同一行显示 `NTS`、AEAD 类型和非零 cookie，tracking 的 `Leap status` 为 `Normal`。程序要求最近有效样本不超过 300 秒，系统时钟误差界限不超过 1 秒；否则状态任务创建、投递、执行及 ACK 会暂停并失败关闭。Agent 和 Helper 还要求与 TLS Master 时间相差不超过 30 秒。不同 chrony 版本若输出格式不兼容也会失败关闭。
+
 ## 2. 安装账号、程序和 unit
 
 在已有阶段 1 系统安装 `mcui`、`mcui-agent` 用户后，创建本地 signer 账号和共享访问组，并授予 Master 与 signer 读取 token 的组权限：
@@ -115,9 +137,9 @@ systemctl restart mcui-panel.service mcui-agent.service
 - 60 秒投递租约到期后，Master 可为同一消息签发新租约；Helper 只接受当前租约。先前成功查询从 Helper 账本返回原结果，不再执行 `systemctl`。
 - Agent 收到过期消息时只持久化并回报 `EXPIRED`，不调用 Helper。节点离线期间，未完成序号会继续阻塞该节点后续任务；节点重新上线处理过期任务后才可继续。
 - 面板可取消未过期且未开始的状态查询；若任务已经开始或状态未决，Agent 账本会拒绝取消并回报现有状态/对账要求。过期状态任务可通过签名 `EXPIRED` skip 确认终态，Agent 仍先将原始任务写为过期，不调用 Helper。面板上的控制状态可刷新查看。
-- Agent 账本重启时发现执行中状态会进入 `NEEDS_RECONCILIATION`；Helper 存在未决记录、Master 无法确认前序序号终态或本地账本不匹配时不继续。`VOID_UNISSUED` 和通用序号缺口恢复尚未实现；保留原始数据库并按带外人工核对处理。
-- 不要删除 SQLite 文件、编辑任务序号、复用请求 ID、删除 Helper ledger 或改写 `NEEDS_RECONCILIATION`。跨数据库快照恢复和独立可信时间仍未实现。
+- Agent 账本重启时发现执行中状态会进入 `NEEDS_RECONCILIATION`；Helper 存在未决记录、Master 无法确认前序序号终态或本地账本不匹配时不继续。Master 只自动补取可证明的、已过期终态历史槽，或投递已签名 `VOID_UNISSUED` 空槽；未知、活动、未过期或运行中缺口继续隔离。过期历史只补齐 Agent 序号，不恢复原任务结果。Master 启动时会对账任务与审计库，并修复已持久化签发/关闭但因崩溃缺失的后置审计。
+- 不要删除 SQLite 文件、编辑任务序号、复用请求 ID、删除 Helper ledger 或改写 `NEEDS_RECONCILIATION`。跨库事务和识别两库同时回滚的独立检查点尚未实现；备份恢复仍需隔离并带外核验。NTS 配置失效时不得临时切换到普通 NTP。
 
 ## 7. 当前限制
 
-当前实现只适用于只读状态查询和其 pending cancel / expired skip 控制。通用 `VOID_UNISSUED`、任意序号缺口恢复、独立外部可信时钟、双库原子恢复、密钥轮换仪式、systemd 启动/沙箱实机演练和 Debian 双架构验收仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。执行本说明中的安装步骤不表示阶段 2 通过或生产部署获批。
+当前实现只适用于只读状态查询、pending cancel、expired skip、过期终态补取和 `VOID_UNISSUED` 空槽关闭。通用 `CANCELED` skip、跨数据库原子恢复、两库同时回滚检测、硬件可信时间根、密钥轮换仪式、systemd 实机演练和 Debian 双架构验收仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。执行本说明中的安装步骤不表示阶段 2 通过或生产部署获批。

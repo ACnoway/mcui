@@ -296,8 +296,15 @@ func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, prev
 			return "", ErrReconciliation
 		}
 		trustedNow = h.cfg.Now()
-	} else if h.cfg.TrustedTimeHealthy != nil && !h.cfg.TrustedTimeHealthy() {
-		return "", ErrReconciliation
+	} else if h.cfg.TrustedTimeHealthy != nil {
+		if !h.cfg.TrustedTimeHealthy() {
+			return "", ErrReconciliation
+		}
+		localNow := h.cfg.Now()
+		if localNow.IsZero() || absDuration(localNow.Sub(trustedNow)) > 30*time.Second {
+			return "", ErrReconciliation
+		}
+		trustedNow = localNow
 	}
 	now := trustedNow.UTC()
 	if now.IsZero() || (!l.TimeHighWater.IsZero() && now.Before(l.TimeHighWater)) {
@@ -363,4 +370,11 @@ func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, prev
 		return "", ErrReconciliation
 	}
 	return result, nil
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }

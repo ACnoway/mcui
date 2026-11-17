@@ -207,6 +207,56 @@ func (l *Ledger) AcceptValidated(t Task, currentTime func() (time.Time, error)) 
 	return
 }
 
+// ConsumeVoid persists a signed VOID_UNISSUED sequence tombstone without a
+// task envelope. The caller must verify the signature, node, purpose, reason,
+// and validity window immediately before calling this method.
+func (l *Ledger) ConsumeVoid(sequence int64, raw []byte, notBefore, expiresAt time.Time) (out Task, err error) {
+	if sequence < 1 || len(raw) == 0 || len(raw) > 65536 || notBefore.IsZero() || !notBefore.Before(expiresAt) || !time.Unix(0, notBefore.UnixNano()).Equal(notBefore) || !time.Unix(0, expiresAt.UnixNano()).Equal(expiresAt) {
+		return out, errors.New("invalid sequence skip")
+	}
+	if sequence == int64(^uint64(0)>>1) {
+		return out, errors.New("sequence overflow")
+	}
+	id := fmt.Sprintf("void-sequence-%d", sequence)
+	err = l.write(func(c *sql.Conn) error {
+		n, e := next(c)
+		if e != nil {
+			return e
+		}
+		if sequence > n {
+			return ErrGap
+		}
+		if sequence < n {
+			existing, readErr := readTask(c, sequence)
+			if readErr != nil || existing.ID != id || existing.State != Canceled || !bytes.Equal(existing.Envelope, raw) {
+				return ErrConflict
+			}
+			out = existing
+			return nil
+		}
+		var used int64
+		e = c.QueryRowContext(context.Background(), `SELECT seq FROM tasks WHERE id=?`, id).Scan(&used)
+		if e == nil {
+			return ErrConflict
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
+		if _, e = c.ExecContext(context.Background(), `INSERT INTO tasks(seq,id,envelope,not_before,expires,state) VALUES(?,?,?,?,?,?)`, sequence, id, bytes.Clone(raw), notBefore.UnixNano(), expiresAt.UnixNano(), Canceled); e != nil {
+			return e
+		}
+		if _, e = c.ExecContext(context.Background(), `INSERT INTO cancellations(seq,id,envelope) VALUES(?,?,?)`, sequence, id, bytes.Clone(raw)); e != nil {
+			return e
+		}
+		if e = advance(c); e != nil {
+			return e
+		}
+		out, e = readTask(c, sequence)
+		return e
+	})
+	return out, err
+}
+
 // Start persists RUNNING before the caller performs any work.
 func (l *Ledger) Start(seq int64, now time.Time) (out Task, err error) {
 	err = l.write(func(c *sql.Conn) error {

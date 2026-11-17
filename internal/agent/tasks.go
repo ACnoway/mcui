@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/protocol"
@@ -23,6 +24,7 @@ type TaskAck struct {
 type TaskHandler interface {
 	ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]TaskAck, error)
 	ProcessControlTask(ctx context.Context, taskRaw []byte, controlKind string, controlRaw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]TaskAck, error)
+	ProcessSequenceSkip(ctx context.Context, controlRaw []byte, sequence int64, lastStatusVersion int64, serverNow time.Time) ([]TaskAck, error)
 }
 
 type StatusExecutor interface {
@@ -46,6 +48,8 @@ type taskDelivery struct {
 	ServerTime        string          `json:"server_time"`
 	ControlKind       string          `json:"control_kind,omitempty"`
 	Control           json.RawMessage `json:"control,omitempty"`
+	SequenceRecovery  bool            `json:"sequence_recovery,omitempty"`
+	SequenceSkip      bool            `json:"sequence_skip,omitempty"`
 }
 
 type taskDeliveryIdentity struct {
@@ -64,12 +68,28 @@ func (c *Client) SetTaskHandlerFactory(factory StatusTaskHandlerFactory) error {
 	return nil
 }
 
+func (c *Client) SetTaskSequenceProvider(provider func() (int64, error)) error {
+	if c == nil || provider == nil || c.taskSequenceProvider != nil {
+		return errors.New("invalid or duplicate task sequence provider")
+	}
+	c.taskSequenceProvider = provider
+	return nil
+}
+
 func (c *Client) processStatusTask(state localState) error {
 	client, err := c.httpClient(state)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodGet, c.masterURL+"/api/v1/agent/tasks/next", nil)
+	endpoint := c.masterURL + "/api/v1/agent/tasks/next"
+	if c.taskSequenceProvider != nil {
+		next, sequenceErr := c.taskSequenceProvider()
+		if sequenceErr != nil || next < 1 {
+			return errors.New("Agent task sequence is unavailable")
+		}
+		endpoint += "?next_sequence=" + strconv.FormatInt(next, 10)
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
@@ -93,7 +113,7 @@ func (c *Client) processStatusTask(state localState) error {
 	var delivery taskDelivery
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&delivery); err != nil || delivery.TaskID == "" || delivery.Sequence < 1 || len(delivery.Task) == 0 || !leaseIDPattern.MatchString(delivery.LeaseID) || delivery.LastStatusVersion < 0 {
+	if err = decoder.Decode(&delivery); err != nil || delivery.TaskID == "" || delivery.Sequence < 1 || !leaseIDPattern.MatchString(delivery.LeaseID) || delivery.LastStatusVersion < 0 || (len(delivery.Task) == 0 && !delivery.SequenceSkip) || (delivery.SequenceSkip && (len(delivery.Task) != 0 || delivery.ControlKind != string(protocol.Skip))) || (delivery.SequenceRecovery && (len(delivery.Task) == 0 || delivery.ControlKind != string(protocol.Skip))) {
 		return errors.New("invalid task delivery")
 	}
 	var trailing any
@@ -104,12 +124,14 @@ func (c *Client) processStatusTask(state localState) error {
 	if err != nil || serverNow.IsZero() {
 		return errors.New("invalid task delivery server time")
 	}
-	if _, err = protocol.CanonicalV2TaskBytes(delivery.Task); err != nil {
-		return fmt.Errorf("invalid signed task envelope: %w", err)
-	}
-	var identity taskDeliveryIdentity
-	if err = json.Unmarshal(delivery.Task, &identity); err != nil || identity.TaskID != delivery.TaskID || identity.NodeID != state.NodeID || identity.Sequence != delivery.Sequence {
-		return errors.New("task delivery identity mismatch")
+	if len(delivery.Task) > 0 {
+		if _, err = protocol.CanonicalV2TaskBytes(delivery.Task); err != nil {
+			return fmt.Errorf("invalid signed task envelope: %w", err)
+		}
+		var identity taskDeliveryIdentity
+		if err = json.Unmarshal(delivery.Task, &identity); err != nil || identity.TaskID != delivery.TaskID || identity.NodeID != state.NodeID || identity.Sequence != delivery.Sequence {
+			return errors.New("task delivery identity mismatch")
+		}
 	}
 	if (delivery.ControlKind == "") != (len(delivery.Control) == 0) {
 		return errors.New("incomplete task control delivery")
@@ -125,7 +147,9 @@ func (c *Client) processStatusTask(state localState) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	var acks []TaskAck
-	if delivery.ControlKind == "" {
+	if delivery.SequenceSkip {
+		acks, err = c.taskHandler.ProcessSequenceSkip(ctx, append([]byte(nil), delivery.Control...), delivery.Sequence, delivery.LastStatusVersion, serverNow)
+	} else if delivery.ControlKind == "" {
 		acks, err = c.taskHandler.ProcessStatusTask(ctx, append([]byte(nil), delivery.Task...), delivery.LeaseID, delivery.LastStatusVersion, serverNow)
 	} else {
 		acks, err = c.taskHandler.ProcessControlTask(ctx, append([]byte(nil), delivery.Task...), delivery.ControlKind, append([]byte(nil), delivery.Control...), delivery.LeaseID, delivery.LastStatusVersion, serverNow)
@@ -136,6 +160,11 @@ func (c *Client) processStatusTask(state localState) error {
 	}
 	if len(acks) == 0 || len(acks) > 9 {
 		return errors.New("status-task processor returned invalid ACK history")
+	}
+	if delivery.SequenceRecovery {
+		// The historical task already has a terminal Master ACK. Advancing the
+		// Agent ledger is the receipt; posting another ACK would reopen history.
+		return nil
 	}
 	baseVersion := int64(0)
 	if len(acks) == 1 && acks[0].StatusVersion > 1 && (acks[0].Status == "EXPIRED" || acks[0].Status == "CANCELED" || acks[0].Status == "NEEDS_RECONCILIATION") {

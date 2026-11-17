@@ -52,6 +52,8 @@ type Delivery struct {
 	LeaseID           string
 	Deadline          time.Time
 	LastStatusVersion int64
+	SequenceRecovery  bool
+	SequenceSkip      bool
 }
 
 // Ack is a persisted observation from an externally authenticated node. Result
@@ -337,9 +339,6 @@ SELECT
    OR typeof(result)!='blob' OR length(result)>4096) +
  (SELECT COUNT(*) FROM tasks t JOIN acks a ON a.task_id=t.task_id
    WHERE a.node_id!=t.node_id OR a.sequence!=t.sequence) +
- (SELECT COUNT(*) FROM tasks t WHERE t.active=0 AND NOT EXISTS
-   (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
-    (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status')))) +
  (SELECT COUNT(*) FROM tasks t WHERE t.active=1 AND EXISTS
    (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
     (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status'))))
@@ -348,12 +347,22 @@ SELECT
 		return fmt.Errorf("invalid task delivery database contents: violations=%d: %v", bad, err)
 	}
 	if controlsPresent {
+		if err = db.QueryRow(`SELECT COUNT(*) FROM tasks t WHERE t.active=0 AND NOT EXISTS
+ (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
+  (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status')))
+ AND NOT EXISTS (SELECT 1 FROM task_controls c WHERE c.task_id=t.task_id AND c.kind='skip'
+   AND json_extract(CAST(c.raw AS TEXT),'$.reason')='VOID_UNISSUED' AND t.lease_id IS NULL AND t.lease_deadline IS NULL)`).Scan(&bad); err != nil || bad != 0 {
+			return fmt.Errorf("invalid terminal task data: violations=%d: %v", bad, err)
+		}
 		if err = db.QueryRow(`SELECT COUNT(*) FROM task_controls c JOIN tasks t ON t.task_id=c.task_id
  WHERE typeof(c.task_id)!='text' OR length(c.task_id)=0
     OR typeof(c.kind)!='text' OR c.kind NOT IN ('cancel','skip')
     OR typeof(c.raw)!='blob' OR length(c.raw)=0 OR length(c.raw)>65536
-    OR t.active!=1
-    OR EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND a.status IN ('RUNNING','VERIFYING','SUCCEEDED','FAILED','ROLLING_BACK','ROLLED_BACK','EXPIRED','CANCELED','NEEDS_RECONCILIATION'))`).Scan(&bad); err != nil || bad != 0 {
+    OR NOT (
+      (t.active=1 AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND a.status IN ('RUNNING','VERIFYING','SUCCEEDED','FAILED','ROLLING_BACK','ROLLED_BACK','EXPIRED','CANCELED','NEEDS_RECONCILIATION')))
+      OR (t.active=0 AND c.kind='skip' AND EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status'))))
+      OR (t.active=0 AND c.kind='skip' AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id) AND t.lease_id IS NULL AND t.lease_deadline IS NULL AND json_extract(CAST(c.raw AS TEXT),'$.reason')='VOID_UNISSUED')
+    )`).Scan(&bad); err != nil || bad != 0 {
 			return fmt.Errorf("invalid task control data: violations=%d: %v", bad, err)
 		}
 	}
@@ -522,6 +531,20 @@ func (s *Store) Provision(authenticatedNodeID string, sequence int64, raw []byte
 // of the same task again and never creates a replacement task. The key ID and
 // key must be supplied from trusted local configuration for every delivery.
 func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey) (Delivery, error) {
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil)
+}
+
+// LeaseExpected reconciles the Agent's durable next sequence before leasing
+// the current task. Missing historical terminal slots receive signed EXPIRED
+// skips; a never-delivered task can be closed with VOID_UNISSUED.
+func (s *Store) LeaseExpected(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error)) (Delivery, error) {
+	if expectedSequence < 1 || expectedSequence > MaxSequence || buildSkip == nil {
+		return Delivery{}, fmt.Errorf("%w: invalid expected sequence recovery", ErrInvalid)
+	}
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip)
+}
+
+func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error)) (Delivery, error) {
 	var zero Delivery
 	if s == nil || s.db == nil || authenticatedNodeID == "" || now.IsZero() || configuredKeyID == "" || len(configuredKey) != ed25519.PublicKeySize {
 		return zero, fmt.Errorf("%w: invalid lease arguments", ErrInvalid)
@@ -543,6 +566,18 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 		return zero, err
 	}
 	defer tx.Rollback()
+	if expectedSequence > 0 {
+		recovery, isRecovery, recoverErr := s.recoverExpectedSequence(tx, authenticatedNodeID, expectedSequence, now, configuredKeyID, configuredKey, buildSkip)
+		if recoverErr != nil {
+			return zero, recoverErr
+		}
+		if isRecovery {
+			if err = tx.Commit(); err != nil {
+				return zero, err
+			}
+			return recovery, nil
+		}
+	}
 	var d Delivery
 	var storedKey string
 	var lease sql.NullString
@@ -620,6 +655,159 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	d.LeaseID = leaseID
 	d.Deadline = deadline
 	return d, nil
+}
+
+func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int64, now time.Time, keyID string, publicKey ed25519.PublicKey, buildSkip func(int64, string) ([]byte, error)) (Delivery, bool, error) {
+	var activeSequence sql.NullInt64
+	if err := tx.QueryRow(`SELECT sequence FROM tasks WHERE node_id=? AND active=1`, nodeID).Scan(&activeSequence); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Delivery{}, false, err
+	}
+	var highWater int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sequence),0) FROM tasks WHERE node_id=?`, nodeID).Scan(&highWater); err != nil {
+		return Delivery{}, false, err
+	}
+	if activeSequence.Valid && expected > activeSequence.Int64 {
+		return Delivery{}, false, ErrSequence
+	}
+	if !activeSequence.Valid && expected > highWater+1 {
+		return Delivery{}, false, ErrSequence
+	}
+	if expected > highWater {
+		return Delivery{}, false, nil
+	}
+
+	var d Delivery
+	var storedKey string
+	var active int
+	var lease sql.NullString
+	var deadline sql.NullInt64
+	var controlKind sql.NullString
+	err := tx.QueryRow(`SELECT t.task_id,t.node_id,t.sequence,t.raw,t.key_id,t.active,t.lease_id,t.lease_deadline,c.kind,c.raw FROM tasks t LEFT JOIN task_controls c ON c.task_id=t.task_id WHERE t.node_id=? AND t.sequence=?`, nodeID, expected).Scan(&d.TaskID, &d.NodeID, &d.Sequence, &d.Raw, &storedKey, &active, &lease, &deadline, &controlKind, &d.ControlRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Delivery{}, false, ErrSequence
+	}
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	if active == 1 && activeSequence.Valid && expected == activeSequence.Int64 {
+		return Delivery{}, false, nil
+	}
+	if storedKey != keyID || protocol.VerifyV2Task(d.Raw, publicKey) != nil {
+		return Delivery{}, false, ErrIdentity
+	}
+	var body taskEnvelope
+	if json.Unmarshal(d.Raw, &body) != nil || body.TaskID != d.TaskID || body.NodeID != nodeID || body.Sequence != expected || body.KeyID != keyID || body.Operation != "core.status" {
+		return Delivery{}, false, ErrIdentity
+	}
+	if active != 0 && active != 1 {
+		return Delivery{}, false, ErrConflict
+	}
+	if active == 0 && controlKind.Valid && controlKind.String == string(protocol.Skip) {
+		var fields struct {
+			NodeID    string    `json:"node_id"`
+			Sequence  uint64    `json:"sequence"`
+			Reason    string    `json:"reason"`
+			KeyID     string    `json:"signing_key_id"`
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if protocol.Verify(protocol.Skip, d.ControlRaw, publicKey) != nil || json.Unmarshal(d.ControlRaw, &fields) != nil || fields.NodeID != nodeID || fields.Sequence != uint64(expected) || fields.KeyID != keyID || fields.Reason != "VOID_UNISSUED" || fields.ExpiresAt.IsZero() {
+			return Delivery{}, false, ErrIdentity
+		}
+		if !now.Before(fields.ExpiresAt) {
+			replacement, signErr := buildSkip(expected, "VOID_UNISSUED")
+			if signErr != nil {
+				return Delivery{}, false, signErr
+			}
+			verified, verifyErr := taskcontrol.Verify(protocol.Skip, replacement, taskcontrol.Trust{NodeID: nodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+			if verifyErr != nil || verified.Sequence != uint64(expected) || verified.Reason != "VOID_UNISSUED" {
+				return Delivery{}, false, ErrIdentity
+			}
+			if _, err = tx.Exec(`UPDATE task_controls SET raw=? WHERE task_id=? AND kind='skip'`, replacement, d.TaskID); err != nil {
+				return Delivery{}, false, err
+			}
+			d.ControlRaw = bytes.Clone(replacement)
+		} else {
+			verified, verifyErr := taskcontrol.Verify(protocol.Skip, d.ControlRaw, taskcontrol.Trust{NodeID: nodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+			if verifyErr != nil || verified.Sequence != uint64(expected) || verified.Reason != "VOID_UNISSUED" {
+				return Delivery{}, false, ErrIdentity
+			}
+		}
+		if lease.Valid || deadline.Valid {
+			return Delivery{}, false, ErrConflict
+		}
+		id, idErr := newLeaseID()
+		if idErr != nil {
+			return Delivery{}, false, idErr
+		}
+		d.ControlKind, d.LeaseID, d.SequenceSkip = string(protocol.Skip), id, true
+		d.Raw = nil
+		d.ControlRaw = bytes.Clone(d.ControlRaw)
+		return d, true, nil
+	}
+	if active != 0 || buildSkip == nil {
+		return Delivery{}, false, ErrSequence
+	}
+	var terminal string
+	if err = tx.QueryRow(`SELECT status FROM acks WHERE task_id=? ORDER BY status_version DESC LIMIT 1`, d.TaskID).Scan(&terminal); err != nil {
+		return Delivery{}, false, ErrSequence
+	}
+	if !terminalStatuses[terminal] && !(terminal == "FAILED" && body.Operation == "core.status") {
+		return Delivery{}, false, ErrSequence
+	}
+	if now.Before(body.ExpiresAt) {
+		return Delivery{}, false, ErrSequence
+	}
+	if controlKind.Valid && controlKind.String != string(protocol.Skip) {
+		return Delivery{}, false, ErrConflict
+	}
+
+	var fields struct {
+		NodeID    string    `json:"node_id"`
+		Sequence  uint64    `json:"sequence"`
+		Reason    string    `json:"reason"`
+		KeyID     string    `json:"signing_key_id"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	needSign := true
+	if controlKind.Valid {
+		if protocol.Verify(protocol.Skip, d.ControlRaw, publicKey) != nil || json.Unmarshal(d.ControlRaw, &fields) != nil || fields.NodeID != nodeID || fields.Sequence != uint64(expected) || fields.KeyID != keyID || fields.Reason != "EXPIRED" {
+			return Delivery{}, false, ErrIdentity
+		}
+		if now.Before(fields.ExpiresAt) {
+			verified, verifyErr := taskcontrol.Verify(protocol.Skip, d.ControlRaw, taskcontrol.Trust{NodeID: nodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+			if verifyErr == nil && verified.Sequence == uint64(expected) && verified.Reason == "EXPIRED" {
+				needSign = false
+			}
+		}
+	}
+	if needSign {
+		controlRaw, signErr := buildSkip(expected, "EXPIRED")
+		if signErr != nil {
+			return Delivery{}, false, signErr
+		}
+		verified, verifyErr := taskcontrol.Verify(protocol.Skip, controlRaw, taskcontrol.Trust{NodeID: nodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+		if verifyErr != nil || verified.Sequence != uint64(expected) || verified.Reason != "EXPIRED" {
+			return Delivery{}, false, ErrIdentity
+		}
+		if _, err = tx.Exec(`INSERT INTO task_controls(task_id,kind,raw) VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET kind=excluded.kind,raw=excluded.raw`, d.TaskID, string(protocol.Skip), controlRaw); err != nil {
+			return Delivery{}, false, err
+		}
+		d.ControlRaw = bytes.Clone(controlRaw)
+	}
+	var lastStatus sql.NullInt64
+	if err = tx.QueryRow(`SELECT MAX(status_version) FROM acks WHERE task_id=?`, d.TaskID).Scan(&lastStatus); err != nil {
+		return Delivery{}, false, err
+	}
+	if lastStatus.Valid {
+		d.LastStatusVersion = lastStatus.Int64
+	}
+	id, err := newLeaseID()
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	d.ControlKind, d.LeaseID, d.SequenceRecovery = string(protocol.Skip), id, true
+	d.Raw, d.ControlRaw = bytes.Clone(d.Raw), bytes.Clone(d.ControlRaw)
+	return d, true, nil
 }
 
 // Acknowledge stores a node-bound, monotonically increasing status report.

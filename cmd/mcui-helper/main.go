@@ -22,6 +22,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/helper"
 	"github.com/ACnoway/mcui/internal/security"
+	"github.com/ACnoway/mcui/internal/trustedtime"
 )
 
 const maxSystemctlOutput = 2048
@@ -78,12 +79,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure Master checkpoint: %v", err)
 	}
+	trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
 	config := helper.Config{
-		NodeID:     *nodeID,
-		AllowedUID: uint32(allowedUID),
-		Keys:       map[string]helper.TrustedKey{*taskKeyID: {PublicKey: publicKey, Purpose: "task"}},
-		Now:        time.Now,
-		Checkpoint: checkpoint,
+		NodeID:             *nodeID,
+		AllowedUID:         uint32(allowedUID),
+		Keys:               map[string]helper.TrustedKey{*taskKeyID: {PublicKey: publicKey, Purpose: "task"}},
+		Now:                time.Now,
+		TrustedTimeHealthy: trustedClock.Healthy,
+		Checkpoint:         checkpoint,
 		ReadStatusAt: func(unit string, observedAt time.Time) (string, error) {
 			return readFixedStatus(unit, observedAt)
 		},

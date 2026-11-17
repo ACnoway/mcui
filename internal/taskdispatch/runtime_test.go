@@ -265,6 +265,81 @@ func TestExpiredSkipControlDeliveryAndRejectStartedTask(t *testing.T) {
 	}
 }
 
+func TestLeaseExpectedDeliversVoidUnissuedSkipAndConsumesAck(t *testing.T) {
+	store, err := Init(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	raw, publicKey := signed(t)
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	signer, err := tasksigner.New("test-key", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	if _, err = store.Issue("node-001", "task-001", "test-key", publicKey, func(int64) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	skip := signedControlForTest(t, signer, protocol.Skip, map[string]any{
+		"schema_version": 1, "node_id": "node-001", "sequence": 1, "reason": "VOID_UNISSUED",
+		"issued_at": issued.Format(time.RFC3339), "not_before": issued.Format(time.RFC3339), "expires_at": issued.Add(5 * time.Minute).Format(time.RFC3339),
+		"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": tasksigner.PlaceholderSignature,
+	})
+	if err = store.VoidUnissued("node-001", "task-001", skip, issued, "test-key", publicKey); err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := store.LeaseExpected("node-001", issued.Add(time.Second), "test-key", publicKey, 1, func(int64, string) ([]byte, error) {
+		return nil, errors.New("existing valid skip must be reused")
+	})
+	if err != nil || !delivery.SequenceSkip || delivery.SequenceRecovery || len(delivery.Raw) != 0 || delivery.ControlKind != string(protocol.Skip) || string(delivery.ControlRaw) != string(skip) {
+		t.Fatalf("void skip delivery = %+v, %v", delivery, err)
+	}
+	ack := Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, StatusVersion: 1, Status: "CANCELED", Result: []byte(`{"error_code":"task_canceled"}`)}
+	if err = store.AcknowledgeVoid("node-001", ack, issued.Add(time.Second), "test-key", publicKey); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetRecord("task-001")
+	if err != nil || record.Active || record.ControlKind != "" || len(record.Acks) != 1 || record.Acks[0].Status != "CANCELED" {
+		t.Fatalf("acknowledged void record = %+v, %v", record, err)
+	}
+}
+
+func TestLeaseExpectedReturnsSignedExpiredRecoveryForTerminalHistory(t *testing.T) {
+	store, err := Init(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	raw, publicKey := signed(t)
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	signer, err := tasksigner.New("test-key", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	if _, err = store.Issue("node-001", "task-001", "test-key", publicKey, func(int64) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Acknowledge("node-001", Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, StatusVersion: 1, Status: "SUCCEEDED", Result: []byte(`{"core":"xray"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	now := issued.Add(11 * time.Minute)
+	delivery, err := store.LeaseExpected("node-001", now, "test-key", publicKey, 1, func(sequence int64, reason string) ([]byte, error) {
+		if sequence != 1 || reason != "EXPIRED" {
+			return nil, errors.New("unexpected recovery skip request")
+		}
+		return signedControlForTest(t, signer, protocol.Skip, map[string]any{
+			"schema_version": 1, "node_id": "node-001", "sequence": sequence, "reason": reason,
+			"issued_at": now.Format(time.RFC3339), "not_before": now.Format(time.RFC3339), "expires_at": now.Add(5 * time.Minute).Format(time.RFC3339),
+			"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": tasksigner.PlaceholderSignature,
+		}), nil
+	})
+	if err != nil || !delivery.SequenceRecovery || delivery.SequenceSkip || len(delivery.Raw) == 0 || delivery.ControlKind != string(protocol.Skip) {
+		t.Fatalf("historical recovery delivery = %+v, %v", delivery, err)
+	}
+}
+
 func TestOpenAddsControlTableWithoutChangingLegacyTasks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.db")
 	store, err := Init(path)

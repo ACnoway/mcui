@@ -33,6 +33,7 @@ type Client struct {
 	failures                       int
 	taskHandler                    TaskHandler
 	taskHandlerFactory             func(nodeID string) (TaskHandler, error)
+	taskSequenceProvider           func() (int64, error)
 }
 
 type localState struct {

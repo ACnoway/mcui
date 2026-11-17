@@ -28,11 +28,23 @@ type Record struct {
 	Acks          []Ack
 }
 
+type TaskReference struct {
+	TaskID      string
+	NodeID      string
+	Sequence    int64
+	Raw         []byte
+	ControlKind string
+	ControlRaw  []byte
+	Active      bool
+	LastStatus  string
+}
+
 type taskEnvelopeV2 struct {
-	TaskID   string `json:"task_id"`
-	NodeID   string `json:"node_id"`
-	Sequence int64  `json:"sequence"`
-	KeyID    string `json:"signing_key_id"`
+	TaskID    string `json:"task_id"`
+	NodeID    string `json:"node_id"`
+	Sequence  int64  `json:"sequence"`
+	Operation string `json:"operation"`
+	KeyID     string `json:"signing_key_id"`
 }
 
 // Issue allocates the next per-node sequence and stores one fully signed task
@@ -94,7 +106,7 @@ func (s *Store) Issue(nodeID, taskID, keyID string, publicKey ed25519.PublicKey,
 	if err = json.Unmarshal(raw, &body); err != nil {
 		return zero, fmt.Errorf("%w: signed task fields: %v", ErrInvalid, err)
 	}
-	if body.NodeID != nodeID || body.TaskID != taskID || body.Sequence != sequence || body.KeyID != keyID {
+	if body.NodeID != nodeID || body.TaskID != taskID || body.Sequence != sequence || body.Operation != "core.status" || body.KeyID != keyID {
 		return zero, ErrIdentity
 	}
 	if err = protocol.VerifyV2Task(raw, publicKey); err != nil {
@@ -137,6 +149,40 @@ func (s *Store) GetRecord(taskID string) (Record, error) {
 	out.ControlRaw = append([]byte(nil), out.ControlRaw...)
 	out.Acks, err = s.readAcks(taskID)
 	return out, err
+}
+
+// ListTaskReferences returns immutable task identities for cross-database
+// issuance/audit reconciliation. It intentionally omits ACK payloads.
+func (s *Store) ListTaskReferences() ([]TaskReference, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrInvalid
+	}
+	rows, err := s.db.Query(`SELECT t.task_id,t.node_id,t.sequence,t.raw,c.kind,c.raw,t.active,COALESCE((SELECT status FROM acks WHERE task_id=t.task_id ORDER BY status_version DESC LIMIT 1),'') FROM tasks t LEFT JOIN task_controls c ON c.task_id=t.task_id ORDER BY t.node_id,t.sequence`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskReference
+	for rows.Next() {
+		var ref TaskReference
+		var controlKind sql.NullString
+		if err = rows.Scan(&ref.TaskID, &ref.NodeID, &ref.Sequence, &ref.Raw, &controlKind, &ref.ControlRaw, &ref.Active, &ref.LastStatus); err != nil {
+			return nil, err
+		}
+		if controlKind.Valid {
+			ref.ControlKind = controlKind.String
+		}
+		ref.Raw = bytes.Clone(ref.Raw)
+		ref.ControlRaw = bytes.Clone(ref.ControlRaw)
+		out = append(out, ref)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []TaskReference{}
+	}
+	return out, nil
 }
 
 // ListRecords returns the newest task records for one node, in descending
@@ -282,6 +328,100 @@ func (s *Store) SetControl(authenticatedNodeID, taskID string, kind protocol.Kin
 		return err
 	}
 	if _, err = tx.Exec(`UPDATE tasks SET lease_id=NULL,lease_deadline=NULL WHERE task_id=? AND active=1`, taskID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// VoidUnissued closes only a persisted status slot that has never been leased
+// or acknowledged. The signed skip and slot closure commit together.
+func (s *Store) VoidUnissued(nodeID, taskID string, raw []byte, now time.Time, keyID string, publicKey ed25519.PublicKey) error {
+	if s == nil || s.db == nil || nodeID == "" || taskID == "" || len(raw) == 0 || len(raw) > 64*1024 || now.IsZero() || keyID == "" || len(publicKey) != ed25519.PublicKeySize {
+		return ErrInvalid
+	}
+	control, err := taskcontrol.Verify(protocol.Skip, raw, taskcontrol.Trust{NodeID: nodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+	if err != nil || control.Reason != "VOID_UNISSUED" {
+		return ErrIdentity
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedNode, storedKey string
+	var sequence int64
+	var taskRaw []byte
+	var active int
+	var lease sql.NullString
+	var deadline sql.NullInt64
+	if err = tx.QueryRow(`SELECT node_id,sequence,raw,key_id,active,lease_id,lease_deadline FROM tasks WHERE task_id=?`, taskID).Scan(&storedNode, &sequence, &taskRaw, &storedKey, &active, &lease, &deadline); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	var body taskEnvelopeV2
+	if storedNode != nodeID || storedKey != keyID || active != 1 || lease.Valid || deadline.Valid || int64(control.Sequence) != sequence || protocol.VerifyV2Task(taskRaw, publicKey) != nil || json.Unmarshal(taskRaw, &body) != nil || body.TaskID != taskID || body.NodeID != nodeID || body.Sequence != sequence || body.Operation != "core.status" || body.KeyID != keyID {
+		return ErrConflict
+	}
+	var acks, controls int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM acks WHERE task_id=?`, taskID).Scan(&acks); err != nil {
+		return err
+	}
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM task_controls WHERE task_id=?`, taskID).Scan(&controls); err != nil {
+		return err
+	}
+	if acks != 0 || controls != 0 {
+		return ErrConflict
+	}
+	if _, err = tx.Exec(`INSERT INTO task_controls(task_id,kind,raw) VALUES(?,?,?)`, taskID, string(protocol.Skip), bytes.Clone(raw)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE tasks SET active=0,lease_id=NULL,lease_deadline=NULL WHERE task_id=? AND active=1`, taskID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AcknowledgeVoid records the mTLS-authenticated Agent receipt of a
+// VOID_UNISSUED slot. It re-verifies both the persisted skip and its task.
+func (s *Store) AcknowledgeVoid(nodeID string, ack Ack, now time.Time, keyID string, publicKey ed25519.PublicKey) error {
+	if s == nil || s.db == nil || nodeID == "" || ack.NodeID != nodeID || ack.TaskID == "" || ack.Sequence < 1 || ack.StatusVersion != 1 || ack.Status != "CANCELED" || now.IsZero() || keyID == "" || len(publicKey) != ed25519.PublicKeySize || len(ack.Result) > MaxResultBytes || !json.Valid(ack.Result) {
+		return ErrInvalid
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var taskNode, storedKey string
+	var sequence int64
+	var taskRaw, skipRaw []byte
+	var active int
+	var lease sql.NullString
+	var deadline sql.NullInt64
+	err = tx.QueryRow(`SELECT t.node_id,t.sequence,t.raw,t.key_id,t.active,t.lease_id,t.lease_deadline,c.raw FROM tasks t JOIN task_controls c ON c.task_id=t.task_id WHERE t.task_id=? AND c.kind='skip'`, ack.TaskID).Scan(&taskNode, &sequence, &taskRaw, &storedKey, &active, &lease, &deadline, &skipRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	control, controlErr := taskcontrol.Verify(protocol.Skip, skipRaw, taskcontrol.Trust{NodeID: nodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+	var body taskEnvelopeV2
+	if taskNode != nodeID || storedKey != keyID || sequence != ack.Sequence || active != 0 || lease.Valid || deadline.Valid || protocol.VerifyV2Task(taskRaw, publicKey) != nil || json.Unmarshal(taskRaw, &body) != nil || body.TaskID != ack.TaskID || body.NodeID != nodeID || body.Sequence != sequence || body.Operation != "core.status" || body.KeyID != keyID || controlErr != nil || control.Reason != "VOID_UNISSUED" || int64(control.Sequence) != sequence {
+		return ErrIdentity
+	}
+	var count int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM acks WHERE task_id=?`, ack.TaskID).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return ErrConflict
+	}
+	if _, err = tx.Exec(`INSERT INTO acks(task_id,status_version,node_id,sequence,status,result) VALUES(?,?,?,?,?,?)`, ack.TaskID, 1, nodeID, sequence, ack.Status, bytes.Clone(ack.Result)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM task_controls WHERE task_id=?`, ack.TaskID); err != nil {
 		return err
 	}
 	return tx.Commit()

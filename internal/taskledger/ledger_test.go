@@ -105,6 +105,35 @@ func TestInitializeAndOpenFailClosed(t *testing.T) {
 	}
 }
 
+func TestConsumeVoidPersistsCancellationTombstoneAndAdvancesSequence(t *testing.T) {
+	path := filepath.Join(privateDir(t), "void.db")
+	l, err := Initialize(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	notBefore := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+	expiresAt := notBefore.Add(5 * time.Minute)
+	raw := []byte(`{"schema_version":1,"reason":"VOID_UNISSUED"}`)
+	task, err := l.ConsumeVoid(1, raw, notBefore, expiresAt)
+	if err != nil || task.ID != "void-sequence-1" || task.State != Canceled || string(task.Envelope) != string(raw) {
+		t.Fatalf("void tombstone = %+v, %v", task, err)
+	}
+	if next, nextErr := l.Next(); nextErr != nil || next != 2 {
+		t.Fatalf("next sequence = %d, %v", next, nextErr)
+	}
+	if _, err = l.ConsumeVoid(1, raw, notBefore, expiresAt); err != nil {
+		t.Fatalf("identical void replay was not idempotent: %v", err)
+	}
+	if _, err = l.ConsumeVoid(1, []byte(`{"different":true}`), notBefore, expiresAt); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting void replay was accepted: %v", err)
+	}
+	var tombstones int
+	if err = l.db.QueryRow(`SELECT COUNT(*) FROM cancellations WHERE seq=1 AND id='void-sequence-1'`).Scan(&tombstones); err != nil || tombstones != 1 {
+		t.Fatalf("void cancellation tombstone count = %d, %v", tombstones, err)
+	}
+}
+
 func TestAcceptSequenceDuplicatesAndExpiry(t *testing.T) {
 	l, err := Initialize(filepath.Join(privateDir(t), "ledger.db"))
 	if err != nil {

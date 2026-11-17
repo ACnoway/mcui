@@ -179,6 +179,32 @@ func (p *Processor) ApplySkip(ctx context.Context, raw []byte, serverNow time.Ti
 	return task, nil
 }
 
+// ApplySequenceSkip consumes a taskless VOID_UNISSUED slot. It cannot close
+// issued tasks; those require the original expired task and its signed receipt.
+func (p *Processor) ApplySequenceSkip(ctx context.Context, raw []byte, serverNow time.Time, sequence int64) (taskledger.Task, error) {
+	var zero taskledger.Task
+	if p == nil || ctx == nil || sequence < 1 || serverNow.IsZero() || len(raw) == 0 || len(raw) > taskauth.MaxMessageBytes {
+		return zero, errors.New("invalid sequence skip")
+	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	snapshot := append([]byte(nil), raw...)
+	verified, err := p.verifyControl(protocol.Skip, snapshot, serverNow)
+	if err != nil {
+		return zero, err
+	}
+	if verified.Sequence != uint64(sequence) || verified.Reason != "VOID_UNISSUED" {
+		return zero, taskcontrol.ErrTarget
+	}
+	if err = ctx.Err(); err != nil {
+		return zero, err
+	}
+	return p.ledger.ConsumeVoid(sequence, snapshot, verified.NotBefore, verified.ExpiresAt)
+}
+
 func (p *Processor) verifyControl(kind protocol.Kind, raw []byte, now time.Time) (taskcontrol.Verified, error) {
 	var zero taskcontrol.Verified
 	if _, err := protocol.CanonicalSignedBytes(kind, raw); err != nil {

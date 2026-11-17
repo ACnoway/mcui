@@ -342,3 +342,80 @@ func TestStatusTaskControlEndpointsDeliverCancelAndExpiredSkip(t *testing.T) {
 		}
 	})
 }
+
+func TestTaskRuntimeReconcilesInterruptedIssueAndVoidAudits(t *testing.T) {
+	t.Run("repair missing issue audit", func(t *testing.T) {
+		client := newTaskTestClient(t)
+		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-8234567890123456", NodeID: nodeID, Core: "xray"}, false)
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create HTTP %d: %s", created.Code, created.Body)
+		}
+		if err := client.store.Update(func(state *store.State) error {
+			filtered := state.Audits[:0]
+			for _, event := range state.Audits {
+				if event.Action != "task.status.issue" {
+					filtered = append(filtered, event)
+				}
+			}
+			state.Audits = filtered
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.server.ReconcileTaskRuntime(); err != nil {
+			t.Fatalf("reconcile after interrupted issue audit: %v", err)
+		}
+		var recovered int
+		if err := client.store.View(func(state store.State) error {
+			for _, event := range state.Audits {
+				if event.Action == "task.status.issue" && event.Outcome == "issued-recovered" {
+					recovered++
+				}
+			}
+			return nil
+		}); err != nil || recovered != 1 {
+			t.Fatalf("recovered issue audit count = %d, %v", recovered, err)
+		}
+	})
+
+	t.Run("repair missing void audit", func(t *testing.T) {
+		client := newTaskTestClient(t)
+		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-9234567890123456", NodeID: nodeID, Core: "xray"}, false)
+		var task taskView
+		if err := json.Unmarshal(created.Body.Bytes(), &task); err != nil || created.Code != http.StatusCreated {
+			t.Fatalf("create HTTP %d = %+v, %v", created.Code, task, err)
+		}
+		voided := client.request(http.MethodPost, "/api/v1/admin/tasks/"+task.TaskID+"/void", taskControlRequest{RequestID: "control-9234567890123456"}, false)
+		if voided.Code != http.StatusOK {
+			t.Fatalf("void HTTP %d: %s", voided.Code, voided.Body)
+		}
+		if err := client.store.Update(func(state *store.State) error {
+			filtered := state.Audits[:0]
+			for _, event := range state.Audits {
+				if event.Action != "task.status.void.issue" {
+					filtered = append(filtered, event)
+				}
+			}
+			state.Audits = filtered
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.server.ReconcileTaskRuntime(); err != nil {
+			t.Fatalf("reconcile after interrupted void audit: %v", err)
+		}
+		var recovered int
+		if err := client.store.View(func(state store.State) error {
+			for _, event := range state.Audits {
+				if event.Action == "task.status.void.issue" && event.Outcome == "voided-recovered" {
+					recovered++
+				}
+			}
+			return nil
+		}); err != nil || recovered != 1 {
+			t.Fatalf("recovered void audit count = %d, %v", recovered, err)
+		}
+	})
+}

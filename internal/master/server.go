@@ -91,6 +91,7 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 	x.mux.HandleFunc("POST /api/v1/admin/tasks", x.createStatusTask)
 	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/cancel", x.cancelStatusTask)
 	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/skip", x.skipExpiredStatusTask)
+	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/void", x.voidUnissuedStatusTask)
 	x.mux.HandleFunc("GET /api/v1/admin/tasks", x.listTasks)
 	x.mux.HandleFunc("GET /api/v1/admin/tasks/{id}", x.taskDetail)
 	x.mux.HandleFunc("POST /api/v1/admin/nodes/disable", x.disableNode)
