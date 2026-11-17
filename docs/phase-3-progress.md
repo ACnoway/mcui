@@ -22,3 +22,14 @@
 ## 当前验证边界
 
 版本目录测试只覆盖固定源解析、URL 校验、缓存与上游不可用处理，不覆盖发布密钥、TUF、二进制真实性或节点安装。阶段 3 退出门槛见[分阶段开发流程](./phased-development-workflow.md)；任何 Core 在兼容矩阵实测前仍是未验证状态。
+
+## 已执行检查
+
+| 检查 | 结果 | 环境/范围 |
+|---|---|---|
+| `scripts/check-static.sh` | 通过，提交 `d17c468` | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0 |
+| Go 格式、vet、构建与测试 | 通过 | 包含新目录解析/链接校验/缓存测试、Master 管理员认证测试及全量现有测试 |
+| Linux amd64/arm64 构建 | 通过 | 交叉构建；没有 arm64 实机或干净 VM 证据 |
+| V1/V2 协议向量 | 通过 | 分别 4 个/9 个及 3 个/29 个正反例 |
+| Web 冻结依赖与生产构建 | 通过 | `pnpm install --frozen-lockfile`、`pnpm build` |
+| 官方 API 在线 smoke test、Core 下载/安装、systemd 故障恢复 | 未执行 | 当前提交未包含安装、备用制品、Helper 或 Core 生命周期运行时 |
