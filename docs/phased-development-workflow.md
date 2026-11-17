@@ -53,7 +53,7 @@
 - [x] 冻结 V1 task/config/cancel/skip schema、JCS/Ed25519 域分离、序号缺口、取消/skip 竞争、租约及重启恢复语义；跨实现向量已实现，项目内复核待进行。
 - [x] 选择标准 TUF 作为发布元数据基线并记录离线根/targets 阈值、过期、回滚和恢复要求；密钥人员任命及实现未开始。
 - [x] 明确 Helper 固定操作/步骤参数绑定约束和空配置允许表（默认拒绝）；逐 Core/版本配置表在后续版本实测前保持禁用。
-- [x] 加入 SHA 固定的 CI 工作流和精确工具链静态脚本；分支保护与必需检查须仓库管理员设置。
+- [x] 加入 SHA 固定的 CI 工作流和精确工具链静态脚本；目标提交的远端检查结果和实际采用的仓库规则仍须核验。
 
 **交付物**：`architecture.md`、`threat-model.md`、`agent-protocol.md`、`panel-authz.md`、`config-policy.md`、`artifact-trust.md`、`core-compatibility.md`。
 
