@@ -1,10 +1,10 @@
 # MCUI Master and empty Agent
 
-MCUI is a multi-Core control plane in staged development. This repository currently contains the Master panel, a Core-free Agent identity client, and Phase 0 protocol schema/vector work. It does not contain task delivery, a Helper, Core installation, or Core configuration operations. The first demo target is the complete Xray workflow; installation guidance and Docker builds follow that demo, before adding other Cores.
+MCUI is a multi-Core control plane in staged development. This repository currently contains the Master panel, a Core-free Agent identity client, and Phase 2 development-only protocol and security components. There is no task delivery runtime or executable Helper; Core installation and configuration operations remain unavailable. The first demo target is the complete Xray workflow; installation guidance and Docker builds follow that demo, before adding other Cores.
 
 ## Current stage
 
-Phase 0 design preparation and Phase 1 implementation are in progress. The work and its evidence are tracked in [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Project security checks, verified platform/Core capabilities, backup recovery, and clean Linux deployment evidence remain release gates.
+Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 security components are under development but not wired to task delivery or Helper execution. Independent checkpoint persistence, trusted time, authorized recovery, signer isolation and end-to-end verification remain open; see [the V2 status protocol](docs/phase-2-protocol-draft.md).
 
 ## Development checks
 
@@ -14,6 +14,7 @@ The baseline pins Go 1.27.4, Node.js 26.13.1, and pnpm 12.17.0; see [development
 go vet ./...
 go test ./...
 node scripts/verify-protocol-vectors.mjs
+node scripts/verify-protocol-v2-vectors.mjs
 cd web
 pnpm install --frozen-lockfile
 pnpm build
@@ -50,5 +51,10 @@ The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-mas
 - `cmd/agent`: Core-free Agent enrollment, mTLS heartbeat, and certificate rotation client
 - `internal/store`: versioned SQLite schema and legacy-state migration
 - `internal/master`: bootstrap, MFA sessions, scoped reads, invites, disable, and mTLS identity endpoints
-- `internal/protocol`: Phase 0 signed-message schema validation and canonicalization; not connected to runtime task execution
+- `internal/protocol`: signed-message schema validation and canonicalization, including status-only V2; not connected to runtime task execution
+- `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: isolated task verification, control verification and status signing primitives, not an authorization service
+- `internal/taskledger`, `internal/taskslots`, `internal/taskdispatch`, `internal/agenttasks`: experimental task intake and delivery storage; not connected to Agent or Master runtime
+- `internal/helper`: development-only authorization/ledger code; socket execution deliberately fails closed
+- `internal/checkpoint`: experimental transition model requiring an independently trusted authority and durable local journal
+- `internal/checkpointstore`, `internal/checkpointjournal`: experimental SQLite authority and journal primitives; not independently deployed, authenticated or connected to runtime
 - `web`: Vue administration panel

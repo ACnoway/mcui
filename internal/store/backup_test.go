@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -110,6 +111,44 @@ func TestVerifyRejectsCorruptAndNonDatabaseFiles(t *testing.T) {
 	}
 	if _, err := VerifyDatabase(filepath.Join(t.TempDir(), "missing.db")); err == nil {
 		t.Fatal("missing database passed verification")
+	}
+}
+
+func TestVerifyRejectsHiddenSQLiteLookalikeTrigger(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "modified.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The normal schema contains SQLite-owned objects such as sqlite_sequence
+	// and autoindexes; they must remain accepted.
+	if _, err := VerifyDatabase(path); err != nil {
+		t.Fatalf("valid database rejected: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER sqlitexevil AFTER INSERT ON admins BEGIN SELECT 1; END`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyDatabase(path); err == nil || !strings.Contains(err.Error(), "sqlitexevil") {
+		t.Errorf("expected unexpected object error for sqlitexevil, got %v", err)
+	}
+	backup := filepath.Join(root, "snapshot.db")
+	if err := Backup(path, backup); err == nil || !strings.Contains(err.Error(), "sqlitexevil") {
+		t.Errorf("expected backup to reject sqlitexevil, got %v", err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Errorf("rejected backup should not be published: %v", err)
 	}
 }
 

@@ -163,7 +163,7 @@ func validateSchema(db *sql.DB) error {
 			}
 		}
 	}
-	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY type, name`)
 	if err != nil {
 		return err
 	}
