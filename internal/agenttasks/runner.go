@@ -153,9 +153,14 @@ func (r *Runner) ProcessControlTask(ctx context.Context, taskRaw []byte, control
 			return nil, err
 		}
 	case string(protocol.Skip):
-		task, err = r.processor.ApplySkip(ctx, controlRaw, serverNow, task.ID, task.Sequence)
-		if errors.Is(err, taskledger.ErrTooLate) {
-			task, err = r.ledger.Get(task.Sequence)
+		taskID, sequence := task.ID, task.Sequence
+		skipped, skipErr := r.processor.ApplySkip(ctx, controlRaw, serverNow, taskID, sequence)
+		if errors.Is(skipErr, taskledger.ErrTooLate) {
+			task, err = r.ledger.Get(sequence)
+		} else if skipErr != nil {
+			return nil, skipErr
+		} else {
+			task = skipped
 		}
 		if err != nil {
 			return nil, err
