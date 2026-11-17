@@ -173,7 +173,7 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 	}
 	// Persist authorization and its audit before creating a deliverable task.
 	// A failed signing call therefore cannot leave an entirely unaudited queue item.
-	if err = s.store.Update(func(st *store.State) error {
+	if err := s.store.Update(func(st *store.State) error {
 		current, adminExists := st.Admins[ctx.Admin.ID]
 		currentNode, nodeExists := st.Nodes[node.ID]
 		if !adminExists || current.Disabled || (current.Role != "security_admin" && current.Role != "operator") || !nodeExists || currentNode.Disabled || !canQueryCoreStatus(current, currentNode) {
