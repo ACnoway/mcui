@@ -43,4 +43,5 @@
 | Web 冻结依赖与生产构建 | 通过，提交 `5db70ad` | `pnpm install --frozen-lockfile`、`pnpm build`、Vue 类型检查 |
 | Master systemd unit | 通过，提交 `5db70ad` | Debian 13.7；用 `/tmp` 独立根目录和临时 panel 构建产物运行 `systemd-analyze verify`，未安装到系统服务路径 |
 | 官方 API 在线 payload smoke test | 通过（2026-11-17） | 每页 10 条解压后约 1.3 MiB（Xray）、3.4 MiB（sing-box）、0.8 MiB（mita）；100 条请求为 5.6–32.1 MiB，因此采用按需分页 |
-| 官方 Core 资产实际下载、Agent 安装、systemd 故障恢复 | 未执行 | 备用缓存目前由固定 fixture 覆盖；尚未连接 Agent 安装、Helper 或 Core 生命周期运行时 |
+| 官方 Core 资产实际下载与摘要校验 | 通过（2026-11-17） | `ssh ro` 临时运行 `BackupStore.Sync`，实际下载并校验 6 个资产：Xray v26.11.9（30.5 MiB）、sing-box v1.14.4（59.1 MiB）、mita v3.39.0（6.8 MiB）；只写入临时目录，测试后清理 |
+| Agent 安装、systemd 故障恢复 | 未执行 | 尚未连接 Agent 安装、Helper 解包/安装事务或 Core 生命周期运行时 |
