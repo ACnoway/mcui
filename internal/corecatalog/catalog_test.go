@@ -2,6 +2,7 @@ package corecatalog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
