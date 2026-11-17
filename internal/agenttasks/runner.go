@@ -76,7 +76,7 @@ func (r *Runner) ProcessStatusTask(ctx context.Context, raw []byte, leaseID stri
 	if task.State == taskledger.Pending {
 		started, startErr := r.ledger.Start(task.Sequence, r.now())
 		if errors.Is(startErr, taskledger.ErrNotYet) {
-			return acknowledgments(task), nil
+			return acknowledgments(task, lastStatusVersion), nil
 		}
 		if startErr != nil {
 			return nil, startErr

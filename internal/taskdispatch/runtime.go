@@ -1,6 +1,7 @@
 package taskdispatch
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"

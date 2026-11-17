@@ -97,7 +97,7 @@ func (p *Processor) Receive(ctx context.Context, signedBytes []byte) (taskledger
 // verifyForReceipt accepts an expired but authentic envelope only so the
 // durable Agent ledger can advance it as terminal without executing it. The
 // signature, key purpose, target and signed time bounds are still checked.
-func verifyForReceipt(raw, nodeID string, keys map[string]taskauth.Key, now time.Time) (taskauth.Verified, error) {
+func verifyForReceipt(raw []byte, nodeID string, keys map[string]taskauth.Key, now time.Time) (taskauth.Verified, error) {
 	trust := taskauth.Trust{NodeID: nodeID, Keys: keys, Now: now}
 	verified, err := taskauth.Verify(raw, trust)
 	if err == nil || !errors.Is(err, taskauth.ErrTime) || now.IsZero() {
