@@ -236,7 +236,7 @@ func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (st
 	return h.executeUIDAt(cred.Uid, raw, serverTime, previousSequence, true)
 }
 func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
-	return h.executeUIDAt(uid, raw, h.cfg.Now(), -1, false)
+	return h.executeUIDAt(uid, raw, time.Time{}, -1, false)
 }
 
 func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, previousSequence int64, checkpointed bool) (string, error) {
@@ -291,10 +291,12 @@ func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, prev
 	if e != nil {
 		return "", e
 	}
-	if !checkpointed && (h.cfg.TrustedTimeHealthy == nil || !h.cfg.TrustedTimeHealthy()) {
-		return "", ErrReconciliation
-	}
-	if checkpointed && h.cfg.TrustedTimeHealthy != nil && !h.cfg.TrustedTimeHealthy() {
+	if !checkpointed {
+		if h.cfg.TrustedTimeHealthy == nil || !h.cfg.TrustedTimeHealthy() {
+			return "", ErrReconciliation
+		}
+		trustedNow = h.cfg.Now()
+	} else if h.cfg.TrustedTimeHealthy != nil && !h.cfg.TrustedTimeHealthy() {
 		return "", ErrReconciliation
 	}
 	now := trustedNow.UTC()

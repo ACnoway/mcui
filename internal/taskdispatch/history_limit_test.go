@@ -12,6 +12,11 @@ func TestRollbackCannotBeRepeated(t *testing.T) {
 	if err := s.Provision("node-001", 1, raw, "test-key", key); err != nil {
 		t.Fatal(err)
 	}
+	// This test preserves rollback transition coverage for a future mutating operation.
+	legacyRaw := strings.Replace(string(raw), `"operation":"core.status"`, `"operation":"core.install"`, 1)
+	if _, err := s.db.Exec(`UPDATE tasks SET raw=CAST(? AS BLOB) WHERE task_id='task-001'`, legacyRaw); err != nil {
+		t.Fatal(err)
+	}
 	ack := Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, Result: []byte("report")}
 	for i, status := range []string{"FAILED", "ROLLING_BACK", "FAILED"} {
 		ack.StatusVersion, ack.Status = int64(i+1), status

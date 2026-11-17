@@ -112,8 +112,9 @@ func TestRejectionsAndRecovery(t *testing.T) {
 		})
 	}
 	now = time.Date(2026, 11, 16, 0, 10, 0, 0, time.UTC)
-	if _, err = p.Receive(context.Background(), good); !errors.Is(err, taskauth.ErrTime) {
-		t.Fatalf("expired: %v", err)
+	expired, receiveErr := p.Receive(context.Background(), good)
+	if receiveErr != nil || expired.State != taskledger.Expired {
+		t.Fatalf("expired task was not durably recorded: task=%+v err=%v", expired, receiveErr)
 	}
 	now = time.Date(2026, 11, 15, 23, 59, 59, 0, time.UTC)
 	if _, err = p.Receive(context.Background(), good); !errors.Is(err, taskauth.ErrTime) {
