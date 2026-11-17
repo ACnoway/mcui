@@ -4,7 +4,7 @@ MCUI is a multi-Core control plane in staged development. This repository curren
 
 ## Current stage
 
-Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 security components are under development but not wired to task delivery or Helper execution. Independent checkpoint persistence, trusted time, authorized recovery, signer isolation and end-to-end verification remain open; see [the V2 status protocol](docs/phase-2-protocol-draft.md).
+Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 engineering status and its remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md). It has isolated protocol, signing, storage, and helper authorization components, but no task delivery API or Helper runtime path; component tests are not end-to-end acceptance. State queries do not require separate approval, but each request must enforce server-side administrator identity, node scope, operation permission, and audit. Independent anti-rollback checkpoints, trusted time, authorized recovery, signer isolation and end-to-end verification remain open.
 
 ## Development checks
 
