@@ -36,10 +36,11 @@
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
-| `scripts/check-static.sh` | 通过，提交 `d17c468` | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0 |
-| Go 格式、vet、构建与测试 | 通过 | 包含新目录解析/链接校验/缓存测试、Master 管理员认证测试及全量现有测试 |
-| Linux amd64/arm64 构建 | 通过 | 交叉构建；没有 arm64 实机或干净 VM 证据 |
-| V1/V2 协议向量 | 通过 | 分别 4 个/9 个及 3 个/29 个正反例 |
-| Web 冻结依赖与生产构建 | 通过 | `pnpm install --frozen-lockfile`、`pnpm build` |
+| `bash scripts/check-static.sh` | 通过，提交 `5db70ad` | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0 |
+| Go 格式、vet、构建与全量测试 | 通过，提交 `5db70ad` | 包含备用缓存摘要/长度/跳转/更新失败测试、Master 备份 API 认证测试及全量现有测试 |
+| Linux amd64/arm64 构建 | 通过，提交 `5db70ad` | 交叉构建；没有 arm64 实机或干净 VM 证据 |
+| V1/V2 协议向量 | 通过，提交 `5db70ad` | 分别 4 个/9 个及 3 个/29 个正反例 |
+| Web 冻结依赖与生产构建 | 通过，提交 `5db70ad` | `pnpm install --frozen-lockfile`、`pnpm build`、Vue 类型检查 |
+| Master systemd unit | 通过，提交 `5db70ad` | Debian 13.7；用 `/tmp` 独立根目录和临时 panel 构建产物运行 `systemd-analyze verify`，未安装到系统服务路径 |
 | 官方 API 在线 payload smoke test | 通过（2026-11-17） | 每页 10 条解压后约 1.3 MiB（Xray）、3.4 MiB（sing-box）、0.8 MiB（mita）；100 条请求为 5.6–32.1 MiB，因此采用按需分页 |
-| Core 下载/安装、systemd 故障恢复 | 未执行 | 当前提交未包含安装、备用制品、Helper 或 Core 生命周期运行时 |
+| 官方 Core 资产实际下载、Agent 安装、systemd 故障恢复 | 未执行 | 备用缓存目前由固定 fixture 覆盖；尚未连接 Agent 安装、Helper 或 Core 生命周期运行时 |
