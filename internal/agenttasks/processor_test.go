@@ -141,7 +141,7 @@ func TestRejectionsAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := l.Get(1)
-	if err != nil || got.State != taskledger.Pending || !bytes.Equal(got.Envelope, good) {
+	if err != nil || got.State != taskledger.Expired || !bytes.Equal(got.Envelope, good) {
 		t.Fatalf("reopen: %+v %v", got, err)
 	}
 	config.Ledger = l
