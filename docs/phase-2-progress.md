@@ -1,6 +1,6 @@
 # 阶段 2 进度与未完成项
 
-**状态：阶段 2 的代码范围已完成，自动构建验证待本次远程检查；正式阶段验收未完成。** 当前唯一可执行任务是签名的 V2 `core.status` 只读查询。所有任务时限和审计判断都要求认证 NTS 时间；Core 安装、启停、配置和任意命令仍未开放。V2 协议见[协议草案](./phase-2-protocol-draft.md)，部署与恢复步骤见[操作说明](./phase-2-operations.md)。
+**状态：阶段 2 代码范围及远程自动构建验证已通过；正式阶段验收未完成。** 远程 `scripts/check-static.sh` 在 `be46e50` 通过。当前唯一可执行任务是签名的 V2 `core.status` 只读查询。所有任务时限和审计判断都要求认证 NTS 时间；Core 安装、启停、配置和任意命令仍未开放。V2 协议见[协议草案](./phase-2-protocol-draft.md)，部署与恢复步骤见[操作说明](./phase-2-operations.md)。
 
 ## 已接通的运行路径
 
@@ -22,11 +22,11 @@
 
 | 检查 | 当前结果 | 说明 |
 |---|---|---|
-| 本地 `gofmt`（本次 Go 改动） | 通过 | 不依赖本机 Go 工具链 |
-| 本地 `git diff --check` | 通过 | 推送前再次检查 |
+| Go 格式检查 | 通过 | 本地改动运行 `gofmt`；远端脚本检查全部 `cmd/`、`internal/` Go 文件 |
+| `git diff --check` | 通过 | 每次提交前检查 |
 | 本地 Go 构建/测试 | 未运行 | 本机 Go wrapper 无法下载仓库指定工具链；依用户要求使用远程环境 |
-| `scripts/check-static.sh` 远程构建与测试 | 本次结果待补 | 通过 `ssh ro` 优先、失败时 `uk`，目录 `/root/mcui` |
-| systemd unit 语法检查 | 本次结果待补 | 随远程静态检查记录 |
+| `scripts/check-static.sh` 远程构建与测试 | 通过（`be46e50`） | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包含 `go vet`、全量 Go 测试、Linux amd64/arm64 构建、V1/V2 向量、冻结依赖安装、前端类型检查和生产构建 |
+| systemd unit 语法检查 | 未单独重跑 | 本次提交没有修改 unit 或 drop-in 文件 |
 | Linux 实机演练/安全审核 | 未进行 | 按本次范围明确排除 |
 
 ## 阶段退出门槛
