@@ -32,7 +32,7 @@ func TestListUsesFixedOfficialSourcesAndValidatesReleaseLinks(t *testing.T) {
 				break
 			}
 		}
-		if p.id == "" || req.URL.Query().Get("per_page") != "100" {
+		if p.id == "" || req.URL.Query().Get("per_page") != fmt.Sprint(pageSize) || req.URL.Query().Get("page") != "1" {
 			return nil, fmt.Errorf("unexpected release endpoint: %s", req.URL)
 		}
 		body := fmt.Sprintf(`[
@@ -95,7 +95,9 @@ func TestListServesRecentCacheWhenSourcesAreUnavailable(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("unavailable")), Request: req}, nil
 	})
 	client.mu.Lock()
-	client.expires = time.Time{}
+	entry := client.cached[1]
+	entry.expires = time.Time{}
+	client.cached[1] = entry
 	client.mu.Unlock()
 
 	stale, err := client.List(context.Background())
@@ -104,6 +106,57 @@ func TestListServesRecentCacheWhenSourcesAreUnavailable(t *testing.T) {
 	}
 	if !stale.Stale || len(stale.Cores) != 3 {
 		t.Fatalf("expected stale cached catalog, got %+v", stale)
+	}
+}
+
+func TestListPageBoundsAndCatalogPagination(t *testing.T) {
+	var calls atomic.Int32
+	client := NewClient()
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if req.URL.Query().Get("per_page") != fmt.Sprint(pageSize) || req.URL.Query().Get("page") != "2" {
+			return nil, fmt.Errorf("unexpected page request: %s", req.URL)
+		}
+		var p provider
+		for _, candidate := range providers {
+			if req.URL.Path == "/repos/"+candidate.repository+"/releases" {
+				p = candidate
+				break
+			}
+		}
+		if p.id == "" {
+			return nil, fmt.Errorf("unexpected source path: %s", req.URL.Path)
+		}
+		releases := make([]upstreamRelease, pageSize)
+		for i := range releases {
+			tag := fmt.Sprintf("v2.0.%d", i)
+			releases[i] = upstreamRelease{
+				TagName: tag, Name: tag, HTMLURL: "https://github.com/" + p.repository + "/releases/tag/" + tag,
+				PublishedAt: time.Date(2026, 10, 1+i, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+				Assets:      []upstreamAsset{{Name: "artifact.zip", Size: 1, BrowserDownloadURL: "https://github.com/" + p.repository + "/releases/download/" + tag + "/artifact.zip", Digest: "sha256:" + strings.Repeat("d", 64)}},
+			}
+		}
+		body, err := json.Marshal(releases)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+	})}
+
+	if _, err := client.ListPage(context.Background(), MaxPage+1); err == nil {
+		t.Fatal("out-of-range page was accepted")
+	}
+	page, err := client.ListPage(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Page != 2 || !page.HasMore || calls.Load() != 3 {
+		t.Fatalf("unexpected page metadata: page=%d has_more=%t calls=%d", page.Page, page.HasMore, calls.Load())
+	}
+	for _, core := range page.Cores {
+		if !core.HasMore || len(core.Releases) != pageSize {
+			t.Fatalf("unexpected per-Core pagination for %s: %+v", core.ID, core)
+		}
 	}
 }
 
@@ -134,7 +187,7 @@ func newMockClient(t *testing.T, calls *atomic.Int32, status int, body func(prov
 				break
 			}
 		}
-		if p.id == "" {
+		if p.id == "" || req.URL.Query().Get("per_page") != fmt.Sprint(pageSize) || req.URL.Query().Get("page") != "1" {
 			return nil, fmt.Errorf("unexpected source path: %s", req.URL.Path)
 		}
 		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body(p))), Request: req}, nil

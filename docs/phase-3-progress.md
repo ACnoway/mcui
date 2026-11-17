@@ -4,8 +4,8 @@
 
 ## 已实现的只读版本目录
 
-- Master 为已登录管理员提供 `GET /api/v1/admin/cores/releases`，从三个固定 GitHub 官方仓库读取 Xray、sing-box 和 mita 的最近发布版本、发布页及制品链接。
-- 上游请求使用固定 API 地址、8 秒超时、单请求响应大小上限和不跟随重定向的 HTTP 客户端。返回的发布页与制品链接必须匹配对应官方仓库、版本和文件名；不匹配的记录不进入面板。
+- Master 为已登录管理员提供 `GET /api/v1/admin/cores/releases?page=N`，从三个固定 GitHub 官方仓库读取 Xray、sing-box 和 mita 的最近发布版本、发布页及制品链接；每页 10 个，最多浏览最近 100 个，避免一次取回大型资产清单。
+- 上游请求使用固定 API 地址、8 秒超时、8 MiB 单响应上限和不跟随重定向的 HTTP 客户端。返回的发布页与制品链接必须匹配对应官方仓库、版本和文件名；不匹配的记录不进入面板。
 - Master 进程内缓存目录 10 分钟；上游暂时不可用时，最多返回 24 小时内的最近成功快照并标记为过期。缓存不会跨 Master 重启保留。
 - 面板展示版本、预发布标记、发布时间、官方发布页、制品文件名、大小和 GitHub Release API 提供的 SHA-256 digest（若有）。
 - 此目录仅用于版本发现。digest 尚未经过本项目 TUF targets 阈值签署；当前没有主控备用制品、安装任务、Agent 下载路径、Helper 解包/安装事务或 Core 服务管理操作。
@@ -21,7 +21,7 @@
 
 ## 当前验证边界
 
-版本目录测试只覆盖固定源解析、URL 校验、缓存与上游不可用处理，不覆盖发布密钥、TUF、二进制真实性或节点安装。阶段 3 退出门槛见[分阶段开发流程](./phased-development-workflow.md)；任何 Core 在兼容矩阵实测前仍是未验证状态。
+版本目录测试只覆盖固定源解析、分页、URL 校验、缓存与上游不可用处理，不覆盖发布密钥、TUF、二进制真实性或节点安装。阶段 3 退出门槛见[分阶段开发流程](./phased-development-workflow.md)；任何 Core 在兼容矩阵实测前仍是未验证状态。
 
 ## 已执行检查
 
@@ -32,4 +32,5 @@
 | Linux amd64/arm64 构建 | 通过 | 交叉构建；没有 arm64 实机或干净 VM 证据 |
 | V1/V2 协议向量 | 通过 | 分别 4 个/9 个及 3 个/29 个正反例 |
 | Web 冻结依赖与生产构建 | 通过 | `pnpm install --frozen-lockfile`、`pnpm build` |
-| 官方 API 在线 smoke test、Core 下载/安装、systemd 故障恢复 | 未执行 | 当前提交未包含安装、备用制品、Helper 或 Core 生命周期运行时 |
+| 官方 API 在线 payload smoke test | 通过（2026-11-17） | 每页 10 条解压后约 1.3 MiB（Xray）、3.4 MiB（sing-box）、0.8 MiB（mita）；100 条请求为 5.6–32.1 MiB，因此采用按需分页 |
+| Core 下载/安装、systemd 故障恢复 | 未执行 | 当前提交未包含安装、备用制品、Helper 或 Core 生命周期运行时 |

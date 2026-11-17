@@ -26,6 +26,13 @@ func (f *fixedCoreCatalog) List(context.Context) (corecatalog.Snapshot, error) {
 	return f.snapshot, f.err
 }
 
+func (f *fixedCoreCatalog) ListPage(_ context.Context, page int) (corecatalog.Snapshot, error) {
+	f.calls++
+	out := f.snapshot
+	out.Page = page
+	return out, f.err
+}
+
 func TestCoreReleasesRequiresAdminSession(t *testing.T) {
 	s, _ := newCoreCatalogTestServer(t)
 	source := &fixedCoreCatalog{snapshot: corecatalog.Snapshot{Cores: []corecatalog.Core{}}}
@@ -72,6 +79,23 @@ func TestCoreReleasesHidesUpstreamFailureDetails(t *testing.T) {
 	response := requestAsAdmin(t, s.Handler(), http.MethodGet, "http://example.com/api/v1/admin/cores/releases", nil, token, "")
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "sensitive data") {
 		t.Fatalf("unexpected failure response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCoreReleasesValidatesAndServesPages(t *testing.T) {
+	s, st := newCoreCatalogTestServer(t)
+	token, csrf := "session-catalog-page", "csrf-catalog-page"
+	seedAdminSession(t, st, store.Admin{Role: "auditor", NodeGroups: []string{"g1"}}, token, csrf, time.Now().Unix())
+	source := &fixedCoreCatalog{snapshot: corecatalog.Snapshot{Cores: []corecatalog.Core{}}}
+	s.coreCatalog = source
+
+	badPage := requestAsAdmin(t, s.Handler(), http.MethodGet, "http://example.com/api/v1/admin/cores/releases?page=11", nil, token, "")
+	if badPage.Code != http.StatusBadRequest || source.calls != 0 {
+		t.Fatalf("invalid page status=%d calls=%d", badPage.Code, source.calls)
+	}
+	page := requestAsAdmin(t, s.Handler(), http.MethodGet, "http://example.com/api/v1/admin/cores/releases?page=2", nil, token, "")
+	if page.Code != http.StatusOK || source.calls != 1 || !strings.Contains(page.Body.String(), `"page":2`) {
+		t.Fatalf("valid page status=%d calls=%d body=%s", page.Code, source.calls, page.Body.String())
 	}
 }
 

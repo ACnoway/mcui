@@ -1,6 +1,7 @@
 package master
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -121,7 +123,27 @@ func (s *Server) coreReleases(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "release catalog unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	snapshot, err := s.coreCatalog.List(r.Context())
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > corecatalog.MaxPage {
+			http.Error(w, "invalid release catalog page", http.StatusBadRequest)
+			return
+		}
+		page = parsed
+	}
+	var snapshot corecatalog.Snapshot
+	var err error
+	if page == 1 {
+		snapshot, err = s.coreCatalog.List(r.Context())
+	} else if paged, ok := s.coreCatalog.(interface {
+		ListPage(context.Context, int) (corecatalog.Snapshot, error)
+	}); ok {
+		snapshot, err = paged.ListPage(r.Context(), page)
+	} else {
+		http.Error(w, "release catalog page unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "official release catalog unavailable", http.StatusServiceUnavailable)
 		return

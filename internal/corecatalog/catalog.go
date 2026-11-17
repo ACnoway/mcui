@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	maxResponseBytes = 4 << 20
-	maxReleases      = 100
+	maxResponseBytes = 8 << 20
+	pageSize         = 10
 	cacheLifetime    = 10 * time.Minute
 	staleLifetime    = 24 * time.Hour
+	MaxPage          = 10
 )
 
 var (
@@ -48,12 +49,15 @@ type Core struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	Repository string    `json:"repository"`
+	HasMore    bool      `json:"has_more"`
 	Releases   []Release `json:"releases"`
 }
 
 type Snapshot struct {
 	RetrievedAt time.Time `json:"retrieved_at"`
 	Stale       bool      `json:"stale"`
+	Page        int       `json:"page"`
+	HasMore     bool      `json:"has_more"`
 	Cores       []Core    `json:"cores"`
 }
 
@@ -69,9 +73,14 @@ type provider struct {
 }
 
 var providers = []provider{
-	{id: "xray", name: "Xray", repository: "XTLS/Xray-core", apiURL: "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100"},
-	{id: "sing-box", name: "sing-box", repository: "SagerNet/sing-box", apiURL: "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100"},
-	{id: "mita", name: "mita", repository: "enfein/mieru", apiURL: "https://api.github.com/repos/enfein/mieru/releases?per_page=100"},
+	{id: "xray", name: "Xray", repository: "XTLS/Xray-core", apiURL: "https://api.github.com/repos/XTLS/Xray-core/releases"},
+	{id: "sing-box", name: "sing-box", repository: "SagerNet/sing-box", apiURL: "https://api.github.com/repos/SagerNet/sing-box/releases"},
+	{id: "mita", name: "mita", repository: "enfein/mieru", apiURL: "https://api.github.com/repos/enfein/mieru/releases"},
+}
+
+type pageCache struct {
+	snapshot Snapshot
+	expires  time.Time
 }
 
 type Client struct {
@@ -79,9 +88,8 @@ type Client struct {
 	now        func() time.Time
 
 	mu       sync.Mutex
-	cached   Snapshot
-	expires  time.Time
-	fetching chan struct{}
+	cached   map[int]pageCache
+	fetching map[int]chan struct{}
 }
 
 func NewClient() *Client {
@@ -92,23 +100,33 @@ func NewClient() *Client {
 				return http.ErrUseLastResponse
 			},
 		},
-		now: time.Now,
+		now:      time.Now,
+		cached:   make(map[int]pageCache),
+		fetching: make(map[int]chan struct{}),
 	}
 }
 
 func (c *Client) List(ctx context.Context) (Snapshot, error) {
+	return c.ListPage(ctx, 1)
+}
+
+func (c *Client) ListPage(ctx context.Context, page int) (Snapshot, error) {
 	if c == nil || c.httpClient == nil || c.now == nil {
 		return Snapshot{}, errors.New("release catalog unavailable")
+	}
+	if page < 1 || page > MaxPage {
+		return Snapshot{}, errors.New("release catalog page out of range")
 	}
 	for {
 		c.mu.Lock()
 		now := c.now()
-		if len(c.cached.Cores) != 0 && now.Before(c.expires) {
-			out := cloneSnapshot(c.cached)
+		entry := c.cached[page]
+		if len(entry.snapshot.Cores) != 0 && now.Before(entry.expires) {
+			out := cloneSnapshot(entry.snapshot)
 			c.mu.Unlock()
 			return out, nil
 		}
-		if wait := c.fetching; wait != nil {
+		if wait := c.fetching[page]; wait != nil {
 			c.mu.Unlock()
 			select {
 			case <-wait:
@@ -118,23 +136,21 @@ func (c *Client) List(ctx context.Context) (Snapshot, error) {
 			}
 		}
 		wait := make(chan struct{})
-		c.fetching = wait
-		old := cloneSnapshot(c.cached)
+		c.fetching[page] = wait
+		old := cloneSnapshot(entry.snapshot)
 		c.mu.Unlock()
 
-		fresh, err := c.fetch(ctx)
+		fresh, err := c.fetch(ctx, page)
 
 		c.mu.Lock()
 		if err == nil {
-			c.cached = cloneSnapshot(fresh)
-			c.expires = c.now().Add(cacheLifetime)
+			c.cached[page] = pageCache{snapshot: cloneSnapshot(fresh), expires: c.now().Add(cacheLifetime)}
 		} else if len(old.Cores) != 0 && c.now().Sub(old.RetrievedAt) <= staleLifetime {
 			old.Stale = true
-			c.cached = cloneSnapshot(old)
-			c.expires = c.now().Add(time.Minute)
+			c.cached[page] = pageCache{snapshot: cloneSnapshot(old), expires: c.now().Add(time.Minute)}
 			fresh, err = old, nil
 		}
-		c.fetching = nil
+		delete(c.fetching, page)
 		close(wait)
 		c.mu.Unlock()
 		if err != nil {
@@ -144,7 +160,7 @@ func (c *Client) List(ctx context.Context) (Snapshot, error) {
 	}
 }
 
-func (c *Client) fetch(ctx context.Context) (Snapshot, error) {
+func (c *Client) fetch(ctx context.Context, page int) (Snapshot, error) {
 	type result struct {
 		index int
 		core  Core
@@ -153,7 +169,7 @@ func (c *Client) fetch(ctx context.Context) (Snapshot, error) {
 	results := make(chan result, len(providers))
 	for i, p := range providers {
 		go func(index int, p provider) {
-			core, err := c.fetchProvider(ctx, p)
+			core, err := c.fetchProvider(ctx, p, page)
 			results <- result{index: index, core: core, err: err}
 		}(i, p)
 	}
@@ -171,7 +187,11 @@ func (c *Client) fetch(ctx context.Context) (Snapshot, error) {
 	if len(failures) != 0 {
 		return Snapshot{}, errors.Join(failures...)
 	}
-	return Snapshot{RetrievedAt: c.now().UTC(), Cores: cores}, nil
+	hasMore := false
+	for _, core := range cores {
+		hasMore = hasMore || core.HasMore
+	}
+	return Snapshot{RetrievedAt: c.now().UTC(), Page: page, HasMore: hasMore, Cores: cores}, nil
 }
 
 type upstreamRelease struct {
@@ -191,8 +211,16 @@ type upstreamAsset struct {
 	Digest             string `json:"digest"`
 }
 
-func (c *Client) fetchProvider(ctx context.Context, p provider) (Core, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiURL, nil)
+func (c *Client) fetchProvider(ctx context.Context, p provider, page int) (Core, error) {
+	endpoint, err := url.Parse(p.apiURL)
+	if err != nil {
+		return Core{}, errors.New("release source endpoint is invalid")
+	}
+	query := endpoint.Query()
+	query.Set("per_page", fmt.Sprint(pageSize))
+	query.Set("page", fmt.Sprint(page))
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return Core{}, err
 	}
@@ -222,10 +250,10 @@ func (c *Client) fetchProvider(ctx context.Context, p provider) (Core, error) {
 	if err = json.Unmarshal([]byte(trimmedBody), &releases); err != nil {
 		return Core{}, errors.New("release source returned invalid JSON")
 	}
-	if len(releases) > maxReleases {
+	if len(releases) > pageSize {
 		return Core{}, errors.New("release source returned too many releases")
 	}
-	out := Core{ID: p.id, Name: p.name, Repository: p.repository, Releases: make([]Release, 0, len(releases))}
+	out := Core{ID: p.id, Name: p.name, Repository: p.repository, HasMore: len(releases) == pageSize && page < MaxPage, Releases: make([]Release, 0, len(releases))}
 	for _, release := range releases {
 		if release.Draft || !tagPattern.MatchString(release.TagName) {
 			continue
