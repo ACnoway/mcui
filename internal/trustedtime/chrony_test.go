@@ -11,7 +11,7 @@ func TestSelectedSourceFreshAcceptsChronyLastRxSeconds(t *testing.T) {
 
 func TestSelectedSourceFreshRejectsOldOrUnselectedSource(t *testing.T) {
 	for _, output := range []string{
-		"^* time.cloudflare.com 3 6 377 5m -10us[ -12us] +/- 1ms\n",
+		"^* time.cloudflare.com 3 6 377 6m -10us[ -12us] +/- 1ms\n",
 		"^* time.cloudflare.com 3 6 000 23 -10us[ -12us] +/- 1ms\n",
 		"^+ time.cloudflare.com 3 6 377 23 -10us[ -12us] +/- 1ms\n",
 		"^* other.example 3 6 377 23 -10us[ -12us] +/- 1ms\n",
