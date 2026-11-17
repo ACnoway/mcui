@@ -23,12 +23,11 @@
 
 | 检查 | 当前结果 | 说明 |
 |---|---|---|
-| 本地 `gofmt`（仅本次 Go 文件） | 待记录 | 本机只检查代码，不安装或修改工具链 |
-| `git diff --check` | 待记录 | 推送前检查 |
-| V2 共享向量脚本 | 待记录 | Node.js 静态检查 |
-| 完整 `scripts/check-static.sh` | 本机工具链不匹配 | 锁定版本为 Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0；本机不安装或改动环境 |
-| `/root/mcui` 构建与测试 | 待推送后记录 | 仅在 `ssh ro` 连接的远程目录构建/测试；不在远端推送代码 |
-| systemd unit 语法检查 | 待推送后记录 | 检查 service 与 task-runtime drop-in，不安装或启动服务 |
+| 本地 `gofmt`（仅本次 Go 文件） | 通过 | 本机仅格式/解析检查，没有安装或修改工具链 |
+| 本地 `git diff --check` | 通过 | 每次推送前检查 |
+| 本地 V1/V2 共享向量脚本 | 通过 | V1 4 个正例、9 个负例；V2 3 个正例、29 个负例 |
+| 完整 `scripts/check-static.sh` | 通过 | `ssh ro` 的 `/root/mcui`，Debian 13 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包含 Go vet/build/test、Linux amd64/arm64 交叉构建、协议向量和前端冻结依赖安装/类型检查/生产构建 |
+| systemd unit 语法检查 | 通过 | systemd 257.13 临时 sysroot 验证四个服务和两个 task-runtime drop-in；未安装或启动服务 |
 | Linux 实际 Helper / Core 端到端演练 | 未完成 | 远程构建环境不等同于干净节点验收 |
 
 ## 阶段退出门槛
