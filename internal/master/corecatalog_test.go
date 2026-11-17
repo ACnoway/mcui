@@ -27,7 +27,7 @@ func (f *fixedCoreCatalog) List(context.Context) (corecatalog.Snapshot, error) {
 }
 
 func TestCoreReleasesRequiresAdminSession(t *testing.T) {
-	s, st := newCoreCatalogTestServer(t)
+	s, _ := newCoreCatalogTestServer(t)
 	source := &fixedCoreCatalog{snapshot: corecatalog.Snapshot{Cores: []corecatalog.Core{}}}
 	s.coreCatalog = source
 
