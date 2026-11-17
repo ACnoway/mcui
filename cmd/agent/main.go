@@ -131,8 +131,17 @@ func main() {
 
 type agentTaskHandler struct{ runner *agenttasks.Runner }
 
-func (h agentTaskHandler) ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64) ([]agent.TaskAck, error) {
-	acks, err := h.runner.ProcessStatusTask(ctx, raw, leaseID, lastStatusVersion)
+func (h agentTaskHandler) ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
+	acks, err := h.runner.ProcessStatusTaskAt(ctx, raw, leaseID, lastStatusVersion, serverNow)
+	return convertTaskAcks(acks, err)
+}
+
+func (h agentTaskHandler) ProcessControlTask(ctx context.Context, taskRaw []byte, controlKind string, controlRaw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
+	acks, err := h.runner.ProcessControlTask(ctx, taskRaw, controlKind, controlRaw, leaseID, lastStatusVersion, serverNow)
+	return convertTaskAcks(acks, err)
+}
+
+func convertTaskAcks(acks []agenttasks.Ack, err error) ([]agent.TaskAck, error) {
 	if err != nil {
 		return nil, err
 	}

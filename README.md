@@ -4,7 +4,7 @@ MCUI is a multi-Core control plane in staged development. The repository contain
 
 ## Current stage
 
-Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 now connects scoped status-task creation, external signing, mTLS pull/ACK, durable Agent intake, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only exposed action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Cancellation/skip delivery, an independent external time source, failure/recovery drills, and formal security acceptance remain open. A successful build does not constitute phase exit or production approval.
+Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 connects scoped status-task creation, external signing, mTLS pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only executable action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Generic sequence-gap recovery, an independent external time source, failure/recovery drills, and formal security acceptance remain open. A successful build does not constitute phase exit or production approval.
 
 ## Development checks
 
@@ -54,7 +54,7 @@ The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-mas
 - `internal/store`: versioned SQLite schema and legacy-state migration
 - `internal/master`: bootstrap, MFA sessions, scoped reads, invites, disable, and mTLS identity endpoints
 - `internal/protocol`: signed-message schema validation and canonicalization, including status-only V2
-- `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: status verification, V1 cancel/skip verification primitives, and a narrow status signer; cancel/skip verification is not connected to runtime
+- `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: signed status verification, V1 cancel/skip verification and signing for the restricted Phase 2 controls, plus isolated task signing
 - `internal/taskledger`, `internal/taskslots`, `internal/taskdispatch`, `internal/agenttasks`: durable status-task intake, delivery, ACK, and Helper checkpoint flow
 - `internal/helper`: Linux-only peer credential and task verification boundary; runs fixed read-only status queries and fails closed on uncertain ledger state
 - `internal/checkpoint`: experimental transition model requiring an independently trusted authority and durable local journal

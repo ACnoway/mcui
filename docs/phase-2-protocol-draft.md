@@ -1,6 +1,6 @@
 # 阶段 2 状态任务协议（开发基线）
 
-用户于 2026-11-17 在会话中批准下述只读 V2 方案作为阶段 2 开发基线；这不构成生产上线或阶段退出批准，也不是独立安全评审记录。本文描述 `internal/protocol/v2.go` 和 `internal/protocol/testdata/protocol-v2.json` 中的互操作协议，不修改或替代已冻结的 V1 基线。Admin 状态任务 API、隔离 signer、Agent mTLS 投递/ACK 和 Helper 固定只读执行已有运行时实现；整体构建、端到端安全验收和正式阶段退出仍须完成。具体边界见[阶段 2 进度](./phase-2-progress.md)。
+用户于 2026-11-17 在会话中批准下述只读 V2 方案作为阶段 2 开发基线；这不构成生产上线或阶段退出批准，也不是独立安全评审记录。本文描述 `internal/protocol/v2.go` 和 `internal/protocol/testdata/protocol-v2.json` 中的互操作协议，不修改或替代已冻结的 V1 基线。Admin 状态任务 API、隔离 signer、Agent mTLS 投递/ACK、pending cancel、expired skip 和 Helper 固定只读执行已有运行时实现；整体构建、端到端安全验收和正式阶段退出仍须完成。具体边界见[阶段 2 进度](./phase-2-progress.md)。
 
 ## 提议的状态任务
 
@@ -18,4 +18,4 @@
 
 ## 验证与待办
 
-共享向量使用公开测试 seed，严禁用于生产。Go 测试和 `scripts/verify-protocol-v2-vectors.mjs` 对同一组签名向量和反例进行解析及签名校验；常规检查脚本运行两者。向量通过只能证明所测互操作情况，不等于完整规范或系统安全验收通过。阶段 2 仍需完成取消/skip、独立时间、序号缺口、重启恢复、租约过期、真实 Helper socket/service 和授权安全验证；不能将用户对开发基线的批准表述为生产授权。
+共享向量使用公开测试 seed，严禁用于生产。Go 测试和 `scripts/verify-protocol-v2-vectors.mjs` 对同一组签名向量和反例进行解析及签名校验；常规检查脚本运行两者。向量通过只能证明所测互操作情况，不等于完整规范或系统安全验收通过。V1 cancel/skip 与 V2 状态任务分开签名：当前只实现未开始状态任务的 cancel 和基于原任务过期终态的 `EXPIRED` skip；不实现 `VOID_UNISSUED`、通用序号缺口恢复或独立 skip 槽。阶段 2 仍需完成独立可信时间、序号缺口、重启恢复、租约过期、真实 Helper socket/service 和授权安全验证；不能将用户对开发基线的批准表述为生产授权。

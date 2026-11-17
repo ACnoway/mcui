@@ -27,6 +27,40 @@ func TestSignStatusProducesVerifiableTask(t *testing.T) {
 	}
 }
 
+func TestSignControlUsesFixedV1Domains(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	signer, err := New("test-key", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		kind   protocol.Kind
+		fields map[string]any
+	}{{protocol.Cancel, map[string]any{
+		"schema_version": 1, "node_id": "node-001", "task_id": "task-001", "sequence": 1,
+		"issued_at": "2026-11-16T00:00:00Z", "not_before": "2026-11-16T00:00:00Z", "expires_at": "2026-11-16T00:05:00Z",
+		"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": PlaceholderSignature,
+	}}, {protocol.Skip, map[string]any{
+		"schema_version": 1, "node_id": "node-001", "sequence": 1, "reason": "EXPIRED",
+		"issued_at": "2026-11-16T00:10:00Z", "not_before": "2026-11-16T00:10:00Z", "expires_at": "2026-11-16T00:15:00Z",
+		"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": PlaceholderSignature,
+	}}} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			unsigned, marshalErr := json.Marshal(tc.fields)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			signed, signErr := signer.SignControl(tc.kind, unsigned)
+			if signErr != nil {
+				t.Fatal(signErr)
+			}
+			if verifyErr := protocol.Verify(tc.kind, signed, key.Public().(ed25519.PublicKey)); verifyErr != nil {
+				t.Fatal(verifyErr)
+			}
+		})
+	}
+}
+
 func TestRejectInvalidInputs(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	s, err := New("test-key", key)

@@ -17,6 +17,7 @@ import (
 )
 
 const statusTaskLifetime = 5 * time.Minute
+const taskControlLifetime = 5 * time.Minute
 
 var statusTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
@@ -24,8 +25,11 @@ var statusTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 // The private key stays in a separate signer process; Master holds only its
 // public key and a narrow status-signing client.
 type TaskRuntime struct {
-	Store     *taskdispatch.Store
-	Signer    tasksigner.SignStatus
+	Store  *taskdispatch.Store
+	Signer interface {
+		tasksigner.SignStatus
+		tasksigner.ControlSigner
+	}
 	KeyID     string
 	PublicKey ed25519.PublicKey
 	Now       func() time.Time
@@ -45,6 +49,10 @@ type statusTaskRequest struct {
 	RequestID string `json:"request_id"`
 	NodeID    string `json:"node_id"`
 	Core      string `json:"core"`
+}
+
+type taskControlRequest struct {
+	RequestID string `json:"request_id"`
 }
 
 type unsignedStatusTask struct {
@@ -123,6 +131,7 @@ type taskView struct {
 	CreatedBy     string        `json:"created_by,omitempty"`
 	CreatedAt     string        `json:"created_at,omitempty"`
 	Approval      string        `json:"approval"`
+	Control       string        `json:"control,omitempty"`
 	Operation     string        `json:"operation"`
 	Core          string        `json:"core"`
 	IssuedAt      string        `json:"issued_at"`
@@ -226,6 +235,126 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.decorateTaskView(toTaskView(record, runtime.PublicKey)))
+}
+
+func (s *Server) cancelStatusTask(w http.ResponseWriter, r *http.Request) {
+	s.createStatusControl(w, r, protocol.Cancel)
+}
+
+func (s *Server) skipExpiredStatusTask(w http.ResponseWriter, r *http.Request) {
+	s.createStatusControl(w, r, protocol.Skip)
+}
+
+func (s *Server) createStatusControl(w http.ResponseWriter, r *http.Request, kind protocol.Kind) {
+	ctx, ok := s.requireCSRF(w, r)
+	if !ok {
+		return
+	}
+	runtime := s.taskRuntime
+	if runtime == nil {
+		http.Error(w, "task runtime unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var in taskControlRequest
+	if readJSON(r, &in) != nil || !validRequestID(in.RequestID) {
+		http.Error(w, "invalid task-control request", http.StatusBadRequest)
+		return
+	}
+	record, err := runtime.Store.GetRecord(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	node, allowed := s.authorizedStatusNode(ctx.Admin.ID, record.NodeID)
+	if !allowed || (ctx.Admin.Role != "security_admin" && ctx.Admin.Role != "operator") {
+		_ = s.recordAudit(ctx.Admin.ID, "task.status.control.denied", "node", record.NodeID, "denied")
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if !record.Active {
+		http.Error(w, "task is already terminal", http.StatusConflict)
+		return
+	}
+	now := runtime.Now().UTC().Truncate(time.Second)
+	if now.IsZero() {
+		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var task statusTaskEnvelope
+	if protocol.VerifyV2Task(record.Raw, runtime.PublicKey) != nil || json.Unmarshal(record.Raw, &task) != nil || task.TaskID != record.TaskID || task.NodeID != node.ID || task.Sequence != record.Sequence || task.Operation != "core.status" || !validCoreName(task.Payload.Core) {
+		http.Error(w, "task requires reconciliation", http.StatusConflict)
+		return
+	}
+	expiresAt, err := time.Parse(time.RFC3339, task.ExpiresAt)
+	if err != nil || (kind == protocol.Cancel && !now.Before(expiresAt)) || (kind == protocol.Skip && now.Before(expiresAt)) {
+		if kind == protocol.Skip {
+			http.Error(w, "only an expired status task can be skipped", http.StatusConflict)
+		} else {
+			http.Error(w, "expired status task requires skip", http.StatusConflict)
+		}
+		return
+	}
+	action := "task.status.cancel"
+	if kind == protocol.Skip {
+		action = "task.status.skip"
+	}
+	if err = s.store.Update(func(st *store.State) error {
+		admin, adminExists := st.Admins[ctx.Admin.ID]
+		currentNode, nodeExists := st.Nodes[node.ID]
+		if !adminExists || admin.Disabled || (admin.Role != "security_admin" && admin.Role != "operator") || !nodeExists || currentNode.Disabled || !canQueryCoreStatus(admin, currentNode) {
+			return errors.New("task-control authorization changed")
+		}
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: admin.ID, Action: action + ".authorize", ResourceType: "task", Resource: record.TaskID, NodeID: node.ID, Outcome: in.RequestID})
+		return nil
+	}); err != nil {
+		http.Error(w, "task-control authorization changed", http.StatusConflict)
+		return
+	}
+	unsigned, err := makeUnsignedTaskControl(kind, node.ID, task.TaskID, record.Sequence, runtime.KeyID, now)
+	if err != nil {
+		http.Error(w, "task-control request unavailable", http.StatusInternalServerError)
+		return
+	}
+	signed, err := runtime.Signer.SignControl(kind, unsigned)
+	if err != nil || protocol.Verify(kind, signed, runtime.PublicKey) != nil {
+		_ = s.recordTaskAudit(ctx.Admin.ID, action+".issue", record.TaskID, node.ID, "failed")
+		http.Error(w, "task-control signer unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err = runtime.Store.SetControl(node.ID, record.TaskID, kind, signed, now, runtime.KeyID, runtime.PublicKey); err != nil {
+		if errors.Is(err, taskdispatch.ErrConflict) || errors.Is(err, taskdispatch.ErrIdentity) {
+			http.Error(w, "task-control conflicts with current task state", http.StatusConflict)
+			return
+		}
+		http.Error(w, "task-control storage unavailable", http.StatusInternalServerError)
+		return
+	}
+	_ = s.recordTaskAudit(ctx.Admin.ID, action+".issue", record.TaskID, node.ID, string(kind))
+	updated, err := runtime.Store.GetRecord(record.TaskID)
+	if err != nil {
+		http.Error(w, "task unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.decorateTaskView(toTaskView(updated, runtime.PublicKey)))
+}
+
+func makeUnsignedTaskControl(kind protocol.Kind, nodeID, taskID string, sequence int64, keyID string, now time.Time) ([]byte, error) {
+	if (kind != protocol.Cancel && kind != protocol.Skip) || nodeID == "" || sequence < 1 || keyID == "" || now.IsZero() || (kind == protocol.Cancel && taskID == "") {
+		return nil, taskdispatch.ErrInvalid
+	}
+	issued := now.UTC().Truncate(time.Second)
+	fields := map[string]any{
+		"schema_version": 1, "node_id": nodeID, "sequence": sequence,
+		"issued_at": issued.Format(time.RFC3339), "not_before": issued.Format(time.RFC3339),
+		"expires_at":     issued.Add(taskControlLifetime).Format(time.RFC3339),
+		"signing_key_id": keyID, "signature_algorithm": "Ed25519", "signature": tasksigner.PlaceholderSignature,
+	}
+	if kind == protocol.Cancel {
+		fields["task_id"] = taskID
+	} else {
+		fields["reason"] = "EXPIRED"
+	}
+	return json.Marshal(fields)
 }
 
 func makeUnsignedStatusTask(in statusTaskRequest, sequence int64, keyID string, now time.Time) ([]byte, error) {
@@ -391,6 +520,7 @@ func toTaskView(record taskdispatch.Record, publicKey ed25519.PublicKey) taskVie
 		Operation: envelope.Operation, Core: envelope.Payload.Core,
 		IssuedAt: envelope.IssuedAt, ExpiresAt: envelope.ExpiresAt,
 		Active: record.Active, Status: "QUEUED", Acks: make([]taskAckView, 0, len(record.Acks)),
+		Control: record.ControlKind,
 	}
 	if !record.LeaseDeadline.IsZero() {
 		out.LeaseDeadline = record.LeaseDeadline.Format(time.RFC3339)
@@ -431,12 +561,18 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task delivery unavailable", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"task_id": delivery.TaskID, "sequence": delivery.Sequence,
 		"task": json.RawMessage(delivery.Raw), "lease_id": delivery.LeaseID,
 		"last_status_version": delivery.LastStatusVersion,
 		"lease_deadline":      delivery.Deadline.UTC().Format(time.RFC3339Nano),
-	})
+		"server_time":         now.Format(time.RFC3339Nano),
+	}
+	if delivery.ControlKind != "" {
+		response["control_kind"] = delivery.ControlKind
+		response["control"] = json.RawMessage(delivery.ControlRaw)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ACnoway/mcui/internal/protocol"
+	"github.com/ACnoway/mcui/internal/taskcontrol"
 	_ "modernc.org/sqlite"
 )
 
@@ -46,6 +47,8 @@ type Delivery struct {
 	TaskID            string
 	Sequence          int64
 	Raw               []byte
+	ControlKind       string
+	ControlRaw        []byte
 	LeaseID           string
 	Deadline          time.Time
 	LastStatusVersion int64
@@ -63,11 +66,12 @@ type Ack struct {
 }
 
 type taskEnvelope struct {
-	TaskID    string `json:"task_id"`
-	NodeID    string `json:"node_id"`
-	Sequence  int64  `json:"sequence"`
-	KeyID     string `json:"signing_key_id"`
-	Operation string `json:"operation"`
+	TaskID    string    `json:"task_id"`
+	NodeID    string    `json:"node_id"`
+	Sequence  int64     `json:"sequence"`
+	KeyID     string    `json:"signing_key_id"`
+	Operation string    `json:"operation"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type Store struct{ db *sql.DB }
@@ -121,8 +125,8 @@ func Init(path string) (*Store, error) {
 	return s, nil
 }
 
-// Open opens only an already initialized database and validates its schema and
-// durable invariants. It never creates or repairs a database.
+// Open opens an initialized database, validates its schema and durable
+// invariants, and applies only the known additive task-controls migration.
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("%w: empty database path", ErrInvalid)
@@ -136,6 +140,14 @@ func Open(path string) (*Store, error) {
 	}
 	s, err := connect(path)
 	if err != nil {
+		return nil, err
+	}
+	if err = validateSchema(s.db); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	if err = ensureControlSchema(s.db); err != nil {
+		_ = s.Close()
 		return nil, err
 	}
 	if err = validateSchema(s.db); err != nil {
@@ -191,6 +203,11 @@ CREATE TABLE tasks (
  UNIQUE(node_id,sequence)
 );
 CREATE UNIQUE INDEX one_active_per_node ON tasks(node_id) WHERE active=1;
+CREATE TABLE task_controls (
+ task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),
+ kind TEXT NOT NULL CHECK(kind IN ('cancel','skip')),
+ raw BLOB NOT NULL CHECK(typeof(raw)='blob' AND length(raw)>0 AND length(raw)<=65536)
+);
 CREATE TABLE acks (
  task_id TEXT NOT NULL REFERENCES tasks(task_id),
  status_version INTEGER NOT NULL CHECK(status_version > 0),
@@ -241,12 +258,33 @@ func validateSchema(db *sql.DB) error {
 		return err
 	}
 	if len(want) != len(got) {
-		return errors.New("invalid task delivery database schema objects")
+		// Existing Phase 2 databases predate online control delivery. Accept
+		// only the exact prior schema; Open adds the isolated control table.
+		if len(got) != len(want)-2 {
+			return errors.New("invalid task delivery database schema objects")
+		}
 	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			return fmt.Errorf("unexpected task delivery schema object %q", k)
+		}
+	}
+	controlsPresent := true
 	for k, v := range want {
+		if k == "table\x00task_controls" || k == "index\x00sqlite_autoindex_task_controls_1" {
+			continue
+		}
 		if got[k] != v {
 			return fmt.Errorf("invalid task delivery schema object %q", k)
 		}
+	}
+	if _, ok := got["table\x00task_controls"]; !ok {
+		controlsPresent = false
+		if _, unexpected := got["index\x00sqlite_autoindex_task_controls_1"]; unexpected {
+			return errors.New("invalid task control schema index")
+		}
+	} else if got["table\x00task_controls"] != want["table\x00task_controls"] || got["index\x00sqlite_autoindex_task_controls_1"] != want["index\x00sqlite_autoindex_task_controls_1"] {
+		return errors.New("invalid task control schema")
 	}
 	var journal string
 	if err = db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err != nil {
@@ -309,6 +347,16 @@ SELECT
 	if err != nil || bad != 0 {
 		return fmt.Errorf("invalid task delivery database contents: violations=%d: %v", bad, err)
 	}
+	if controlsPresent {
+		if err = db.QueryRow(`SELECT COUNT(*) FROM task_controls c JOIN tasks t ON t.task_id=c.task_id
+ WHERE typeof(c.task_id)!='text' OR length(c.task_id)=0
+    OR typeof(c.kind)!='text' OR c.kind NOT IN ('cancel','skip')
+    OR typeof(c.raw)!='blob' OR length(c.raw)=0 OR length(c.raw)>65536
+    OR t.active!=1
+    OR EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND a.status IN ('RUNNING','VERIFYING','SUCCEEDED','FAILED','ROLLING_BACK','ROLLED_BACK','EXPIRED','CANCELED','NEEDS_RECONCILIATION'))`).Scan(&bad); err != nil || bad != 0 {
+			return fmt.Errorf("invalid task control data: violations=%d: %v", bad, err)
+		}
+	}
 	rows, err := db.Query(`SELECT node_id,MIN(sequence),MAX(sequence),COUNT(*) FROM tasks GROUP BY node_id`)
 	if err != nil {
 		return err
@@ -362,6 +410,32 @@ SELECT
 		ackVersion, previous = n, status
 	}
 	return ackRows.Err()
+}
+
+// ensureControlSchema adds the isolated control table after Open has verified
+// that the pre-control database is exactly the known legacy schema. Existing
+// task and ACK rows remain untouched.
+func ensureControlSchema(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_controls'`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 1 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`CREATE TABLE task_controls (
+ task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),
+ kind TEXT NOT NULL CHECK(kind IN ('cancel','skip')),
+ raw BLOB NOT NULL CHECK(typeof(raw)='blob' AND length(raw)>0 AND length(raw)<=65536)
+)`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Close() error {
@@ -473,7 +547,8 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	var storedKey string
 	var lease sql.NullString
 	var leaseDeadline sql.NullInt64
-	err = tx.QueryRow(`SELECT node_id,task_id,sequence,raw,key_id,lease_id,lease_deadline FROM tasks WHERE node_id=? AND active=1`, authenticatedNodeID).Scan(&d.NodeID, &d.TaskID, &d.Sequence, &d.Raw, &storedKey, &lease, &leaseDeadline)
+	var controlKind sql.NullString
+	err = tx.QueryRow(`SELECT t.node_id,t.task_id,t.sequence,t.raw,t.key_id,t.lease_id,t.lease_deadline,c.kind,c.raw FROM tasks t LEFT JOIN task_controls c ON c.task_id=t.task_id WHERE t.node_id=? AND t.active=1`, authenticatedNodeID).Scan(&d.NodeID, &d.TaskID, &d.Sequence, &d.Raw, &storedKey, &lease, &leaseDeadline, &controlKind, &d.ControlRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return zero, ErrNotFound
 	}
@@ -490,6 +565,9 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	if storedKey != configuredKeyID {
 		return zero, ErrIdentity
 	}
+	if controlKind.Valid {
+		d.ControlKind = controlKind.String
+	}
 	if err := protocol.VerifyV2Task(d.Raw, configuredKey); err != nil {
 		return zero, fmt.Errorf("%w: stored task: %v", ErrInvalid, err)
 	}
@@ -499,6 +577,27 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	}
 	if body.NodeID != authenticatedNodeID || body.NodeID != d.NodeID || body.TaskID != d.TaskID || body.Sequence != d.Sequence || body.KeyID != storedKey {
 		return zero, ErrIdentity
+	}
+	if controlKind.Valid {
+		kind := protocol.Kind(controlKind.String)
+		control, controlErr := taskcontrol.Verify(kind, d.ControlRaw, taskcontrol.Trust{NodeID: authenticatedNodeID, KeyID: configuredKeyID, Purpose: taskcontrol.PurposeTask, PublicKey: configuredKey, Now: now})
+		if errors.Is(controlErr, taskcontrol.ErrTime) {
+			var timeBounds struct {
+				ExpiresAt time.Time `json:"expires_at"`
+			}
+			if json.Unmarshal(d.ControlRaw, &timeBounds) == nil && !timeBounds.ExpiresAt.IsZero() && !now.Before(timeBounds.ExpiresAt) {
+				if _, err = tx.Exec(`DELETE FROM task_controls WHERE task_id=?`, d.TaskID); err != nil {
+					return zero, err
+				}
+				d.ControlKind = ""
+				d.ControlRaw = nil
+				controlKind.Valid = false
+			} else {
+				return zero, fmt.Errorf("%w: stored control is not currently valid", ErrInvalid)
+			}
+		} else if controlErr != nil || control.NodeID != d.NodeID || int64(control.Sequence) != d.Sequence || (kind == protocol.Cancel && control.TaskID != d.TaskID) || (kind == protocol.Skip && (control.Reason != "EXPIRED" || body.ExpiresAt.IsZero() || now.Before(body.ExpiresAt) || control.IssuedAt.Before(body.ExpiresAt))) {
+			return zero, fmt.Errorf("%w: stored control message", ErrInvalid)
+		}
 	}
 	var reconciliation int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM acks WHERE task_id=? AND status IN ('FAILED','ROLLING_BACK','NEEDS_RECONCILIATION')`, d.TaskID).Scan(&reconciliation); err != nil {
@@ -517,6 +616,7 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 		return zero, err
 	}
 	d.Raw = bytes.Clone(d.Raw)
+	d.ControlRaw = bytes.Clone(d.ControlRaw)
 	d.LeaseID = leaseID
 	d.Deadline = deadline
 	return d, nil
@@ -607,6 +707,11 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 	}
 	if terminalStatuses[ack.Status] || (ack.Status == "FAILED" && operation.Operation == "core.status") {
 		if _, err = tx.Exec(`UPDATE tasks SET active=0,lease_id=NULL,lease_deadline=NULL WHERE task_id=? AND active=1`, ack.TaskID); err != nil {
+			return err
+		}
+	}
+	if ack.Status == "RUNNING" || ack.Status == "NEEDS_RECONCILIATION" || terminalStatuses[ack.Status] || (ack.Status == "FAILED" && operation.Operation == "core.status") {
+		if _, err = tx.Exec(`DELETE FROM task_controls WHERE task_id=?`, ack.TaskID); err != nil {
 			return err
 		}
 	}

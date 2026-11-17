@@ -12,7 +12,8 @@ import (
 // V2 is a draft, status-only schema. "not-applicable" explicitly means no
 // artifact or architecture is authorized; "observe" asserts no target state.
 // This parser does not authorize execution, select trusted keys, validate the
-// receiving node, or check the current time. It is not wired to any runtime.
+// receiving node, or check the current time. The status runtime uses this
+// parser as one validation layer and applies those additional checks itself.
 func CanonicalV2TaskBytes(raw []byte) (_ []byte, resultErr error) {
 	defer func() {
 		if resultErr != nil && !strings.HasPrefix(resultErr.Error(), "size: ") && !strings.HasPrefix(resultErr.Error(), "utf8: ") && !strings.HasPrefix(resultErr.Error(), "duplicate-key: ") {

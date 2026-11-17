@@ -4,7 +4,7 @@
 > 配套文档：[项目大纲与开发流程](./project-overview-and-development-workflow.md)、[Agent 技术设计文档](./agent-technical-design-v1.0.md)  
 > 适用范围：Linux + systemd、amd64/arm64；Master + Web UI + Agent + Helper，按需安装 Xray、sing-box、mita。
 
-> 阶段 0/1 工程交付和验证证据见[阶段 0/1 实施状态](./phase-0-1-implementation.md)。正式阶段退出仍须按范围完成干净 VM 验收、项目内安全检查及责任人签核。阶段 2 已接通只读状态查询运行时；取消/skip、恢复、Linux 实机及安全验收仍未完成，详情见[阶段 2 进度](./phase-2-progress.md)。
+> 阶段 0/1 工程交付和验证证据见[阶段 0/1 实施状态](./phase-0-1-implementation.md)。正式阶段退出仍须按范围完成干净 VM 验收、项目内安全检查及责任人签核。阶段 2 已接通只读状态查询、pending cancel 和 expired skip；通用缺口恢复、Linux 实机及安全验收仍未完成，详情见[阶段 2 进度](./phase-2-progress.md)。
 
 ## 1. 阶段原则和发布口径
 
@@ -87,7 +87,8 @@
 - [x] Helper 通过受限 Unix Socket 和内核 peer UID 验证 Agent，独立验签并绑定固定 Core/步骤；当前 Master HTTPS 检查点确认精确任务、有效租约和前序终态；root 账本写入意图后才读固定 systemd 状态。
 - [x] 只暴露固定只读状态查询；服务名、路径、制品字段和 shell/argv 均不从请求接受。现有自动化测试覆盖授权、错误结果、过期和租约边界，完整失陷/伪造输入矩阵仍待安全验收。
 - [x] 面板展示任务来源、发起时间、无需单独审批、执行状态/ACK、Core 状态和失败代码；授权与签发审计关联节点。
-- [ ] 接通签名取消/skip，测试任意序号断档、跨库崩溃恢复、备份回滚和外部可信时钟；这些路径当前失败关闭但没有自动修复协议。
+- [x] 接通状态任务的签名 pending cancel 与 expired skip，并覆盖账本终态、控制投递和 ACK。
+- [ ] 实现并验证通用序号缺口恢复、跨库崩溃恢复、备份回滚和独立外部可信时钟；这些路径继续失败关闭且没有自动修复协议。
 - [ ] 在 Debian 13.7 amd64/arm64 运行真实 Helper/systemd/Core 测试，并完成越权、重放、租约竞态、断电/重启及项目内安全检查。
 
 **交付物**：状态查询运行时、V2 协议与共享向量、部署 unit/操作说明及自动化测试。Signer、任务库和主控审计分属不同进程/数据库；当前没有跨库原子事务。正式验收还需要[阶段 2 进度](./phase-2-progress.md)列出的未完成项与责任人签核。

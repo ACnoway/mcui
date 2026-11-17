@@ -21,7 +21,8 @@ type TaskAck struct {
 }
 
 type TaskHandler interface {
-	ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64) ([]TaskAck, error)
+	ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]TaskAck, error)
+	ProcessControlTask(ctx context.Context, taskRaw []byte, controlKind string, controlRaw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]TaskAck, error)
 }
 
 type StatusExecutor interface {
@@ -42,6 +43,9 @@ type taskDelivery struct {
 	LeaseID           string          `json:"lease_id"`
 	LastStatusVersion int64           `json:"last_status_version"`
 	LeaseDeadline     string          `json:"lease_deadline"`
+	ServerTime        string          `json:"server_time"`
+	ControlKind       string          `json:"control_kind,omitempty"`
+	Control           json.RawMessage `json:"control,omitempty"`
 }
 
 type taskDeliveryIdentity struct {
@@ -96,6 +100,10 @@ func (c *Client) processStatusTask(state localState) error {
 	if decoder.Decode(&trailing) != io.EOF {
 		return errors.New("invalid task delivery")
 	}
+	serverNow, err := time.Parse(time.RFC3339Nano, delivery.ServerTime)
+	if err != nil || serverNow.IsZero() {
+		return errors.New("invalid task delivery server time")
+	}
 	if _, err = protocol.CanonicalV2TaskBytes(delivery.Task); err != nil {
 		return fmt.Errorf("invalid signed task envelope: %w", err)
 	}
@@ -103,8 +111,25 @@ func (c *Client) processStatusTask(state localState) error {
 	if err = json.Unmarshal(delivery.Task, &identity); err != nil || identity.TaskID != delivery.TaskID || identity.NodeID != state.NodeID || identity.Sequence != delivery.Sequence {
 		return errors.New("task delivery identity mismatch")
 	}
+	if (delivery.ControlKind == "") != (len(delivery.Control) == 0) {
+		return errors.New("incomplete task control delivery")
+	}
+	if delivery.ControlKind != "" {
+		kind := protocol.Kind(delivery.ControlKind)
+		if kind != protocol.Cancel && kind != protocol.Skip {
+			return errors.New("unsupported task control kind")
+		}
+		if _, err = protocol.CanonicalSignedBytes(kind, delivery.Control); err != nil {
+			return fmt.Errorf("invalid signed task control: %w", err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	acks, err := c.taskHandler.ProcessStatusTask(ctx, append([]byte(nil), delivery.Task...), delivery.LeaseID, delivery.LastStatusVersion)
+	var acks []TaskAck
+	if delivery.ControlKind == "" {
+		acks, err = c.taskHandler.ProcessStatusTask(ctx, append([]byte(nil), delivery.Task...), delivery.LeaseID, delivery.LastStatusVersion, serverNow)
+	} else {
+		acks, err = c.taskHandler.ProcessControlTask(ctx, append([]byte(nil), delivery.Task...), delivery.ControlKind, append([]byte(nil), delivery.Control...), delivery.LeaseID, delivery.LastStatusVersion, serverNow)
+	}
 	cancel()
 	if err != nil {
 		return fmt.Errorf("status-task processing failed: %w", err)

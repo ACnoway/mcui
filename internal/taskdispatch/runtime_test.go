@@ -2,12 +2,14 @@ package taskdispatch
 
 import (
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/tasksigner"
 )
 
@@ -187,4 +189,129 @@ func TestValidateLeaseProvidesIndependentFreshnessGate(t *testing.T) {
 	if _, err = store.ValidateLease("node-001", delivery.TaskID, delivery.Sequence, delivery.LeaseID, delivery.Raw, now, "test-key", publicKey); !errors.Is(err, ErrLeaseActive) {
 		t.Fatalf("terminal task remained checkpoint-authorized: %v", err)
 	}
+}
+
+func TestControlDeliveryPersistsAndClosesWithTerminalAck(t *testing.T) {
+	store, err := Init(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	raw, publicKey := signed(t)
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	signer, err := tasksigner.New("test-key", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Issue("node-001", "task-001", "test-key", publicKey, func(int64) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 16, 0, 1, 0, 0, time.UTC)
+	control := signedControlForTest(t, signer, protocol.Cancel, map[string]any{
+		"schema_version": 1, "node_id": "node-001", "task_id": "task-001", "sequence": 1,
+		"issued_at": now.Format(time.RFC3339), "not_before": now.Format(time.RFC3339), "expires_at": now.Add(5 * time.Minute).Format(time.RFC3339),
+		"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": tasksigner.PlaceholderSignature,
+	})
+	if err = store.SetControl("node-001", "task-001", protocol.Cancel, control, now, "test-key", publicKey); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetRecord("task-001")
+	if err != nil || record.ControlKind != string(protocol.Cancel) || string(record.ControlRaw) != string(control) {
+		t.Fatalf("persisted cancel=%+v err=%v", record, err)
+	}
+	delivery, err := store.Lease("node-001", now.Add(time.Second), "test-key", publicKey)
+	if err != nil || delivery.ControlKind != string(protocol.Cancel) || string(delivery.ControlRaw) != string(control) {
+		t.Fatalf("cancel delivery=%+v err=%v", delivery, err)
+	}
+	if err = store.Acknowledge("node-001", Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, StatusVersion: 1, Status: "CANCELED", Result: []byte(`{"error_code":"task_canceled"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.GetRecord("task-001")
+	if err != nil || record.Active || record.ControlKind != "" || len(record.ControlRaw) != 0 || len(record.Acks) != 1 {
+		t.Fatalf("terminal cancel record=%+v err=%v", record, err)
+	}
+}
+
+func TestExpiredSkipControlDeliveryAndRejectStartedTask(t *testing.T) {
+	store, err := Init(filepath.Join(t.TempDir(), "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	raw, publicKey := signed(t)
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	signer, err := tasksigner.New("test-key", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.Issue("node-001", "task-001", "test-key", publicKey, func(int64) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 11, 16, 0, 1, 0, 0, time.UTC)
+	if err = store.Acknowledge("node-001", Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, StatusVersion: 1, Status: "ACK_ACCEPTED"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Acknowledge("node-001", Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, StatusVersion: 2, Status: "RUNNING"}); err != nil {
+		t.Fatal(err)
+	}
+	expired := startedAt.Add(10 * time.Minute)
+	skip := signedControlForTest(t, signer, protocol.Skip, map[string]any{
+		"schema_version": 1, "node_id": "node-001", "sequence": 1, "reason": "EXPIRED",
+		"issued_at": expired.Format(time.RFC3339), "not_before": expired.Format(time.RFC3339), "expires_at": expired.Add(5 * time.Minute).Format(time.RFC3339),
+		"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": tasksigner.PlaceholderSignature,
+	})
+	if err = store.SetControl("node-001", "task-001", protocol.Skip, skip, expired, "test-key", publicKey); !errors.Is(err, ErrConflict) {
+		t.Fatalf("skip replaced a started task: %v", err)
+	}
+}
+
+func TestOpenAddsControlTableWithoutChangingLegacyTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	store, err := Init(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, publicKey := signed(t)
+	if _, err = store.Issue("node-001", "task-001", "test-key", publicKey, func(int64) ([]byte, error) { return raw, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DROP TABLE task_controls`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("legacy database migration failed: %v", err)
+	}
+	defer reopened.Close()
+	record, err := reopened.GetRecord("task-001")
+	if err != nil || record.TaskID != "task-001" || record.Sequence != 1 || !record.Active {
+		t.Fatalf("legacy task changed during migration: %+v err=%v", record, err)
+	}
+	var controls int
+	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM task_controls`).Scan(&controls); err != nil || controls != 0 {
+		t.Fatalf("unexpected migrated controls=%d err=%v", controls, err)
+	}
+}
+
+func signedControlForTest(t *testing.T, signer *tasksigner.Signer, kind protocol.Kind, fields map[string]any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := signer.SignControl(kind, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
 }

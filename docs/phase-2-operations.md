@@ -114,9 +114,10 @@ systemctl restart mcui-panel.service mcui-agent.service
 - Master signer 不可用或配置错误时，任务不会签发入队；查看 `mcui-signerd` 和 Master 日志。不要将私钥临时复制到 Master。
 - 60 秒投递租约到期后，Master 可为同一消息签发新租约；Helper 只接受当前租约。先前成功查询从 Helper 账本返回原结果，不再执行 `systemctl`。
 - Agent 收到过期消息时只持久化并回报 `EXPIRED`，不调用 Helper。节点离线期间，未完成序号会继续阻塞该节点后续任务；节点重新上线处理过期任务后才可继续。
-- Agent 账本重启时发现执行中状态会进入 `NEEDS_RECONCILIATION`；Helper 存在未决记录、Master 无法确认前序序号终态或本地账本不匹配时不继续。当前没有在线取消/skip 和账本重建流程；保留原始数据库并按带外人工核对处理。
+- 面板可取消未过期且未开始的状态查询；若任务已经开始或状态未决，Agent 账本会拒绝取消并回报现有状态/对账要求。过期状态任务可通过签名 `EXPIRED` skip 确认终态，Agent 仍先将原始任务写为过期，不调用 Helper。面板上的控制状态可刷新查看。
+- Agent 账本重启时发现执行中状态会进入 `NEEDS_RECONCILIATION`；Helper 存在未决记录、Master 无法确认前序序号终态或本地账本不匹配时不继续。`VOID_UNISSUED` 和通用序号缺口恢复尚未实现；保留原始数据库并按带外人工核对处理。
 - 不要删除 SQLite 文件、编辑任务序号、复用请求 ID、删除 Helper ledger 或改写 `NEEDS_RECONCILIATION`。跨数据库快照恢复和独立可信时间仍未实现。
 
 ## 7. 当前限制
 
-当前实现只适用于只读状态查询。签名取消/skip、独立外部可信时钟、双库原子恢复、密钥轮换仪式、systemd 启动/沙箱实机演练和 Debian 双架构验收仍未完成。执行本说明中的安装步骤不表示阶段 2 通过或生产部署获批。
+当前实现只适用于只读状态查询和其 pending cancel / expired skip 控制。通用 `VOID_UNISSUED`、任意序号缺口恢复、独立外部可信时钟、双库原子恢复、密钥轮换仪式、systemd 启动/沙箱实机演练和 Debian 双架构验收仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。执行本说明中的安装步骤不表示阶段 2 通过或生产部署获批。

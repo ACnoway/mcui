@@ -1,6 +1,6 @@
 // Package taskauth verifies signed V2 status tasks without applying them.
-// It does not provide authorization, replay protection, clock-health/rollback
-// detection, persistence, or runtime integration.
+// Runtime callers add authorization, replay protection, persistence, and state
+// transitions. This package does not establish clock health or rollback safety.
 package taskauth
 
 import (

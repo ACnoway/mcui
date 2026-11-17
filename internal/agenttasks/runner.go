@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/taskledger"
 )
 
@@ -62,10 +63,20 @@ func NewRunner(processor *Processor, ledger *taskledger.Ledger, executor StatusE
 // Helper call. ACKs are reproducible from ledger state so a lost HTTP response
 // can be retried byte-for-byte after restart.
 func (r *Runner) ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64) ([]Ack, error) {
-	if r == nil || ctx == nil || leaseID == "" || lastStatusVersion < 0 {
+	if r == nil {
 		return nil, errors.New("invalid status-task delivery")
 	}
-	task, err := r.processor.Receive(ctx, raw)
+	return r.ProcessStatusTaskAt(ctx, raw, leaseID, lastStatusVersion, r.now())
+}
+
+// ProcessStatusTaskAt accepts the task using server time included in the
+// authenticated Master delivery. It still relies on the caller to establish
+// time freshness and rollback protection.
+func (r *Runner) ProcessStatusTaskAt(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]Ack, error) {
+	if r == nil || ctx == nil || leaseID == "" || lastStatusVersion < 0 || serverNow.IsZero() {
+		return nil, errors.New("invalid status-task delivery")
+	}
+	task, err := r.processor.ReceiveAt(ctx, raw, serverNow)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +85,7 @@ func (r *Runner) ProcessStatusTask(ctx context.Context, raw []byte, leaseID stri
 		return nil, errors.New("invalid persisted status task")
 	}
 	if task.State == taskledger.Pending {
-		started, startErr := r.ledger.Start(task.Sequence, r.now())
+		started, startErr := r.ledger.Start(task.Sequence, serverNow)
 		if errors.Is(startErr, taskledger.ErrNotYet) {
 			return acknowledgments(task, lastStatusVersion), nil
 		}
@@ -118,6 +129,45 @@ func (r *Runner) ProcessStatusTask(ctx context.Context, raw []byte, leaseID stri
 		}
 	}
 	return acknowledgments(task, lastStatusVersion), nil
+}
+
+// ProcessControlTask durably receives the original signed task before applying
+// its separately signed V1 control. Cancel can only tombstone a pending task;
+// EXPIRED skip only acknowledges a task already durably expired in the ledger.
+func (r *Runner) ProcessControlTask(ctx context.Context, taskRaw []byte, controlKind string, controlRaw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]Ack, error) {
+	if r == nil || ctx == nil || leaseID == "" || lastStatusVersion < 0 || serverNow.IsZero() || len(controlRaw) == 0 {
+		return nil, errors.New("invalid controlled task delivery")
+	}
+	task, err := r.processor.ReceiveAt(ctx, taskRaw, serverNow)
+	if err != nil {
+		return nil, err
+	}
+	switch controlKind {
+	case string(protocol.Cancel):
+		err = r.processor.ApplyCancel(ctx, controlRaw, serverNow, task.ID, task.Sequence)
+		if err != nil && !errors.Is(err, taskledger.ErrTooLate) {
+			return nil, err
+		}
+		task, err = r.ledger.Get(task.Sequence)
+		if err != nil {
+			return nil, err
+		}
+	case string(protocol.Skip):
+		task, err = r.processor.ApplySkip(ctx, controlRaw, serverNow, task.ID, task.Sequence)
+		if errors.Is(err, taskledger.ErrTooLate) {
+			task, err = r.ledger.Get(task.Sequence)
+		}
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, errors.New("unsupported task control kind")
+	}
+	acks := acknowledgments(task, lastStatusVersion)
+	if len(acks) == 0 {
+		return nil, errors.New("task control did not produce an ACK state")
+	}
+	return acks, nil
 }
 
 func validStatusObservation(raw []byte, core string) bool {

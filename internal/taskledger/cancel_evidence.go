@@ -15,11 +15,24 @@ import (
 // must deliver the same immutable envelope bytes on every retry. Node scope is
 // established externally by the caller; this ledger does not bind a node.
 func (l *Ledger) AcceptCancel(seq int64, id string, envelope []byte) error {
+	return l.AcceptCancelValidated(seq, id, envelope, nil)
+}
+
+// AcceptCancelValidated invokes verify inside the SQLite write transaction,
+// after acquiring the write lock and immediately before inspecting sequence
+// and task state. The callback must authenticate the exact immutable envelope,
+// including node, key purpose, validity, sequence, and task ID.
+func (l *Ledger) AcceptCancelValidated(seq int64, id string, envelope []byte, verify func() error) error {
 	if seq < 1 || id == "" || len(envelope) == 0 || len(envelope) > 65536 {
 		return errors.New("invalid cancellation")
 	}
 	snapshot := append([]byte(nil), envelope...)
 	return l.write(func(c *sql.Conn) error {
+		if verify != nil {
+			if err := verify(); err != nil {
+				return err
+			}
+		}
 		ctx := context.Background()
 		n, err := next(c)
 		if err != nil {

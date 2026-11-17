@@ -11,6 +11,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/taskauth"
+	"github.com/ACnoway/mcui/internal/taskcontrol"
 )
 
 // Record is the durable operator-facing view of a task. Raw contains the
@@ -20,6 +21,8 @@ type Record struct {
 	NodeID        string
 	Sequence      int64
 	Raw           []byte
+	ControlKind   string
+	ControlRaw    []byte
 	Active        bool
 	LeaseDeadline time.Time
 	Acks          []Ack
@@ -115,7 +118,8 @@ func (s *Store) GetRecord(taskID string) (Record, error) {
 	}
 	var active int
 	var lease sql.NullInt64
-	err := s.db.QueryRow(`SELECT task_id,node_id,sequence,raw,active,lease_deadline FROM tasks WHERE task_id=?`, taskID).Scan(&out.TaskID, &out.NodeID, &out.Sequence, &out.Raw, &active, &lease)
+	var controlKind sql.NullString
+	err := s.db.QueryRow(`SELECT t.task_id,t.node_id,t.sequence,t.raw,c.kind,c.raw,t.active,t.lease_deadline FROM tasks t LEFT JOIN task_controls c ON c.task_id=t.task_id WHERE t.task_id=?`, taskID).Scan(&out.TaskID, &out.NodeID, &out.Sequence, &out.Raw, &controlKind, &out.ControlRaw, &active, &lease)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -123,10 +127,14 @@ func (s *Store) GetRecord(taskID string) (Record, error) {
 		return out, err
 	}
 	out.Active = active == 1
+	if controlKind.Valid {
+		out.ControlKind = controlKind.String
+	}
 	if lease.Valid {
 		out.LeaseDeadline = time.Unix(0, lease.Int64).UTC()
 	}
 	out.Raw = append([]byte(nil), out.Raw...)
+	out.ControlRaw = append([]byte(nil), out.ControlRaw...)
 	out.Acks, err = s.readAcks(taskID)
 	return out, err
 }
@@ -140,7 +148,7 @@ func (s *Store) ListRecords(nodeID string, limit int) ([]Record, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT task_id,node_id,sequence,raw,active,lease_deadline FROM tasks WHERE node_id=? ORDER BY sequence DESC LIMIT ?`, nodeID, limit)
+	rows, err := s.db.Query(`SELECT t.task_id,t.node_id,t.sequence,t.raw,c.kind,c.raw,t.active,t.lease_deadline FROM tasks t LEFT JOIN task_controls c ON c.task_id=t.task_id WHERE t.node_id=? ORDER BY t.sequence DESC LIMIT ?`, nodeID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -149,14 +157,19 @@ func (s *Store) ListRecords(nodeID string, limit int) ([]Record, error) {
 		var r Record
 		var active int
 		var lease sql.NullInt64
-		if err = rows.Scan(&r.TaskID, &r.NodeID, &r.Sequence, &r.Raw, &active, &lease); err != nil {
+		var controlKind sql.NullString
+		if err = rows.Scan(&r.TaskID, &r.NodeID, &r.Sequence, &r.Raw, &controlKind, &r.ControlRaw, &active, &lease); err != nil {
 			return nil, err
+		}
+		if controlKind.Valid {
+			r.ControlKind = controlKind.String
 		}
 		r.Active = active == 1
 		if lease.Valid {
 			r.LeaseDeadline = time.Unix(0, lease.Int64).UTC()
 		}
 		r.Raw = append([]byte(nil), r.Raw...)
+		r.ControlRaw = append([]byte(nil), r.ControlRaw...)
 		out = append(out, r)
 	}
 	if err = rows.Err(); err != nil {
@@ -176,6 +189,102 @@ func (s *Store) ListRecords(nodeID string, limit int) ([]Record, error) {
 		out = []Record{}
 	}
 	return out, nil
+}
+
+// SetControl attaches one signed V1 cancel or skip control to an active,
+// read-only status task. The control and lease invalidation commit together.
+func (s *Store) SetControl(authenticatedNodeID, taskID string, kind protocol.Kind, raw []byte, now time.Time, keyID string, publicKey ed25519.PublicKey) error {
+	if s == nil || s.db == nil || authenticatedNodeID == "" || taskID == "" || (kind != protocol.Cancel && kind != protocol.Skip) || len(raw) == 0 || len(raw) > 64*1024 || now.IsZero() || keyID == "" || len(publicKey) != ed25519.PublicKeySize {
+		return ErrInvalid
+	}
+	verified, err := taskcontrol.Verify(kind, raw, taskcontrol.Trust{NodeID: authenticatedNodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+	if err != nil {
+		return fmt.Errorf("%w: invalid signed task control: %v", ErrInvalid, err)
+	}
+	var task struct {
+		TaskID    string    `json:"task_id"`
+		NodeID    string    `json:"node_id"`
+		Sequence  int64     `json:"sequence"`
+		Operation string    `json:"operation"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	// The signed status task is loaded under the transaction below. Control
+	// identity and time checks that depend on it are repeated against that row.
+	if kind == protocol.Cancel && verified.TaskID == "" {
+		return ErrIdentity
+	}
+	controlCopy := bytes.Clone(raw)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var node, storedKey string
+	var sequence int64
+	var taskRaw []byte
+	var active int
+	var oldKind sql.NullString
+	var oldRaw []byte
+	err = tx.QueryRow(`SELECT node_id,sequence,raw,key_id,active FROM tasks WHERE task_id=?`, taskID).Scan(&node, &sequence, &taskRaw, &storedKey, &active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	err = tx.QueryRow(`SELECT kind,raw FROM task_controls WHERE task_id=?`, taskID).Scan(&oldKind, &oldRaw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if node != authenticatedNodeID || storedKey != keyID || active != 1 {
+		return ErrIdentity
+	}
+	if _, err = protocol.CanonicalV2TaskBytes(taskRaw); err != nil || protocol.VerifyV2Task(taskRaw, publicKey) != nil || json.Unmarshal(taskRaw, &task) != nil || task.TaskID != taskID || task.NodeID != node || task.Sequence != sequence || task.Operation != "core.status" || task.ExpiresAt.IsZero() {
+		return ErrIdentity
+	}
+	if int64(verified.Sequence) != sequence || verified.NodeID != node {
+		return ErrIdentity
+	}
+	switch kind {
+	case protocol.Cancel:
+		if verified.TaskID != taskID || !now.Before(task.ExpiresAt) {
+			return ErrConflict
+		}
+	case protocol.Skip:
+		if verified.Reason != "EXPIRED" || now.Before(task.ExpiresAt) || verified.IssuedAt.Before(task.ExpiresAt) {
+			return ErrConflict
+		}
+	}
+	var started int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM acks WHERE task_id=? AND status IN ('RUNNING','VERIFYING','SUCCEEDED','FAILED','ROLLING_BACK','ROLLED_BACK','NEEDS_RECONCILIATION','CANCELED','EXPIRED')`, taskID).Scan(&started); err != nil {
+		return err
+	}
+	if started != 0 {
+		return ErrConflict
+	}
+	if oldKind.Valid {
+		if oldKind.String == string(kind) {
+			oldControl, oldErr := taskcontrol.Verify(kind, oldRaw, taskcontrol.Trust{NodeID: authenticatedNodeID, KeyID: keyID, Purpose: taskcontrol.PurposeTask, PublicKey: publicKey, Now: now})
+			if oldErr == nil {
+				if oldControl.NodeID == verified.NodeID && oldControl.Sequence == verified.Sequence && oldControl.TaskID == verified.TaskID && oldControl.Reason == verified.Reason {
+					return tx.Commit()
+				}
+				return ErrConflict
+			}
+			if !errors.Is(oldErr, taskcontrol.ErrTime) {
+				return ErrConflict
+			}
+		} else if kind != protocol.Skip || oldKind.String != string(protocol.Cancel) || now.Before(task.ExpiresAt) {
+			return ErrConflict
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO task_controls(task_id,kind,raw) VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET kind=excluded.kind,raw=excluded.raw`, taskID, string(kind), controlCopy); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE tasks SET lease_id=NULL,lease_deadline=NULL WHERE task_id=? AND active=1`, taskID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) readAcks(taskID string) ([]Ack, error) {

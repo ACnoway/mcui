@@ -2,6 +2,7 @@ package tasksigner
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,6 +36,21 @@ func TestHTTPClientUsesNarrowAuthenticatedSigningAPI(t *testing.T) {
 	}
 	if err = protocol.VerifyV2Task(signed, privateKey.Public().(ed25519.PublicKey)); err != nil {
 		t.Fatalf("signed response failed verification: %v", err)
+	}
+	unsignedControl, err := json.Marshal(map[string]any{
+		"schema_version": 1, "node_id": "node-001", "task_id": "task-001", "sequence": 1,
+		"issued_at": "2026-11-16T00:00:00Z", "not_before": "2026-11-16T00:00:00Z", "expires_at": "2026-11-16T00:05:00Z",
+		"signing_key_id": "test-key", "signature_algorithm": "Ed25519", "signature": PlaceholderSignature,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := client.SignControl(protocol.Cancel, unsignedControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = protocol.Verify(protocol.Cancel, control, privateKey.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("signed control failed verification: %v", err)
 	}
 }
 

@@ -97,7 +97,7 @@ func (c taskTestClient) request(method, path string, body any, useNodeCert bool)
 	if strings.HasPrefix(req.URL.Path, "/api/v1/admin/tasks") {
 		req.AddCookie(&http.Cookie{Name: "mcui_session", Value: "test-session-token"})
 	}
-	if method == http.MethodPost && req.URL.Path == "/api/v1/admin/tasks" {
+	if method == http.MethodPost && strings.HasPrefix(req.URL.Path, "/api/v1/admin/tasks") {
 		req.Header.Set("X-CSRF-Token", c.csrf)
 	}
 	if useNodeCert {
@@ -271,4 +271,74 @@ func TestStatusTaskAPIRejectsOutOfScopeNodeAndSecretBearingResults(t *testing.T)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("secret-bearing ACK returned HTTP %d: %s", response.Code, response.Body)
 	}
+}
+
+func TestStatusTaskControlEndpointsDeliverCancelAndExpiredSkip(t *testing.T) {
+	t.Run("cancel pending", func(t *testing.T) {
+		client := newTaskTestClient(t)
+		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-6234567890123456", NodeID: nodeID, Core: "xray"}, false)
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create HTTP %d: %s", created.Code, created.Body)
+		}
+		var task taskView
+		if err := json.Unmarshal(created.Body.Bytes(), &task); err != nil {
+			t.Fatal(err)
+		}
+		control := client.request(http.MethodPost, "/api/v1/admin/tasks/"+task.TaskID+"/cancel", taskControlRequest{RequestID: "control-6234567890123456"}, false)
+		var controlled taskView
+		if err := json.Unmarshal(control.Body.Bytes(), &controlled); err != nil || control.Code != http.StatusOK || controlled.Control != "cancel" || !controlled.Active {
+			t.Fatalf("cancel HTTP %d = %+v err=%v body=%s", control.Code, controlled, err, control.Body)
+		}
+		lease := client.request(http.MethodGet, "/api/v1/agent/tasks/next", nil, true)
+		var delivery struct {
+			TaskID      string          `json:"task_id"`
+			Sequence    int64           `json:"sequence"`
+			ControlKind string          `json:"control_kind"`
+			Control     json.RawMessage `json:"control"`
+			ServerTime  string          `json:"server_time"`
+		}
+		if err := json.Unmarshal(lease.Body.Bytes(), &delivery); err != nil || lease.Code != http.StatusOK || delivery.TaskID != task.TaskID || delivery.Sequence != 1 || delivery.ControlKind != "cancel" || len(delivery.Control) == 0 || delivery.ServerTime == "" {
+			t.Fatalf("cancel delivery HTTP %d = %+v err=%v body=%s", lease.Code, delivery, err, lease.Body)
+		}
+		ack := taskAckRequest{TaskID: task.TaskID, Sequence: 1, StatusVersion: 1, Status: "CANCELED", Result: json.RawMessage(`{"error_code":"task_canceled"}`)}
+		if response := client.request(http.MethodPost, "/api/v1/agent/tasks/ack", ack, true); response.Code != http.StatusNoContent {
+			t.Fatalf("cancel ACK HTTP %d: %s", response.Code, response.Body)
+		}
+	})
+
+	t.Run("skip expired", func(t *testing.T) {
+		client := newTaskTestClient(t)
+		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-7234567890123456", NodeID: nodeID, Core: "xray"}, false)
+		var task taskView
+		if err := json.Unmarshal(created.Body.Bytes(), &task); err != nil || created.Code != http.StatusCreated {
+			t.Fatalf("create HTTP %d = %+v err=%v", created.Code, task, err)
+		}
+		expiry, err := time.Parse(time.RFC3339, task.ExpiresAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.server.taskRuntime.Now = func() time.Time { return expiry.Add(time.Second) }
+		control := client.request(http.MethodPost, "/api/v1/admin/tasks/"+task.TaskID+"/skip", taskControlRequest{RequestID: "control-7234567890123456"}, false)
+		var controlled taskView
+		if err = json.Unmarshal(control.Body.Bytes(), &controlled); err != nil || control.Code != http.StatusOK || controlled.Control != "skip" || !controlled.Active {
+			t.Fatalf("skip HTTP %d = %+v err=%v body=%s", control.Code, controlled, err, control.Body)
+		}
+		lease := client.request(http.MethodGet, "/api/v1/agent/tasks/next", nil, true)
+		var delivery struct {
+			TaskID      string          `json:"task_id"`
+			Sequence    int64           `json:"sequence"`
+			ControlKind string          `json:"control_kind"`
+			Control     json.RawMessage `json:"control"`
+			ServerTime  string          `json:"server_time"`
+		}
+		if err = json.Unmarshal(lease.Body.Bytes(), &delivery); err != nil || lease.Code != http.StatusOK || delivery.TaskID != task.TaskID || delivery.Sequence != 1 || delivery.ControlKind != "skip" || len(delivery.Control) == 0 || delivery.ServerTime == "" {
+			t.Fatalf("skip delivery HTTP %d = %+v err=%v body=%s", lease.Code, delivery, err, lease.Body)
+		}
+		ack := taskAckRequest{TaskID: task.TaskID, Sequence: 1, StatusVersion: 1, Status: "EXPIRED", Result: json.RawMessage(`{"error_code":"task_expired"}`)}
+		if response := client.request(http.MethodPost, "/api/v1/agent/tasks/ack", ack, true); response.Code != http.StatusNoContent {
+			t.Fatalf("skip ACK HTTP %d: %s", response.Code, response.Body)
+		}
+	})
 }
