@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/store"
 	"golang.org/x/crypto/argon2"
@@ -44,6 +45,7 @@ type Server struct {
 	bootstrapToken string
 	nodeCA         *security.CertificateAuthority
 	taskRuntime    *TaskRuntime
+	coreCatalog    corecatalog.Source
 	mux            *http.ServeMux
 	rateMu         sync.Mutex
 	attempts       map[string]attempt
@@ -75,7 +77,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 }
 
 func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *security.CertificateAuthority) *Server {
-	x := &Server{store: s, bootstrapToken: bootstrapToken, nodeCA: nodeCA, mux: http.NewServeMux(), attempts: map[string]attempt{}}
+	x := &Server{store: s, bootstrapToken: bootstrapToken, nodeCA: nodeCA, coreCatalog: corecatalog.NewClient(), mux: http.NewServeMux(), attempts: map[string]attempt{}}
 	x.mux.HandleFunc("GET /healthz", x.health)
 	x.mux.HandleFunc("POST /api/v1/bootstrap", x.bootstrap)
 	x.mux.HandleFunc("POST /api/v1/admin/login", x.login)
@@ -94,6 +96,7 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/void", x.voidUnissuedStatusTask)
 	x.mux.HandleFunc("GET /api/v1/admin/tasks", x.listTasks)
 	x.mux.HandleFunc("GET /api/v1/admin/tasks/{id}", x.taskDetail)
+	x.mux.HandleFunc("GET /api/v1/admin/cores/releases", x.coreReleases)
 	x.mux.HandleFunc("POST /api/v1/admin/nodes/disable", x.disableNode)
 	x.mux.HandleFunc("POST /api/v1/agent/enroll", x.enroll)
 	x.mux.HandleFunc("POST /api/v1/agent/cert/rotate", x.rotateCertificate)
@@ -108,6 +111,23 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 }
 
 func (s *Server) Handler() http.Handler { return securityHeaders(s.mux) }
+
+func (s *Server) coreReleases(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminAuth(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.coreCatalog == nil {
+		http.Error(w, "release catalog unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	snapshot, err := s.coreCatalog.List(r.Context())
+	if err != nil {
+		http.Error(w, "official release catalog unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -4,7 +4,7 @@ MCUI is a multi-Core control plane in staged development. The repository contain
 
 ## Current stage
 
-Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 connects scoped status-task creation, external signing, mTLS pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only executable action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Generic sequence-gap recovery, an independent external time source, failure/recovery drills, and formal security acceptance remain open. A successful build does not constitute phase exit or production approval.
+Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 connects scoped status-task creation, external signing, mTLS pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only executable node action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Phase 3 development has started with a read-only official Core release catalog; installation, artifact trust, backup caching, and lifecycle tasks are not enabled. See [Phase 3 progress](docs/phase-3-progress.md). A successful build does not constitute phase exit or production approval.
 
 ## Development checks
 
@@ -59,4 +59,5 @@ The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-mas
 - `internal/helper`: Linux-only peer credential and task verification boundary; runs fixed read-only status queries and fails closed on uncertain ledger state
 - `internal/checkpoint`: experimental transition model requiring an independently trusted authority and durable local journal
 - `internal/checkpointstore`, `internal/checkpointjournal`: experimental SQLite authority and journal primitives; not independently deployed, authenticated or connected to runtime
+- `internal/corecatalog`: read-only official GitHub release metadata for Xray, sing-box, and mita; entries are discovery data and do not authorize installation
 - `web`: Vue administration panel

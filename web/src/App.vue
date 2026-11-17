@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; needs_reenrollment?: boolean }
 type Audit = { at: number; actor: string; action: string; resource: string; outcome: string }
@@ -8,6 +8,10 @@ type TaskAck = { status_version: number; status: string; result?: StatusResult }
 type StatusTask = { task_id: string; node_id: string; sequence: number; created_by?: string; created_at?: string; approval: string; control?: string; operation: string; core: string; issued_at: string; expires_at: string; active: boolean; lease_deadline?: string; status: string; acks: TaskAck[] }
 type ManagedAdmin = { id: string; username: string; role: string; node_ids: string[]; node_groups: string[]; disabled: boolean }
 type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_create_invites: boolean; can_disable_nodes: boolean }
+type CoreCatalogAsset = { name: string; size: number; download_url: string; digest?: string }
+type CoreCatalogRelease = { version: string; title: string; published_at: string; prerelease: boolean; url: string; assets: CoreCatalogAsset[] }
+type CoreCatalogEntry = { id: string; name: string; repository: string; releases: CoreCatalogRelease[] }
+type CoreCatalog = { retrieved_at: string; stale: boolean; cores: CoreCatalogEntry[] }
 class ApiError extends Error { constructor(readonly status: number, message: string) { super(message) } }
 const username = ref('')
 const password = ref('')
@@ -15,6 +19,10 @@ const code = ref('')
 const nodes = ref<NodeRecord[]>([])
 const audits = ref<Audit[]>([])
 const tasks = ref<StatusTask[]>([])
+const coreCatalog = ref<CoreCatalog | null>(null)
+const coreCatalogCore = ref('xray')
+const coreCatalogLoading = ref(false)
+const coreCatalogError = ref('')
 const managedAdmins = ref<ManagedAdmin[]>([])
 const error = ref('')
 const loading = ref(false)
@@ -36,6 +44,7 @@ const newAdminGroups = ref('')
 const newAdminNodeIDs = ref('')
 const createdTOTP = ref('')
 let csrfToken = ''
+const selectedCoreCatalog = computed(() => coreCatalog.value?.cores.find((core) => core.id === coreCatalogCore.value) ?? null)
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase()
@@ -61,7 +70,19 @@ async function refresh() {
   nodes.value = nodeData
   audits.value = auditData.slice(-100).reverse()
   managedAdmins.value = adminData
+  await loadCoreCatalog()
   if (selectedNode.value) await loadTasks(selectedNode.value.id)
+}
+async function loadCoreCatalog() {
+  coreCatalogLoading.value = true
+  coreCatalogError.value = ''
+  try {
+    coreCatalog.value = await api<CoreCatalog>('/api/v1/admin/cores/releases')
+  } catch (e) {
+    coreCatalogError.value = e instanceof Error ? e.message : '读取官方发布目录失败'
+  } finally {
+    coreCatalogLoading.value = false
+  }
 }
 async function login() {
   loading.value = true; error.value = ''
@@ -140,7 +161,8 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
       <form class="card secondary" @submit.prevent="bootstrap"><span class="eyebrow">FIRST RUN ONLY</span><h2>初始化安全管理员</h2><p>仅在服务端设置 MCUI_BOOTSTRAP_TOKEN 后可用。</p><label>初始化令牌<input v-model="bootstrapToken" type="password" required /></label><label>用户名<input v-model="bootstrapUser" required /></label><label>密码（至少 12 位）<input v-model="bootstrapPassword" type="password" minlength="12" required /></label><label>TOTP 密钥（Base32）<input v-model="bootstrapTOTP" autocomplete="off" required /></label><button class="outline" :disabled="loading">创建管理员</button></form>
     </section>
     <template v-else>
-      <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => !n.disabled && Date.now()/1000 - n.last_seen < 60).length }}</strong></div><div class="metric"><span>当前阶段</span><strong>02 / STATUS TASKS</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
+      <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => !n.disabled && Date.now()/1000 - n.last_seen < 60).length }}</strong></div><div class="metric"><span>当前阶段</span><strong>03 / CORE LIFECYCLE</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
+      <section class="card core-catalog"><div class="section-head"><div><span class="eyebrow">OFFICIAL RELEASE CATALOG</span><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="loadCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases。官方版本列表用于发现版本，尚不代表制品已获安装授权；安装任务与 Helper 安装事务仍未开放。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div></div></section>
       <section class="card"><div class="section-head"><div><span class="eyebrow">INVENTORY</span><h2>节点</h2></div><button @click="refresh">刷新</button></div><div v-if="!nodes.length" class="empty">暂无已注册节点。先创建一次性邀请，再在空 Agent 上注册。</div><div v-for="node in nodes" :key="node.id" class="node-row"><div class="node-avatar">{{ node.name.slice(0,1).toUpperCase() }}</div><div class="node-main"><strong>{{ node.name }}</strong><span>{{ node.id }} · {{ node.group }}</span></div><span class="status" :class="node.disabled ? 'off' : Date.now()/1000-node.last_seen < 60 ? 'on' : 'idle'">{{ node.disabled ? '已禁用' : Date.now()/1000-node.last_seen < 60 ? '在线' : '离线' }}</span><button class="outline" @click="showNode(node.id)">详情</button><button v-if="admin?.can_disable_nodes && !node.disabled" class="danger" @click="disableNode(node.id)">禁用</button></div><div v-if="selectedNode" class="audit-row"><span>节点详情：{{ selectedNode.name }} · {{ selectedNode.id }} · {{ selectedNode.group }} · 最近心跳 {{ new Date(selectedNode.last_seen*1000).toLocaleString() }}<span v-if="selectedNode.needs_reenrollment"> · 需要重新注册</span></span><button class="quiet" @click="selectedNode = null">关闭</button></div></section>
       <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!tasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in tasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small><small v-if="task.control">控制消息：{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() < Date.parse(task.expires_at) && task.control !== 'cancel'" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button><button v-if="task.active && task.status === 'QUEUED' && !task.lease_deadline && !task.control && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() >= Date.parse(task.expires_at) && task.control !== 'skip'" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
       <section class="bottom-grid"><form v-if="admin?.can_create_invites" class="card" @submit.prevent="createInvite"><span class="eyebrow">ONE-TIME ENROLLMENT</span><h2>注册邀请</h2><label>节点组<input v-model="inviteGroup" required /></label><label>有效期（秒）<input v-model.number="inviteTTL" type="number" min="60" max="86400" required /></label><button>创建邀请</button><p v-if="invite" class="invite">{{ invite }}</p></form><section class="card"><span class="eyebrow">AUDIT TRAIL</span><h2>安全事件</h2><div v-for="(event, i) in audits" :key="i" class="audit-row"><time>{{ new Date(event.at*1000).toLocaleString() }}</time><span>{{ event.action }}</span><small>{{ event.outcome }}</small></div><p v-if="!audits.length" class="empty">暂无事件</p></section></section>
@@ -149,6 +171,6 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
         <section class="card"><span class="eyebrow">ADMIN ACCOUNTS</span><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
       </section>
     </template>
-    <footer>管理请求需经服务端认证与授权。Agent 安装包不包含 Core；此阶段不开放节点副作用操作。</footer>
+    <footer>管理请求需经服务端认证与授权。Core 官方版本目录仅供查看；Agent 安装包不包含 Core，安装与其他节点副作用操作仍关闭。</footer>
   </main>
 </template>
