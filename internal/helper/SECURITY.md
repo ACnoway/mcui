@@ -36,14 +36,17 @@ state and time, or loss/rollback of both Master and node state, is outside the
 current guarantee. The Helper high-water mark remains in the same rollback
 domain as its ledger.
 
-The V1 signed cancel/skip control messages are not connected to this runtime.
-An expired V2 task can be accepted only as a terminal receipt; it is never
-executed. An unexplained Agent sequence gap, damaged ledger, or uncertain Helper
-record remains fenced and requires offline inspection. Do not delete or rewrite
-the ledger to restore service. The Master task DB and main identity/audit DB are
-separate SQLite transactions; authorization is recorded before issuing, while
-the later issue event is best-effort. Backup/restore consistency and the
-cross-database crash window still require dedicated review.
+The restricted V1 cancel/skip controls are handled by the Master and Agent
+delivery/ledger path; the Helper does not receive or authorize them. Cancel can
+only close a pending status task, while `EXPIRED` skip only confirms an expired
+task already recorded by the Agent. An expired V2 task can be accepted only as
+a terminal receipt; it is never executed. An unexplained Agent sequence gap,
+damaged ledger, or uncertain Helper record remains fenced and requires offline
+inspection. Do not delete or rewrite the ledger to restore service. The Master
+task DB and main identity/audit DB are separate SQLite transactions;
+authorization is recorded before issuing, while the later issue event is
+best-effort. Backup/restore consistency and the cross-database crash window
+still require dedicated review.
 
 This package and its tests do not constitute a production security review,
 Debian clean-VM installation, systemd sandbox test, or full stage exit. See
