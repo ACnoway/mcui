@@ -13,7 +13,6 @@ import (
 
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/store"
-	"github.com/ACnoway/mcui/internal/taskcontrol"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
 	"github.com/ACnoway/mcui/internal/tasksigner"
 )
