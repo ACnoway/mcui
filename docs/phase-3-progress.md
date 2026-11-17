@@ -19,10 +19,18 @@
 - 已登录管理员可通过 `GET /api/v1/admin/cores/backups` 查看 manifest，面板显示版本、架构、文件大小、digest 和更新时间。目录权限收紧为仅服务账号可访问，manifest 不可被非普通文件或未知字段绕过。
 - GitHub API digest 只代表上游声明并由主控重新计算验证，尚未经过本项目 TUF targets 阈值签署；缓存仅为未来精确匹配的备用副本，不授权安装。未来常规安装仍由 Agent 直连官方源；备用仅允许精确版本、架构、文件和摘要全部匹配，不能静默改装其他版本。当前尚无安装任务、Agent 下载路径、Helper 解包/安装事务或 Core 服务管理操作。
 
+## 已实现的 TUF 客户端基础
+
+- `internal/artifacttrust` 固定使用官方 `github.com/theupdateframework/go-tuf/v2 v2.4.2`。每次查找以离线配置的 root 为信任起点，刷新 root/timestamp/snapshot/targets 与按需委派 targets；缓存目录分离、校验 `0700` 且拒绝符号链接。初始 root 不从网络下载。
+- 客户端记录每次成功刷新获得的版本化 root，并在后续创建 updater 前，从离线引导 root 起逐个验证 root 轮换链。root 文件以 `0400` 原子追加保存。该检查阻止客户端初始化时把已记录 root 链降回旧版本，但记录与元数据仍位于同一节点回滚域；没有独立单调检查点，也没有双库/灾备回滚检测。
+- target 路径固定为 `cores/{core}/{version}/linux/{本机架构}/{官方文件名}`；只接受 Xray、sing-box、mita 的固定资产映射。自定义元数据严格绑定由 SHA-256 派生的制品 ID、Core、版本、OS/架构、`upstream-prebuilt`、固定归档格式、source ID、审核记录 ID 和明确的上游签名状态。拒绝重复或未知字段、错误绑定、缺少 SHA-256 和超过 512 MiB 的 target。
+- 下载仅访问固定 GitHub Release asset URL，最多 5 次跳转到允许的 GitHub 官方资产/CDN 主机，禁用代理并拒绝非公网 DNS 地址。下载字节按 TUF length 与 SHA-256 重新校验，成功后才以摘要名、`0400` 权限原子发布到私有缓存；错误字节和中断下载不会留下可用缓存文件。
+- 此客户端目前是隔离的基础组件，未被 Agent/Helper 或任务路径调用。`review_id` 和上游签名状态须由已签 TUF metadata 提供；代码不验证该 ID 对应的审计数据库记录，也不独立验证上游签名。没有发布仓库、生产 root/targets 密钥、批准的 target metadata、任务审批/MFA、Helper 二次验证、归档安全解包、安装事务、Core unit/LKG 或 Agent/Helper 自更新。
+
 ## 后续工作
 
-1. 实现并验收 TUF targets 信任、上游签名事实核验及审核记录；当前缓存的 GitHub API digest 不能替代这些授权步骤。
-2. 实现 Agent 直连官方源的固定源下载和未来精确缓存备用路径，设置请求/响应大小与时间限制、重定向主机限制、摘要/签名校验及缓存回退条件。任务绑定制品 ID、精确版本、架构和摘要，不接受任意 URL。
+1. 建立角色分离的 TUF 发布仓库、2-of-3 root/targets 密钥保管和审核记录流程，生成离线信任根并在独立工具/规范互操作测试中验证轮换、threshold 与撤销；当前代码没有生产 key material 或 repository。
+2. 将客户端安全接入 Agent 固定下载路径，绑定签名任务中的制品 ID、精确版本、架构和摘要；实现 Helper 独立重验、精确匹配备用缓存回退条件和归档安全解包。
 3. 建立高危操作 MFA 复验和独立审批后，增加签名安装/升级/显式降级/卸载任务及 Helper 固定操作。
 4. 为 Xray 增加不可变版本目录、固定 systemd unit、独立低权限账号、健康确认、LKG 恢复和启动对账。
 5. 实现 Agent/Helper 独立授权更新、旧版本监督、自动恢复和本地人工修复；完成失败恢复演练前保持远程自身更新关闭。
@@ -30,7 +38,7 @@
 
 ## 当前验证边界
 
-目录和备用缓存测试覆盖固定源解析、分页、上游 URL 校验、版本选择、存储 manifest、下载长度/摘要、跳转主机、缓存原子替换和失败保留；不覆盖发布密钥、TUF、二进制真实性或节点安装。阶段 3 退出门槛见[分阶段开发流程](./phased-development-workflow.md)；任何 Core 在兼容矩阵实测前仍是未验证状态。
+目录和备用缓存测试覆盖固定源解析、分页、上游 URL 校验、版本选择、存储 manifest、下载长度/摘要、跳转主机、缓存原子替换和失败保留。TUF 客户端单元测试覆盖 target metadata 绑定、重复/未知字段、SHA-256/长度、固定源与跳转、私有缓存权限和非公网地址拒绝；还未覆盖生产 TUF repository/密钥轮换互操作、上游签名事实、安装、Helper 或节点故障恢复。阶段 3 退出门槛见[分阶段开发流程](./phased-development-workflow.md)；任何 Core 在兼容矩阵实测前仍是未验证状态。
 
 ## 已执行检查
 

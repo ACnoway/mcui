@@ -70,12 +70,13 @@ type provider struct {
 	name       string
 	repository string
 	apiURL     string
+	sourceID   string
 }
 
 var providers = []provider{
-	{id: "xray", name: "Xray", repository: "XTLS/Xray-core", apiURL: "https://api.github.com/repos/XTLS/Xray-core/releases"},
-	{id: "sing-box", name: "sing-box", repository: "SagerNet/sing-box", apiURL: "https://api.github.com/repos/SagerNet/sing-box/releases"},
-	{id: "mita", name: "mita", repository: "enfein/mieru", apiURL: "https://api.github.com/repos/enfein/mieru/releases"},
+	{id: "xray", name: "Xray", repository: "XTLS/Xray-core", apiURL: "https://api.github.com/repos/XTLS/Xray-core/releases", sourceID: "github:XTLS/Xray-core"},
+	{id: "sing-box", name: "sing-box", repository: "SagerNet/sing-box", apiURL: "https://api.github.com/repos/SagerNet/sing-box/releases", sourceID: "github:SagerNet/sing-box"},
+	{id: "mita", name: "mita", repository: "enfein/mieru", apiURL: "https://api.github.com/repos/enfein/mieru/releases", sourceID: "github:enfein/mieru"},
 }
 
 type pageCache struct {

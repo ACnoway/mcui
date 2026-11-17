@@ -255,6 +255,47 @@ func expectedAssetName(coreID, version, arch string) (string, error) {
 	return "", fmt.Errorf("unsupported Core asset mapping %s/%s", coreID, arch)
 }
 
+// ExpectedAssetName returns the fixed official asset filename for a supported
+// Core, exact release tag, and Linux architecture. The result must not be
+// replaced with a filename supplied by a task or release response.
+func ExpectedAssetName(coreID, version, arch string) (string, error) {
+	if !tagPattern.MatchString(version) {
+		return "", errors.New("invalid Core version")
+	}
+	return expectedAssetName(coreID, version, arch)
+}
+
+// OfficialSourceID returns the stable identifier used in reviewed TUF target
+// metadata. It is deliberately separate from any user-provided URL.
+func OfficialSourceID(coreID string) (string, error) {
+	for _, p := range providers {
+		if p.id == coreID {
+			return p.sourceID, nil
+		}
+	}
+	return "", errors.New("unsupported Core source")
+}
+
+// OfficialAssetURL maps a reviewed Core release to its fixed GitHub release
+// asset URL. Redirects are validated separately by the downloader.
+func OfficialAssetURL(coreID, version, arch string) (string, error) {
+	var p *provider
+	for i := range providers {
+		if providers[i].id == coreID {
+			p = &providers[i]
+			break
+		}
+	}
+	if p == nil || !tagPattern.MatchString(version) {
+		return "", errors.New("unsupported Core release")
+	}
+	name, err := expectedAssetName(coreID, version, arch)
+	if err != nil {
+		return "", err
+	}
+	return "https://github.com/" + p.repository + "/releases/download/" + version + "/" + name, nil
+}
+
 func (b *BackupStore) ensureBackupBlob(ctx context.Context, p provider, version string, asset Asset) (BackupAsset, error) {
 	digest := strings.TrimPrefix(asset.Digest, "sha256:")
 	if !digestPattern.MatchString(asset.Digest) || asset.Size <= 0 || asset.Size > backupMaxAssetSize {

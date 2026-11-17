@@ -28,6 +28,7 @@
 
 - 工具链基线更新为 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0`（按 2026-11-16 官方最新补丁锁定）。Go 1.27.4 的发布记录包含 TLS/HTTP 等安全修复；Go 项目仅支持最近两个主要版本，故 1.24 已不适合作为当前基线。Node 26.13.1 是 LTS 安全更新；pnpm 12.16.0 修复了 zstd 处理与签名相关安全问题，基线锁到后续的 12.17.0。参见 [Go Release History](https://go.dev/doc/devel/release)、[Node.js 26.13.1](https://nodejs.org/en/blog/release/v26.13.1)、[pnpm 12.16.0 security fixes](https://pnpm.io/blog/releases/12.16.0) 和 [pnpm 12.17.0](https://pnpm.io/blog/releases/12.17.0)。`scripts/check-static.sh` 强制精确值，`.nvmrc` 与 `web/package.json` 记录 Node/pnpm 版本。维护者仍须设定更新负责人和生命周期更新节奏，不能因版本固定而长期停更。
 - Go 工程提交 `go.mod` 和 `go.sum`；CI 的 Go 版本精确固定，构建/测试后核验依赖文件未被改写。模块更新须单独评审。
+- TUF 客户端依赖固定为 `github.com/theupdateframework/go-tuf/v2 v2.4.2`；生产 root/targets 密钥、发布仓库、发布签核及互操作测试仍未完成。Core 制品验证不能因 Go 包已接入就被视作启用。
 - 前端只使用 `pnpm-lock.yaml`；CI 运行冻结锁文件安装并核验未改写。禁止浮动版本、未审查的远程脚本；安装脚本权限、网络和机密隔离须评估。
 - 第三方 CI action、构建镜像和工具按不可变完整提交 SHA 或镜像摘要固定；记录来源、许可证、完整性和变更原因。依赖升级通过专门变更展示锁文件差异、漏洞和兼容性测试；漏洞扫描发现阻断问题时修复或停止交付，不以静默忽略代替决议。
 - Core 制品不是普通构建依赖：固定来源、版本、架构、摘要、构建选项及受信签名清单；发布信任和降级授权以阶段 0 制品信任协议最终决议为准。任务签名与发布根密钥隔离。
@@ -53,7 +54,7 @@
 
 - [x] 按[阶段流程阶段 0](./phased-development-workflow.md)记录架构、威胁、权限矩阵、身份协议、任务 schema/签名/序号/恢复、Helper 固定操作、配置策略、制品信任与支持矩阵。正式批准密钥持有人、独立审批人和恢复责任人仍待负责人落实。
 - [x] 生成任务/配置/取消/跳过共享正反向量，并由 Go 与 Node.js 两种实现校验规范化签名字节和签名；向量与验证器位于 `internal/protocol/testdata/protocol-v1.json`、`internal/protocol` 和 `scripts/verify-protocol-vectors.mjs`。向量验证编码和签名；序号/租约/恢复语义作为设计基线单独记录，运行时行为仍须测试。
-- [x] 代码和文档未开放任意 Shell、URL、路径或 Unit API；发布信任已选择 TUF 基线，列明离线失败关闭、回滚、根轮换和恢复策略。TUF 客户端与密钥托管尚未实现。
+- [x] 代码和文档未开放任意 Shell、URL、路径或 Unit API；发布信任已选择 TUF 基线，列明离线失败关闭、回滚、根轮换和恢复策略。TUF 客户端基础已实现，但生产密钥托管、发布仓库及节点集成未实现。
 - [x] 已配置基础 CI 和阶段验收计划。项目负责人记录文档版本、提交、检查人、日期、结论与未决风险；检查结果尚待记录。
 
 如需配置远程仓库规则，应由管理员验证其允许本项目默认直接在 `master` 开发的工作流；本地 CI YAML 不代表远端规则已经启用。
