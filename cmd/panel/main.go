@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/master"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/store"
@@ -29,6 +31,7 @@ func main() {
 	tlsKeyPath := flag.String("tls-key", "", "Master HTTPS private key PEM")
 	nodeCACertPath := flag.String("node-ca-cert", "", "node client certificate CA PEM")
 	nodeCAKeyPath := flag.String("node-ca-key", "", "node client certificate CA private key PEM")
+	coreBackupDir := flag.String("core-backup-dir", "./data/core-backups", "directory for one latest stable Core backup per official project")
 	taskDBPath := flag.String("task-db", "", "durable status-task database; task APIs stay disabled when omitted")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
@@ -85,6 +88,15 @@ func main() {
 	}
 	defer s.Close()
 	srv := master.NewWithNodeCA(s, os.Getenv("MCUI_BOOTSTRAP_TOKEN"), *webDir, nodeCA)
+	catalog := corecatalog.NewClient()
+	srv.ConfigureCoreCatalog(catalog)
+	backupStore, backupErr := corecatalog.NewBackupStore(*coreBackupDir, catalog)
+	if backupErr != nil {
+		log.Printf("Core release catalog enabled; backup cache unavailable: %v", backupErr)
+	} else {
+		srv.ConfigureCoreBackups(backupStore)
+		go syncCoreBackups(backupStore)
+	}
 	if *taskDBPath != "" || *taskKeyID != "" || *taskPublicKeyPath != "" || *taskSignerURL != "" || *taskSignerTokenPath != "" {
 		if *taskDBPath == "" || *taskKeyID == "" || *taskPublicKeyPath == "" || *taskSignerURL == "" || *taskSignerTokenPath == "" {
 			log.Fatal("task runtime requires -task-db, -task-key-id, -task-public-key, -task-signer-url, and -task-signer-token-file")
@@ -129,6 +141,18 @@ func main() {
 	}
 	log.Printf("mcui development Master listening on loopback HTTP %s; Agent enrollment is unavailable", *addr)
 	log.Fatal(httpServer.ListenAndServe())
+}
+
+func syncCoreBackups(backups *corecatalog.BackupStore) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	defer cancel()
+	manifest, err := backups.Sync(ctx)
+	for _, core := range manifest.Cores {
+		log.Printf("Core backup available: %s %s (%d architectures)", core.ID, core.Version, len(core.Assets))
+	}
+	if err != nil {
+		log.Printf("Core backup refresh incomplete; previous verified per-Core versions were preserved: %v", err)
+	}
 }
 
 func openTaskStore(path string) (*taskdispatch.Store, error) {

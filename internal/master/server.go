@@ -48,6 +48,7 @@ type Server struct {
 	nodeCA         *security.CertificateAuthority
 	taskRuntime    *TaskRuntime
 	coreCatalog    corecatalog.Source
+	coreBackups    corecatalog.BackupSnapshotter
 	mux            *http.ServeMux
 	rateMu         sync.Mutex
 	attempts       map[string]attempt
@@ -99,6 +100,7 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 	x.mux.HandleFunc("GET /api/v1/admin/tasks", x.listTasks)
 	x.mux.HandleFunc("GET /api/v1/admin/tasks/{id}", x.taskDetail)
 	x.mux.HandleFunc("GET /api/v1/admin/cores/releases", x.coreReleases)
+	x.mux.HandleFunc("GET /api/v1/admin/cores/backups", x.coreBackupsSnapshot)
 	x.mux.HandleFunc("POST /api/v1/admin/nodes/disable", x.disableNode)
 	x.mux.HandleFunc("POST /api/v1/agent/enroll", x.enroll)
 	x.mux.HandleFunc("POST /api/v1/agent/cert/rotate", x.rotateCertificate)
@@ -113,6 +115,33 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 }
 
 func (s *Server) Handler() http.Handler { return securityHeaders(s.mux) }
+
+func (s *Server) ConfigureCoreCatalog(source corecatalog.Source) {
+	if source != nil {
+		s.coreCatalog = source
+	}
+}
+
+func (s *Server) ConfigureCoreBackups(source corecatalog.BackupSnapshotter) {
+	s.coreBackups = source
+}
+
+func (s *Server) coreBackupsSnapshot(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminAuth(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.coreBackups == nil {
+		http.Error(w, "Core backup store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	snapshot, err := s.coreBackups.Snapshot()
+	if err != nil {
+		http.Error(w, "Core backup metadata unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
 
 func (s *Server) coreReleases(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminAuth(r); !ok {

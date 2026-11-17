@@ -21,6 +21,17 @@ type fixedCoreCatalog struct {
 	calls    int
 }
 
+type fixedCoreBackups struct {
+	manifest corecatalog.BackupManifest
+	err      error
+	calls    int
+}
+
+func (f *fixedCoreBackups) Snapshot() (corecatalog.BackupManifest, error) {
+	f.calls++
+	return f.manifest, f.err
+}
+
 func (f *fixedCoreCatalog) List(context.Context) (corecatalog.Snapshot, error) {
 	f.calls++
 	return f.snapshot, f.err
@@ -96,6 +107,48 @@ func TestCoreReleasesValidatesAndServesPages(t *testing.T) {
 	page := requestAsAdmin(t, s.Handler(), http.MethodGet, "http://example.com/api/v1/admin/cores/releases?page=2", nil, token, "")
 	if page.Code != http.StatusOK || source.calls != 1 || !strings.Contains(page.Body.String(), `"page":2`) {
 		t.Fatalf("valid page status=%d calls=%d body=%s", page.Code, source.calls, page.Body.String())
+	}
+}
+
+func TestCoreBackupsRequiresAdminSession(t *testing.T) {
+	s, _ := newCoreCatalogTestServer(t)
+	backups := &fixedCoreBackups{manifest: corecatalog.BackupManifest{SchemaVersion: 1}}
+	s.coreBackups = backups
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/cores/backups", nil)
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized || backups.calls != 0 {
+		t.Fatalf("unauthenticated backup request status=%d calls=%d", response.Code, backups.calls)
+	}
+}
+
+func TestCoreBackupsReturnsAuthenticatedSnapshot(t *testing.T) {
+	s, st := newCoreCatalogTestServer(t)
+	token, csrf := "session-core-backups", "csrf-core-backups"
+	seedAdminSession(t, st, store.Admin{Role: "auditor", NodeGroups: []string{"g1"}}, token, csrf, time.Now().Unix())
+	manifest := corecatalog.BackupManifest{
+		SchemaVersion: 1,
+		UpdatedAt:     time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC),
+		Cores: []corecatalog.BackupCore{{
+			ID: "xray", Name: "Xray", Repository: "XTLS/Xray-core", Version: "v1.2.3",
+			ReleaseURL: "https://github.com/XTLS/Xray-core/releases/tag/v1.2.3",
+			Assets:     []corecatalog.BackupAsset{{Architecture: "amd64", Name: "Xray-linux-64.zip", Size: 10, Digest: "sha256:" + strings.Repeat("a", 64), SourceURL: "https://github.com/XTLS/Xray-core/releases/download/v1.2.3/Xray-linux-64.zip", StorageKey: "blobs/" + strings.Repeat("a", 64)}},
+		}},
+	}
+	backups := &fixedCoreBackups{manifest: manifest}
+	s.coreBackups = backups
+
+	response := requestAsAdmin(t, s.Handler(), http.MethodGet, "http://example.com/api/v1/admin/cores/backups", nil, token, "")
+	if response.Code != http.StatusOK || backups.calls != 1 {
+		t.Fatalf("backup request status=%d calls=%d body=%s", response.Code, backups.calls, response.Body.String())
+	}
+	var got corecatalog.BackupManifest
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Cores) != 1 || got.Cores[0].Version != "v1.2.3" || len(got.Cores[0].Assets) != 1 {
+		t.Fatalf("unexpected backup response: %+v", got)
 	}
 }
 
