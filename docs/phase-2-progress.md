@@ -28,8 +28,8 @@
 | 本地 `gofmt`（仅本次 Go 文件） | 通过 | 本机仅格式/解析检查，没有安装或修改工具链 |
 | 本地 `git diff --check` | 通过 | 每次推送前检查 |
 | 本地 V1/V2 共享向量脚本 | 通过 | V1 4 个正例、9 个负例；V2 3 个正例、29 个负例 |
-| 完整 `scripts/check-static.sh` | 通过 | `ssh ro` 的 `/root/mcui`，Debian 13 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包含 Go vet/build/test、Linux amd64/arm64 交叉构建、协议向量和前端冻结依赖安装/类型检查/生产构建 |
-| systemd unit 语法检查 | 通过 | systemd 257.13 临时 sysroot 验证四个服务和两个 task-runtime drop-in；未安装或启动服务 |
+| 完整 `scripts/check-static.sh` | 通过（`bd3a240`） | `ssh ro` 的 `/root/mcui`，Debian 13 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包含 Go vet/build/test（含 cancel/skip、旧库迁移用例）、Linux amd64/arm64 交叉构建、协议向量和前端冻结依赖安装/类型检查/生产构建 |
+| systemd unit 语法检查 | 通过（`bd3a240`） | systemd 257.13 临时 sysroot 验证四个服务和两个 task-runtime drop-in；未安装或启动服务 |
 | Linux 实际 Helper / Core 端到端演练 | 未完成 | 远程构建环境不等同于干净节点验收 |
 
 ## 阶段退出门槛
