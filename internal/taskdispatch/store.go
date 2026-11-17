@@ -42,12 +42,13 @@ var (
 // Delivery contains the original signed bytes. Raw is copied on return and is
 // never interpreted as executable input by this package.
 type Delivery struct {
-	NodeID   string
-	TaskID   string
-	Sequence int64
-	Raw      []byte
-	LeaseID  string
-	Deadline time.Time
+	NodeID            string
+	TaskID            string
+	Sequence          int64
+	Raw               []byte
+	LeaseID           string
+	Deadline          time.Time
+	LastStatusVersion int64
 }
 
 // Ack is a persisted observation from an externally authenticated node. Result
@@ -62,10 +63,11 @@ type Ack struct {
 }
 
 type taskEnvelope struct {
-	TaskID   string `json:"task_id"`
-	NodeID   string `json:"node_id"`
-	Sequence int64  `json:"sequence"`
-	KeyID    string `json:"signing_key_id"`
+	TaskID    string `json:"task_id"`
+	NodeID    string `json:"node_id"`
+	Sequence  int64  `json:"sequence"`
+	KeyID     string `json:"signing_key_id"`
+	Operation string `json:"operation"`
 }
 
 type Store struct{ db *sql.DB }
@@ -298,9 +300,11 @@ SELECT
  (SELECT COUNT(*) FROM tasks t JOIN acks a ON a.task_id=t.task_id
    WHERE a.node_id!=t.node_id OR a.sequence!=t.sequence) +
  (SELECT COUNT(*) FROM tasks t WHERE t.active=0 AND NOT EXISTS
-   (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED'))) +
+   (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
+    (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status')))) +
  (SELECT COUNT(*) FROM tasks t WHERE t.active=1 AND EXISTS
-   (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED')))
+   (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
+    (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status'))))
 `, MaxSequence).Scan(&bad)
 	if err != nil || bad != 0 {
 		return fmt.Errorf("invalid task delivery database contents: violations=%d: %v", bad, err)
@@ -476,6 +480,13 @@ func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	if err != nil {
 		return zero, err
 	}
+	var lastStatusVersion sql.NullInt64
+	if err = tx.QueryRow(`SELECT MAX(status_version) FROM acks WHERE task_id=?`, d.TaskID).Scan(&lastStatusVersion); err != nil {
+		return zero, err
+	}
+	if lastStatusVersion.Valid {
+		d.LastStatusVersion = lastStatusVersion.Int64
+	}
 	if storedKey != configuredKeyID {
 		return zero, ErrIdentity
 	}
@@ -530,7 +541,8 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 	var taskNode string
 	var taskSeq int64
 	var active int
-	err = tx.QueryRow(`SELECT node_id,sequence,active FROM tasks WHERE task_id=?`, ack.TaskID).Scan(&taskNode, &taskSeq, &active)
+	var raw []byte
+	err = tx.QueryRow(`SELECT node_id,sequence,active,raw FROM tasks WHERE task_id=?`, ack.TaskID).Scan(&taskNode, &taskSeq, &active, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -538,6 +550,12 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 		return err
 	}
 	if taskNode != authenticatedNodeID || taskSeq != ack.Sequence {
+		return ErrIdentity
+	}
+	var operation struct {
+		Operation string `json:"operation"`
+	}
+	if json.Unmarshal(raw, &operation) != nil {
 		return ErrIdentity
 	}
 	var oldNode, oldStatus string
@@ -587,7 +605,7 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 	if _, err = tx.Exec(`INSERT INTO acks(task_id,status_version,node_id,sequence,status,result) VALUES(?,?,?,?,?,?)`, ack.TaskID, ack.StatusVersion, ack.NodeID, ack.Sequence, ack.Status, resultCopy); err != nil {
 		return err
 	}
-	if terminalStatuses[ack.Status] {
+	if terminalStatuses[ack.Status] || (ack.Status == "FAILED" && operation.Operation == "core.status") {
 		if _, err = tx.Exec(`UPDATE tasks SET active=0,lease_id=NULL,lease_deadline=NULL WHERE task_id=? AND active=1`, ack.TaskID); err != nil {
 			return err
 		}

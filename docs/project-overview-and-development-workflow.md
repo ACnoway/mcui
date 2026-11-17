@@ -1,6 +1,6 @@
 # 轻量化多 Core 主控面板——项目大纲与基础开发流程
 
-> 当前阶段 0/1 实施及验证记录见[阶段状态文档](./phase-0-1-implementation.md)。阶段 2 目前只有隔离开发组件，尚未形成任务投递与 Helper 执行闭环；详情见[阶段 2 进度](./phase-2-progress.md)。
+> 当前阶段 0/1 实施及验证记录见[阶段状态文档](./phase-0-1-implementation.md)。阶段 2 已接通只读状态任务运行时，但取消/skip、外部可信时间、恢复和正式验收仍未完成；详情见[阶段 2 进度](./phase-2-progress.md)。
 
 > 版本：V1.1（实施草案）
 > 参考方向：3x-ui 的入站与客户端管理、XBoard/XrayR 的主控—节点协作、mmw-agent 的 Agent 管理模式  

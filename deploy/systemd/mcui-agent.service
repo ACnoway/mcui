@@ -1,5 +1,5 @@
 [Unit]
-Description=MCUI empty Agent identity heartbeat
+Description=MCUI node Agent heartbeat
 Documentation=https://github.com/ACnoway/mcui
 After=network-online.target
 Wants=network-online.target

@@ -43,6 +43,7 @@ type Server struct {
 	store          *store.Store
 	bootstrapToken string
 	nodeCA         *security.CertificateAuthority
+	taskRuntime    *TaskRuntime
 	mux            *http.ServeMux
 	rateMu         sync.Mutex
 	attempts       map[string]attempt
@@ -87,10 +88,16 @@ func NewWithNodeCA(s *store.Store, bootstrapToken, webDir string, nodeCA *securi
 	x.mux.HandleFunc("GET /api/v1/admin/nodes", x.nodes)
 	x.mux.HandleFunc("GET /api/v1/admin/nodes/{id}", x.nodeDetail)
 	x.mux.HandleFunc("GET /api/v1/admin/audit", x.audit)
+	x.mux.HandleFunc("POST /api/v1/admin/tasks", x.createStatusTask)
+	x.mux.HandleFunc("GET /api/v1/admin/tasks", x.listTasks)
+	x.mux.HandleFunc("GET /api/v1/admin/tasks/{id}", x.taskDetail)
 	x.mux.HandleFunc("POST /api/v1/admin/nodes/disable", x.disableNode)
 	x.mux.HandleFunc("POST /api/v1/agent/enroll", x.enroll)
 	x.mux.HandleFunc("POST /api/v1/agent/cert/rotate", x.rotateCertificate)
 	x.mux.HandleFunc("POST /api/v1/agent/heartbeat", x.heartbeat)
+	x.mux.HandleFunc("GET /api/v1/agent/tasks/next", x.nextTask)
+	x.mux.HandleFunc("POST /api/v1/agent/tasks/ack", x.acknowledgeTask)
+	x.mux.HandleFunc("POST /api/v1/helper/tasks/authorize", x.authorizeHelperTask)
 	if webDir != "" {
 		x.mux.Handle("/", x.staticHandler(webDir))
 	}
@@ -1015,6 +1022,9 @@ func auditVisible(a store.Admin, st store.State, event store.Audit) bool {
 		return ok && canReadNode(a, node)
 	case "node_group":
 		return a.Role == "security_admin" && hasValue(a.NodeGroups, event.Resource)
+	case "task":
+		node, ok := st.Nodes[event.NodeID]
+		return ok && canReadNode(a, node)
 	case "admin":
 		return event.Resource == a.ID || event.Actor == a.ID
 	default:

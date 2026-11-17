@@ -3,6 +3,9 @@ import { onMounted, ref } from 'vue'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; needs_reenrollment?: boolean }
 type Audit = { at: number; actor: string; action: string; resource: string; outcome: string }
+type StatusResult = { core?: string; load_state?: string; active_state?: string; sub_state?: string; observed_at?: string; error_code?: string }
+type TaskAck = { status_version: number; status: string; result?: StatusResult }
+type StatusTask = { task_id: string; node_id: string; sequence: number; created_by?: string; created_at?: string; approval: string; operation: string; core: string; issued_at: string; expires_at: string; active: boolean; lease_deadline?: string; status: string; acks: TaskAck[] }
 type ManagedAdmin = { id: string; username: string; role: string; node_ids: string[]; node_groups: string[]; disabled: boolean }
 type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_create_invites: boolean; can_disable_nodes: boolean }
 class ApiError extends Error { constructor(readonly status: number, message: string) { super(message) } }
@@ -11,6 +14,7 @@ const password = ref('')
 const code = ref('')
 const nodes = ref<NodeRecord[]>([])
 const audits = ref<Audit[]>([])
+const tasks = ref<StatusTask[]>([])
 const managedAdmins = ref<ManagedAdmin[]>([])
 const error = ref('')
 const loading = ref(false)
@@ -24,6 +28,7 @@ const bootstrapPassword = ref('')
 const bootstrapTOTP = ref('')
 const admin = ref<AdminInfo | null>(null)
 const selectedNode = ref<NodeRecord | null>(null)
+const statusCore = ref('xray')
 const newAdminUsername = ref('')
 const newAdminPassword = ref('')
 const newAdminRole = ref('auditor')
@@ -56,6 +61,7 @@ async function refresh() {
   nodes.value = nodeData
   audits.value = auditData.slice(-100).reverse()
   managedAdmins.value = adminData
+  if (selectedNode.value) await loadTasks(selectedNode.value.id)
 }
 async function login() {
   loading.value = true; error.value = ''
@@ -98,8 +104,18 @@ async function disableAdmin(id: string) {
   try { await apiWithStepUp('/api/v1/admin/admins/disable', { admin_id: id }); await refresh() }
   catch (e) { error.value = e instanceof Error ? e.message : '禁用管理员失败' }
 }
-async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
-async function logout() { try { await api('/api/v1/admin/logout', { method: 'POST', body: '{}' }) } finally { csrfToken = ''; admin.value = null; selectedNode.value = null; loggedIn.value = false; nodes.value = []; audits.value = []; managedAdmins.value = []; createdTOTP.value = '' } }
+async function loadTasks(nodeID: string) { try { tasks.value = await api<StatusTask[]>(`/api/v1/admin/tasks?node_id=${encodeURIComponent(nodeID)}`) } catch (e) { tasks.value = []; error.value = e instanceof Error ? e.message : '读取任务失败' } }
+async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); await loadTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
+async function createStatusTask() {
+  if (!selectedNode.value) return
+  error.value = ''
+  try {
+    const requestID = crypto.randomUUID().replaceAll('-', '')
+    await api<StatusTask>('/api/v1/admin/tasks', { method: 'POST', body: JSON.stringify({ request_id: requestID, node_id: selectedNode.value.id, core: statusCore.value }) })
+    await loadTasks(selectedNode.value.id)
+  } catch (e) { error.value = e instanceof Error ? e.message : '创建状态查询失败' }
+}
+async function logout() { try { await api('/api/v1/admin/logout', { method: 'POST', body: '{}' }) } finally { csrfToken = ''; admin.value = null; selectedNode.value = null; loggedIn.value = false; nodes.value = []; audits.value = []; tasks.value = []; managedAdmins.value = []; createdTOTP.value = '' } }
 onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/me'); csrfToken = admin.value.csrf_token; await refresh(); loggedIn.value = true } catch { loggedIn.value = false } })
 </script>
 
@@ -112,11 +128,12 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
       <form class="card secondary" @submit.prevent="bootstrap"><span class="eyebrow">FIRST RUN ONLY</span><h2>初始化安全管理员</h2><p>仅在服务端设置 MCUI_BOOTSTRAP_TOKEN 后可用。</p><label>初始化令牌<input v-model="bootstrapToken" type="password" required /></label><label>用户名<input v-model="bootstrapUser" required /></label><label>密码（至少 12 位）<input v-model="bootstrapPassword" type="password" minlength="12" required /></label><label>TOTP 密钥（Base32）<input v-model="bootstrapTOTP" autocomplete="off" required /></label><button class="outline" :disabled="loading">创建管理员</button></form>
     </section>
     <template v-else>
-      <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => !n.disabled && Date.now()/1000 - n.last_seen < 60).length }}</strong></div><div class="metric"><span>当前阶段</span><strong>01 / IDENTITY</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
+      <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => !n.disabled && Date.now()/1000 - n.last_seen < 60).length }}</strong></div><div class="metric"><span>当前阶段</span><strong>02 / STATUS TASKS</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
       <section class="card"><div class="section-head"><div><span class="eyebrow">INVENTORY</span><h2>节点</h2></div><button @click="refresh">刷新</button></div><div v-if="!nodes.length" class="empty">暂无已注册节点。先创建一次性邀请，再在空 Agent 上注册。</div><div v-for="node in nodes" :key="node.id" class="node-row"><div class="node-avatar">{{ node.name.slice(0,1).toUpperCase() }}</div><div class="node-main"><strong>{{ node.name }}</strong><span>{{ node.id }} · {{ node.group }}</span></div><span class="status" :class="node.disabled ? 'off' : Date.now()/1000-node.last_seen < 60 ? 'on' : 'idle'">{{ node.disabled ? '已禁用' : Date.now()/1000-node.last_seen < 60 ? '在线' : '离线' }}</span><button class="outline" @click="showNode(node.id)">详情</button><button v-if="admin?.can_disable_nodes && !node.disabled" class="danger" @click="disableNode(node.id)">禁用</button></div><div v-if="selectedNode" class="audit-row"><span>节点详情：{{ selectedNode.name }} · {{ selectedNode.id }} · {{ selectedNode.group }} · 最近心跳 {{ new Date(selectedNode.last_seen*1000).toLocaleString() }}<span v-if="selectedNode.needs_reenrollment"> · 需要重新注册</span></span><button class="quiet" @click="selectedNode = null">关闭</button></div></section>
+      <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!tasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in tasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
       <section class="bottom-grid"><form v-if="admin?.can_create_invites" class="card" @submit.prevent="createInvite"><span class="eyebrow">ONE-TIME ENROLLMENT</span><h2>注册邀请</h2><label>节点组<input v-model="inviteGroup" required /></label><label>有效期（秒）<input v-model.number="inviteTTL" type="number" min="60" max="86400" required /></label><button>创建邀请</button><p v-if="invite" class="invite">{{ invite }}</p></form><section class="card"><span class="eyebrow">AUDIT TRAIL</span><h2>安全事件</h2><div v-for="(event, i) in audits" :key="i" class="audit-row"><time>{{ new Date(event.at*1000).toLocaleString() }}</time><span>{{ event.action }}</span><small>{{ event.outcome }}</small></div><p v-if="!audits.length" class="empty">暂无事件</p></section></section>
       <section v-if="admin?.role === 'security_admin'" class="admin-grid">
-        <form class="card" @submit.prevent="createAdmin"><span class="eyebrow">SCOPED ACCESS</span><h2>开通范围账号</h2><p>仅创建节点范围受限的审计员或运维员。运维员在阶段 1 同样只有读取权限；范围不可超出当前安全管理员的授权。</p><label>用户名<input v-model="newAdminUsername" autocomplete="off" required /></label><label>初始密码（至少 12 位）<input v-model="newAdminPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label>角色<select v-model="newAdminRole"><option value="auditor">审计员</option><option value="operator">运维员（阶段 1 只读）</option></select></label><label>节点组范围<input v-model="newAdminGroups" placeholder="west, east" autocomplete="off" /></label><label>节点 ID 范围<input v-model="newAdminNodeIDs" placeholder="node-…" autocomplete="off" /></label><button :disabled="loading">创建范围账号</button><p v-if="createdTOTP" class="invite">一次性 TOTP 密钥：{{ createdTOTP }}<br />请通过可信渠道交给该账号持有人；此页面退出后不再显示。</p></form>
+        <form class="card" @submit.prevent="createAdmin"><span class="eyebrow">SCOPED ACCESS</span><h2>开通范围账号</h2><p>仅创建节点范围受限的审计员或运维员。运维员可创建只读状态查询任务；范围不可超出当前安全管理员的授权。</p><label>用户名<input v-model="newAdminUsername" autocomplete="off" required /></label><label>初始密码（至少 12 位）<input v-model="newAdminPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label>角色<select v-model="newAdminRole"><option value="auditor">审计员</option><option value="operator">运维员（只读状态查询）</option></select></label><label>节点组范围<input v-model="newAdminGroups" placeholder="west, east" autocomplete="off" /></label><label>节点 ID 范围<input v-model="newAdminNodeIDs" placeholder="node-…" autocomplete="off" /></label><button :disabled="loading">创建范围账号</button><p v-if="createdTOTP" class="invite">一次性 TOTP 密钥：{{ createdTOTP }}<br />请通过可信渠道交给该账号持有人；此页面退出后不再显示。</p></form>
         <section class="card"><span class="eyebrow">ADMIN ACCOUNTS</span><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
       </section>
     </template>

@@ -125,11 +125,22 @@ func (l *Ledger) Next() (int64, error) {
 // Accept requires prior authentication, target and policy validation by the caller.
 // Envelope is the exact signed delivery bytes and is compared without normalization.
 // Senders must deliver immutable byte-identical envelopes on every retry.
-func (l *Ledger) Accept(t Task, now time.Time) (out Task, err error) {
-	if t.ID == "" || t.Sequence < 1 || len(t.Envelope) == 0 || len(t.Envelope) > 65536 || t.NotBefore.IsZero() || t.ExpiresAt.IsZero() || !t.NotBefore.Before(t.ExpiresAt) || !time.Unix(0, t.NotBefore.UnixNano()).Equal(t.NotBefore) || !time.Unix(0, t.ExpiresAt.UnixNano()).Equal(t.ExpiresAt) {
+func (l *Ledger) Accept(t Task, now time.Time) (Task, error) {
+	return l.AcceptValidated(t, func() (time.Time, error) { return now, nil })
+}
+
+// AcceptValidated invokes currentTime inside the ledger write transaction,
+// immediately before sequence and expiry checks. The callback can revalidate
+// the exact signature and trusted time at the durable acceptance boundary.
+func (l *Ledger) AcceptValidated(t Task, currentTime func() (time.Time, error)) (out Task, err error) {
+	if t.ID == "" || t.Sequence < 1 || len(t.Envelope) == 0 || len(t.Envelope) > 65536 || t.NotBefore.IsZero() || t.ExpiresAt.IsZero() || !t.NotBefore.Before(t.ExpiresAt) || !time.Unix(0, t.NotBefore.UnixNano()).Equal(t.NotBefore) || !time.Unix(0, t.ExpiresAt.UnixNano()).Equal(t.ExpiresAt) || currentTime == nil {
 		return out, errors.New("invalid task")
 	}
 	err = l.write(func(c *sql.Conn) error {
+		now, timeErr := currentTime()
+		if timeErr != nil || now.IsZero() {
+			return errors.New("trusted current time unavailable")
+		}
 		n, e := next(c)
 		if e != nil {
 			return e
@@ -259,5 +270,28 @@ func (l *Ledger) Finish(seq int64, state State, result []byte) error {
 			return e
 		}
 		return advance(c)
+	})
+}
+
+// RequireReconciliation persists an uncertain Helper outcome without advancing
+// the sequence. The node remains fenced until an operator-authorized recovery
+// procedure is implemented; subsequent tasks cannot pass this slot.
+func (l *Ledger) RequireReconciliation(seq int64, result []byte) error {
+	if seq < 1 || len(result) > 65536 {
+		return ErrState
+	}
+	return l.write(func(c *sql.Conn) error {
+		t, err := readTask(c, seq)
+		if err != nil {
+			return err
+		}
+		if t.State == Reconciliation && bytes.Equal(t.Result, result) {
+			return nil
+		}
+		if t.State != Running {
+			return ErrState
+		}
+		_, err = c.ExecContext(context.Background(), `UPDATE tasks SET state=?,result=? WHERE seq=?`, Reconciliation, result, seq)
+		return err
 	})
 }

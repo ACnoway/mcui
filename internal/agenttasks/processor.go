@@ -1,17 +1,18 @@
-// Package agenttasks implements experimental signed status-task intake only.
-// It is not a runtime or an anti-rollback mechanism. No task is executed here.
-// A separately secured, durable independent checkpoint and helper integration
-// must be designed and wired before any active runtime is authorized.
+// Package agenttasks implements the signed status-task intake and replayable
+// ACK path. Privileged observation remains inside the separately secured
+// Helper and requires a live Master lease checkpoint.
 package agenttasks
 
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"math"
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/taskauth"
 	"github.com/ACnoway/mcui/internal/taskledger"
 )
@@ -20,10 +21,10 @@ import (
 // time; neither a nonzero timestamp nor this package proves clock health.
 // Keys and node identity are pinned at construction. The caller must not mutate
 // configuration concurrently with New and must exclusively own the ledger.
-// Revocation requires stopping intake and replacing the processor. Ledger.Accept
-// does not expose a validation callback inside its transaction: therefore this
-// experimental intake cannot guarantee time validity at the SQLite commit point.
-// It must not be used as a production authorization or execution boundary.
+// Revocation requires stopping intake and replacing the processor. Receive
+// repeats signature and time verification inside the ledger's write transaction,
+// but this package does not establish that the supplied clock is trustworthy.
+// It is not by itself a production authorization or anti-rollback boundary.
 type Config struct {
 	NodeID string
 	Keys   map[string]taskauth.Key
@@ -70,7 +71,7 @@ func (p *Processor) Receive(ctx context.Context, signedBytes []byte) (taskledger
 	}
 	raw := append([]byte(nil), signedBytes...)
 	now := p.now()
-	v, err := taskauth.Verify(raw, taskauth.Trust{NodeID: p.node, Keys: p.keys, Now: now})
+	v, err := verifyForReceipt(raw, p.node, p.keys, now)
 	if err != nil {
 		return zero, err
 	}
@@ -80,5 +81,33 @@ func (p *Processor) Receive(ctx context.Context, signedBytes []byte) (taskledger
 	if err = ctx.Err(); err != nil {
 		return zero, err
 	}
-	return p.ledger.Accept(taskledger.Task{ID: v.TaskID, Sequence: int64(v.Sequence), Envelope: v.Raw, NotBefore: v.NotBefore, ExpiresAt: v.ExpiresAt}, now)
+	task := taskledger.Task{ID: v.TaskID, Sequence: int64(v.Sequence), Envelope: v.Raw, NotBefore: v.NotBefore, ExpiresAt: v.ExpiresAt}
+	return p.ledger.AcceptValidated(task, func() (time.Time, error) {
+		current := p.now()
+		if current.IsZero() || current.Before(now) {
+			return time.Time{}, taskauth.ErrTrust
+		}
+		if _, verifyErr := verifyForReceipt(raw, p.node, p.keys, current); verifyErr != nil {
+			return time.Time{}, verifyErr
+		}
+		return current, nil
+	})
+}
+
+// verifyForReceipt accepts an expired but authentic envelope only so the
+// durable Agent ledger can advance it as terminal without executing it. The
+// signature, key purpose, target and signed time bounds are still checked.
+func verifyForReceipt(raw, nodeID string, keys map[string]taskauth.Key, now time.Time) (taskauth.Verified, error) {
+	trust := taskauth.Trust{NodeID: nodeID, Keys: keys, Now: now}
+	verified, err := taskauth.Verify(raw, trust)
+	if err == nil || !errors.Is(err, taskauth.ErrTime) || now.IsZero() {
+		return verified, err
+	}
+	var times struct {
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if _, schemaErr := protocol.CanonicalV2TaskBytes(raw); schemaErr != nil || json.Unmarshal(raw, &times) != nil || times.ExpiresAt.IsZero() || now.Before(times.ExpiresAt) {
+		return taskauth.Verified{}, err
+	}
+	return taskauth.Verify(raw, taskauth.Trust{NodeID: nodeID, Keys: keys, Now: times.ExpiresAt.Add(-time.Nanosecond)})
 }

@@ -1,0 +1,43 @@
+[Unit]
+Description=MCUI status-only privileged Helper
+Documentation=https://github.com/ACnoway/mcui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=mcui-agent
+UMask=0077
+EnvironmentFile=/etc/mcui-agent/helper.env
+StateDirectory=mcui-helper
+StateDirectoryMode=0700
+RuntimeDirectory=mcui
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+ExecStart=/usr/local/bin/mcui-helper -node-id ${MCUI_NODE_ID} -master ${MCUI_MASTER_URL} -master-ca /etc/mcui-agent/master-ca.pem -task-key-id ${MCUI_TASK_KEY_ID} -task-public-key /etc/mcui-agent/task-signing.pub -agent-user mcui-agent -socket-group mcui-agent -state-dir /var/lib/mcui-helper -socket /run/mcui/helper.sock
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/mcui-agent
+ReadWritePaths=/var/lib/mcui-helper /run/mcui
+
+[Install]
+WantedBy=multi-user.target

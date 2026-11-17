@@ -137,7 +137,7 @@ func TestFailedBlocksRedelivery(t *testing.T) {
 	if err := s.Acknowledge(a.NodeID, a); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Lease(a.NodeID, time.Now(), "test-key", key); !errors.Is(err, ErrConflict) {
+	if _, err := s.Lease(a.NodeID, time.Now(), "test-key", key); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("redelivered failure: %v", err)
 	}
 }

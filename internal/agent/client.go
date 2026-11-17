@@ -31,6 +31,8 @@ type Client struct {
 	serverRoots                    *x509.CertPool
 	statePath                      string
 	failures                       int
+	taskHandler                    TaskHandler
+	taskHandlerFactory             func(nodeID string) (TaskHandler, error)
 }
 
 type localState struct {
@@ -81,6 +83,17 @@ func New(masterURL, name, group, invite, serverCAPath string) (*Client, error) {
 		}
 	}
 	return c, nil
+}
+
+func (c *Client) NodeID() (string, error) {
+	if c == nil {
+		return "", errors.New("Agent client is unavailable")
+	}
+	state, err := c.loadOrCreate()
+	if err != nil {
+		return "", err
+	}
+	return state.NodeID, nil
 }
 
 func (c *Client) loadOrCreate() (localState, error) {
@@ -321,6 +334,17 @@ func (c *Client) runOnce() error {
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("heartbeat rejected (HTTP %d)", status)
+	}
+	if c.taskHandlerFactory != nil && c.taskHandler == nil {
+		c.taskHandler, err = c.taskHandlerFactory(state.NodeID)
+		if err != nil {
+			return fmt.Errorf("initialize status-task handler: %w", err)
+		}
+	}
+	if c.taskHandler != nil {
+		if err = c.processStatusTask(state); err != nil {
+			return err
+		}
 	}
 	return nil
 }

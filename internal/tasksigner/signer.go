@@ -1,8 +1,8 @@
-// Package tasksigner provides only a narrow V2 status-task signing primitive.
-// It is not an independent approval mechanism or an authorized standalone
-// signer. Callers must provide authorization, trusted key selection and secure
-// custody, time and node checks, sequencing, persistence, and replay controls.
-// This package exposes no runtime, network, socket, or API endpoint.
+// Package tasksigner provides a narrow V2 status-task signing primitive and
+// loopback HTTP adapter. It is not an independent approval mechanism or a
+// standalone authorizer. Callers must provide authorization, trusted key
+// selection and secure custody, time and node checks, sequencing, persistence,
+// and replay controls.
 package tasksigner
 
 import (

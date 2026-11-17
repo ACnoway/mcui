@@ -59,10 +59,16 @@ func TestAckRejectsOversizedResultWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestFailedKeepsSlotUntilRollback(t *testing.T) {
+func TestNonStatusFailureKeepsSlotUntilRollback(t *testing.T) {
 	s, path := newStore(t)
 	raw, key := signed(t)
 	if err := s.Provision("node-001", 1, raw, "test-key", key); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the rollback transition coverage for a future mutating operation.
+	// The current V2 core.status failure is terminal because it has no side effect.
+	legacyRaw := bytes.Replace(raw, []byte(`"operation":"core.status"`), []byte(`"operation":"core.install"`), 1)
+	if _, err := s.db.Exec(`UPDATE tasks SET raw=? WHERE task_id='task-001'`, legacyRaw); err != nil {
 		t.Fatal(err)
 	}
 	a := Ack{NodeID: "node-001", TaskID: "task-001", Sequence: 1, StatusVersion: 1, Status: "FAILED"}

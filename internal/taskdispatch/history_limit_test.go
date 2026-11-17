@@ -94,6 +94,10 @@ func TestOpenRejectsOversizedAckHistory(t *testing.T) {
 	if err := s.Provision("node-001", 1, raw, "test-key", key); err != nil {
 		t.Fatal(err)
 	}
+	legacyRaw := strings.Replace(string(raw), `"operation":"core.status"`, `"operation":"core.install"`, 1)
+	if _, err := s.db.Exec(`UPDATE tasks SET raw=CAST(? AS BLOB) WHERE task_id='task-001'`, legacyRaw); err != nil {
+		t.Fatal(err)
+	}
 	for version := 1; version <= 10; version++ {
 		status := "FAILED"
 		if version%2 == 0 {

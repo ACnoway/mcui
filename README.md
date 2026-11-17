@@ -1,10 +1,10 @@
 # MCUI Master and empty Agent
 
-MCUI is a multi-Core control plane in staged development. This repository currently contains the Master panel, a Core-free Agent identity client, and Phase 2 development-only protocol and security components. There is no task delivery runtime or executable Helper; Core installation and configuration operations remain unavailable. The first demo target is the complete Xray workflow; installation guidance and Docker builds follow that demo, before adding other Cores.
+MCUI is a multi-Core control plane in staged development. The repository contains the Master panel, a Core-free Agent, and a Phase 2 status-only signed task path with a privileged Helper and isolated signer process. Core installation and configuration operations remain unavailable. The first demo target is the complete Xray workflow; installation guidance and Docker builds follow that demo, before adding other Cores.
 
 ## Current stage
 
-Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 engineering status and its remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md). It has isolated protocol, signing, storage, and helper authorization components, but no task delivery API or Helper runtime path; component tests are not end-to-end acceptance. State queries do not require separate approval, but each request must enforce server-side administrator identity, node scope, operation permission, and audit. Independent anti-rollback checkpoints, trusted time, authorized recovery, signer isolation and end-to-end verification remain open.
+Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 now connects scoped status-task creation, external signing, mTLS pull/ACK, durable Agent intake, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only exposed action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Cancellation/skip delivery, an independent external time source, failure/recovery drills, and formal security acceptance remain open. A successful build does not constitute phase exit or production approval.
 
 ## Development checks
 
@@ -38,7 +38,7 @@ The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-mas
 
 ## Security boundary
 
-- The Master exposes login, bootstrap, scoped node inventory/detail, audit, invitation, disable, mTLS enrollment, heartbeat, and certificate rotation endpoints. No task polling, task signing, Helper, or Core operation route exists.
+- The Master exposes login, bootstrap, scoped node inventory/detail, audit, invitation, disable, mTLS enrollment, heartbeat, certificate rotation, and optional status-task create/list/detail and Agent delivery/ACK routes. A narrow HTTPS Helper checkpoint accepts only the exact currently leased status task. The signer API is loopback-only and accepts only `core.status` task messages.
 - TLS mode uses TLS 1.3 and validates Agent client certificates against the configured node CA. Configure it directly; reverse-proxy TLS termination is not supported by this baseline.
 - Existing nodes from the legacy bearer-token schema are marked for re-enrollment during migration. Legacy bearer-token hashes are not carried into the normalized schema.
 - SQLite entities are stored in versioned tables. The migration is covered by code tests; a snapshot and non-overwriting restore-candidate tool is available; production backup and disaster recovery have not been completed or rehearsed.
@@ -48,13 +48,15 @@ The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-mas
 ## Components
 
 - `cmd/panel`: TLS-capable Master panel/API server; loopback-only development HTTP mode
-- `cmd/agent`: Core-free Agent enrollment, mTLS heartbeat, and certificate rotation client
+- `cmd/agent`: Core-free Agent enrollment, mTLS heartbeat/rotation, and status-task client
+- `cmd/mcui-helper`: root-owned Linux status Helper with a fixed Unix socket and systemd query mapping
+- `cmd/mcui-signerd`: isolated loopback-only status-task signing process
 - `internal/store`: versioned SQLite schema and legacy-state migration
 - `internal/master`: bootstrap, MFA sessions, scoped reads, invites, disable, and mTLS identity endpoints
-- `internal/protocol`: signed-message schema validation and canonicalization, including status-only V2; not connected to runtime task execution
-- `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: isolated task verification, control verification and status signing primitives, not an authorization service
-- `internal/taskledger`, `internal/taskslots`, `internal/taskdispatch`, `internal/agenttasks`: experimental task intake and delivery storage; not connected to Agent or Master runtime
-- `internal/helper`: development-only authorization/ledger code; socket execution deliberately fails closed
+- `internal/protocol`: signed-message schema validation and canonicalization, including status-only V2
+- `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: status verification, V1 cancel/skip verification primitives, and a narrow status signer; cancel/skip verification is not connected to runtime
+- `internal/taskledger`, `internal/taskslots`, `internal/taskdispatch`, `internal/agenttasks`: durable status-task intake, delivery, ACK, and Helper checkpoint flow
+- `internal/helper`: Linux-only peer credential and task verification boundary; runs fixed read-only status queries and fails closed on uncertain ledger state
 - `internal/checkpoint`: experimental transition model requiring an independently trusted authority and durable local journal
 - `internal/checkpointstore`, `internal/checkpointjournal`: experimental SQLite authority and journal primitives; not independently deployed, authenticated or connected to runtime
 - `web`: Vue administration panel

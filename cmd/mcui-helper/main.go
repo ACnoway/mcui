@@ -1,0 +1,190 @@
+//go:build linux
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"os/signal"
+	"os/user"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/ACnoway/mcui/internal/helper"
+	"github.com/ACnoway/mcui/internal/security"
+)
+
+const maxSystemctlOutput = 2048
+
+var statusToken = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
+func main() {
+	nodeID := flag.String("node-id", "", "provisioned MCUI node ID")
+	masterURL := flag.String("master", "", "HTTPS Master origin")
+	masterCAPath := flag.String("master-ca", "", "pre-trusted Master CA certificate PEM")
+	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
+	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key")
+	stateDir := flag.String("state-dir", "/var/lib/mcui-helper", "root-owned private helper state directory")
+	socketPath := flag.String("socket", "/run/mcui/helper.sock", "Agent-facing Unix socket")
+	agentUser := flag.String("agent-user", "mcui-agent", "unprivileged Agent account")
+	socketGroup := flag.String("socket-group", "mcui-agent", "group permitted to connect to the socket")
+	initialize := flag.Bool("initialize-ledger", false, "explicitly initialize a new helper ledger and exit")
+	flag.Parse()
+	if os.Geteuid() != 0 {
+		log.Fatal("mcui-helper must run as root")
+	}
+	if *nodeID == "" || *masterURL == "" || *masterCAPath == "" || *taskKeyID == "" || *taskPublicKeyPath == "" {
+		log.Fatal("-node-id, -master, -master-ca, -task-key-id, and -task-public-key are required")
+	}
+	account, err := user.Lookup(*agentUser)
+	if err != nil {
+		log.Fatalf("find Agent account: %v", err)
+	}
+	allowedUID, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil || allowedUID == 0 {
+		log.Fatal("Agent account must have a non-root numeric UID")
+	}
+	group, err := user.LookupGroup(*socketGroup)
+	if err != nil {
+		log.Fatalf("find socket group: %v", err)
+	}
+	groupID, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil || groupID == 0 {
+		log.Fatal("socket group must have a non-root numeric GID")
+	}
+	keyData, err := os.ReadFile(*taskPublicKeyPath)
+	if err != nil {
+		log.Fatalf("read task signing public key: %v", err)
+	}
+	publicKey, err := security.ParseEd25519PublicKey(keyData)
+	if err != nil {
+		log.Fatalf("parse task signing public key: %v", err)
+	}
+	caPEM, err := os.ReadFile(*masterCAPath)
+	if err != nil {
+		log.Fatalf("read Master CA: %v", err)
+	}
+	checkpoint, err := helper.NewHTTPCheckpoint(*masterURL, caPEM)
+	if err != nil {
+		log.Fatalf("configure Master checkpoint: %v", err)
+	}
+	config := helper.Config{
+		NodeID:     *nodeID,
+		AllowedUID: uint32(allowedUID),
+		Keys:       map[string]helper.TrustedKey{*taskKeyID: {PublicKey: publicKey, Purpose: "task"}},
+		Now:        time.Now,
+		Checkpoint: checkpoint,
+		ReadStatusAt: func(unit string, observedAt time.Time) (string, error) {
+			return readFixedStatus(unit, observedAt)
+		},
+	}
+	if *initialize {
+		if err = ensureStateDirectory(*stateDir); err != nil {
+			log.Fatalf("prepare helper state directory: %v", err)
+		}
+		instance, initErr := helper.Initialize(*stateDir, config)
+		if initErr != nil {
+			log.Fatalf("initialize helper ledger: %v", initErr)
+		}
+		if err = instance.Close(); err != nil {
+			log.Fatalf("close helper ledger: %v", err)
+		}
+		return
+	}
+	instance, err := helper.Open(*stateDir, config)
+	if err != nil {
+		log.Fatalf("open helper ledger: %v", err)
+	}
+	defer instance.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log.Printf("mcui status-only Helper listening on %s for node %s", *socketPath, *nodeID)
+	if err = instance.RunSocket(ctx, *socketPath, uint32(groupID)); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatal(err)
+	}
+}
+
+func ensureStateDirectory(path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return errors.New("state directory must be an absolute path")
+	}
+	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		return errors.New("state directory must be a real 0700 directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 {
+		return errors.New("state directory must be owned by root")
+	}
+	return nil
+}
+
+func readFixedStatus(unit string, observedAt time.Time) (string, error) {
+	allowed := map[string]string{
+		"xray.service":     "xray",
+		"sing-box.service": "sing-box",
+		"mita.service":     "mita",
+	}
+	core, ok := allowed[unit]
+	if !ok || observedAt.IsZero() {
+		return "", errors.New("invalid fixed status target")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--no-pager", "--property=LoadState", "--property=ActiveState", "--property=SubState", unit)
+	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}
+	var output boundedBuffer
+	command.Stdout = &output
+	var stderr boundedBuffer
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("read fixed systemd status: %w", err)
+	}
+	values := make(map[string]string, 3)
+	for _, line := range strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if !found || (name != "LoadState" && name != "ActiveState" && name != "SubState") || !statusToken.MatchString(value) {
+			return "", errors.New("invalid systemd status output")
+		}
+		if _, duplicate := values[name]; duplicate {
+			return "", errors.New("duplicate systemd status field")
+		}
+		values[name] = value
+	}
+	if len(values) != 3 {
+		return "", errors.New("incomplete systemd status output")
+	}
+	result, err := json.Marshal(struct {
+		Core        string `json:"core"`
+		LoadState   string `json:"load_state"`
+		ActiveState string `json:"active_state"`
+		SubState    string `json:"sub_state"`
+		ObservedAt  string `json:"observed_at"`
+	}{core, values["LoadState"], values["ActiveState"], values["SubState"], observedAt.UTC().Format(time.RFC3339)})
+	return string(result), err
+}
+
+type boundedBuffer struct{ bytes []byte }
+
+func (b *boundedBuffer) Write(data []byte) (int, error) {
+	if len(b.bytes)+len(data) > maxSystemctlOutput {
+		return 0, errors.New("systemctl output exceeds limit")
+	}
+	b.bytes = append(b.bytes, data...)
+	return len(data), nil
+}
+
+func (b *boundedBuffer) String() string { return string(b.bytes) }

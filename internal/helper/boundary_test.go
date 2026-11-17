@@ -3,6 +3,7 @@
 package helper
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -229,4 +230,25 @@ func TestActualSocketPeer(t *testing.T) {
 	if _, e = h.Execute(server, raw); !errors.Is(e, ErrReconciliation) || *calls != 0 {
 		t.Fatalf("socket runtime should be disabled: %v calls=%d", e, *calls)
 	}
+	h.cfg.Checkpoint = fixedCheckpoint{at: time.Date(2026, 11, 17, 0, 1, 0, 0, time.UTC), previous: 0}
+	h.cfg.ReadStatusAt = func(unit string, observedAt time.Time) (string, error) {
+		if unit != "xray.service" || observedAt.IsZero() {
+			t.Fatalf("unbound fixed status read: %q at %v", unit, observedAt)
+		}
+		return `{"core":"xray","load_state":"loaded","active_state":"active","sub_state":"running","observed_at":"2026-11-17T00:01:00Z"}`, nil
+	}
+	result, e := h.Execute(server, raw, "0123456789abcdef0123456789abcdef")
+	if e != nil || !strings.Contains(result, `"active_state":"active"`) || *calls != 0 {
+		t.Fatalf("valid checkpointed socket request result=%q err=%v calls=%d", result, e, *calls)
+	}
+}
+
+type fixedCheckpoint struct {
+	at       time.Time
+	previous int64
+	Err      error
+}
+
+func (f fixedCheckpoint) AuthorizeStatus(context.Context, []byte, string) (time.Time, int64, error) {
+	return f.at, f.previous, f.Err
 }

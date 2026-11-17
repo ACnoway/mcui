@@ -1,10 +1,11 @@
 //go:build linux
 
-// Package helper is an isolated development-only status authorization library.
-// It is not a server; the socket execution path remains disabled.
+// Package helper implements the Linux-only status authorization boundary.
+// Its runtime permits only fixed, read-only systemd status queries.
 package helper
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,6 +29,11 @@ type TrustedKey struct {
 	PublicKey ed25519.PublicKey
 	Purpose   string
 }
+
+type StatusCheckpoint interface {
+	AuthorizeStatus(ctx context.Context, raw []byte, leaseID string) (serverTime time.Time, previousSequence int64, err error)
+}
+
 type Config struct {
 	NodeID     string
 	AllowedUID uint32
@@ -36,6 +42,8 @@ type Config struct {
 	// TrustedTimeHealthy must report the health of an independently monitored time source.
 	TrustedTimeHealthy func() bool
 	ReadStatus         func(unit string) (string, error)
+	ReadStatusAt       func(unit string, observedAt time.Time) (string, error)
+	Checkpoint         StatusCheckpoint
 }
 type Helper struct {
 	dir *os.File
@@ -111,7 +119,7 @@ func Open(path string, c Config) (*Helper, error) {
 	return h, nil
 }
 func openDir(path string, c Config) (*Helper, error) {
-	if os.Geteuid() != 0 || c.NodeID == "" || c.Now == nil || c.ReadStatus == nil || len(c.Keys) == 0 {
+	if os.Geteuid() != 0 || c.NodeID == "" || c.Now == nil || (c.ReadStatus == nil && c.ReadStatusAt == nil) || len(c.Keys) == 0 {
 		return nil, ErrDenied
 	}
 	keys := make(map[string]TrustedKey, len(c.Keys))
@@ -198,7 +206,7 @@ func (h *Helper) save(l ledger) error {
 }
 
 // Execute authenticates the peer from the connected Unix socket, not request data.
-func (h *Helper) Execute(conn *net.UnixConn, raw []byte) (string, error) {
+func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (string, error) {
 	if conn == nil {
 		return "", ErrDenied
 	}
@@ -215,11 +223,23 @@ func (h *Helper) Execute(conn *net.UnixConn, raw []byte) (string, error) {
 	if ce != nil || cred == nil || cred.Uid != h.cfg.AllowedUID {
 		return "", ErrDenied
 	}
-	// This development library has no independent rollback checkpoint or
-	// authorized sequence-gap recovery. Never expose execution over a socket.
-	return "", ErrReconciliation
+	if h.cfg.Checkpoint == nil || len(leaseIDs) != 1 || leaseIDs[0] == "" {
+		return "", ErrReconciliation
+	}
+	serverTime, previousSequence, err := h.cfg.Checkpoint.AuthorizeStatus(context.Background(), append([]byte(nil), raw...), leaseIDs[0])
+	if err != nil {
+		return "", err
+	}
+	if serverTime.IsZero() {
+		return "", ErrReconciliation
+	}
+	return h.executeUIDAt(cred.Uid, raw, serverTime, previousSequence, true)
 }
 func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
+	return h.executeUIDAt(uid, raw, h.cfg.Now(), -1, false)
+}
+
+func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, previousSequence int64, checkpointed bool) (string, error) {
 	if uid != h.cfg.AllowedUID || len(raw) == 0 || len(raw) > 65536 {
 		return "", ErrDenied
 	}
@@ -258,6 +278,9 @@ func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
 	default:
 		return "", ErrDenied
 	}
+	if checkpointed && previousSequence != t.Sequence-1 {
+		return "", ErrReconciliation
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if e = unix.Flock(int(h.dir.Fd()), unix.LOCK_EX); e != nil {
@@ -268,10 +291,13 @@ func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	if h.cfg.TrustedTimeHealthy == nil || !h.cfg.TrustedTimeHealthy() {
+	if !checkpointed && (h.cfg.TrustedTimeHealthy == nil || !h.cfg.TrustedTimeHealthy()) {
 		return "", ErrReconciliation
 	}
-	now := h.cfg.Now().UTC()
+	if checkpointed && h.cfg.TrustedTimeHealthy != nil && !h.cfg.TrustedTimeHealthy() {
+		return "", ErrReconciliation
+	}
+	now := trustedNow.UTC()
 	if now.IsZero() || (!l.TimeHighWater.IsZero() && now.Before(l.TimeHighWater)) {
 		return "", ErrReconciliation
 	}
@@ -283,32 +309,54 @@ func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
 	}
 	sum := sha256.Sum256(raw)
 	hash := hex.EncodeToString(sum[:])
-	for _, r := range l.Records {
-		if r.Pending {
+	for i, r := range l.Records {
+		if r.Pending && (!checkpointed || int64(i+1) != t.Sequence || r.TaskID != t.ID || r.Hash != hash) {
 			return "", ErrReconciliation
 		}
 	}
+	if checkpointed {
+		if int64(len(l.Records)) > t.Sequence || (int64(len(l.Records)) == t.Sequence && (l.Records[len(l.Records)-1].TaskID != t.ID || l.Records[len(l.Records)-1].Hash != hash)) {
+			return "", ErrReconciliation
+		}
+		for seq := int64(len(l.Records) + 1); seq <= previousSequence; seq++ {
+			gapHash := sha256.Sum256([]byte(fmt.Sprintf("MCUI-STATUS-TERMINAL-GAP\n%s\n%d", h.cfg.NodeID, seq)))
+			l.Records = append(l.Records, record{Hash: hex.EncodeToString(gapHash[:]), TaskID: fmt.Sprintf("terminal-sequence-%d", seq), Result: "terminal-on-master"})
+		}
+	}
+	existingIndex := -1
 	for i, r := range l.Records {
 		if r.TaskID == t.ID || int64(i+1) == t.Sequence {
 			if r.TaskID != t.ID || int64(i+1) != t.Sequence || r.Hash != hash {
 				return "", ErrDenied
 			}
-			return r.Result, nil
+			if !r.Pending {
+				return r.Result, nil
+			}
+			existingIndex = i
+			break
 		}
 	}
-	if issued.After(now.Add(30*time.Second)) || now.Before(before) || !now.Before(expires) || t.Sequence != int64(len(l.Records)+1) {
+	if issued.After(now.Add(30*time.Second)) || now.Before(before) || !now.Before(expires) || (existingIndex < 0 && t.Sequence != int64(len(l.Records)+1)) {
 		return "", ErrDenied
 	}
-	l.Records = append(l.Records, record{Hash: hash, TaskID: t.ID, Pending: true})
-	if e = h.save(l); e != nil {
-		return "", e
+	if existingIndex < 0 {
+		l.Records = append(l.Records, record{Hash: hash, TaskID: t.ID, Pending: true})
+		existingIndex = len(l.Records) - 1
+		if e = h.save(l); e != nil {
+			return "", e
+		}
 	}
-	result, e := h.cfg.ReadStatus(unit)
+	var result string
+	if h.cfg.ReadStatusAt != nil {
+		result, e = h.cfg.ReadStatusAt(unit, now)
+	} else {
+		result, e = h.cfg.ReadStatus(unit)
+	}
 	if e != nil || len(result) > 4096 {
 		return "", ErrReconciliation
 	}
-	l.Records[len(l.Records)-1].Pending = false
-	l.Records[len(l.Records)-1].Result = result
+	l.Records[existingIndex].Pending = false
+	l.Records[existingIndex].Result = result
 	if e = h.save(l); e != nil {
 		return "", ErrReconciliation
 	}

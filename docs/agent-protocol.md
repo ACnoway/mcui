@@ -1,10 +1,10 @@
 # Agent 身份、任务与配置协议（阶段 0 冻结基线）
 
-> 状态：阶段 0 已冻结签名编码与任务/序号/恢复语义基线，等待项目负责人确认及项目内安全检查。V1 签名对象 schema、严格解析、JCS/Ed25519 校验及共享向量已实现于 `internal/protocol`；该包未连接 Master/Agent 运行时。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)；旧示例 JSON 仅作示意。Phase 1 只有空 Agent 身份与节点/审计读取，没有任务投递、执行或节点副作用接口。
+> 状态：阶段 0 已冻结 V1 签名编码与一般任务/序号/恢复语义基线，等待项目负责人确认及项目内安全检查。V1 schema 和共享向量由 `internal/protocol` 实现；阶段 2 另以 V2 接通只读 `core.status` 状态查询运行时。该运行时不实现下文定义的取消/skip，也不开放会改变系统的操作。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)；旧示例 JSON 仅作示意。阶段状态见[阶段 2 进度](./phase-2-progress.md)。
 
 ## 1. 信任边界与基本约束
 
-Agent 主动 HTTPS Pull，不提供入站管理端口；正常管理请求使用 mTLS，证书身份从 TLS 连接得出，绝不信任请求体自报身份。Master Web、签发服务、Agent、root Helper、Core 为独立边界。签发服务独立持有任务/配置签名私钥；发布根、节点 CA、任务和配置密钥相互独立。Web 不直接持有签名私钥。高危操作经服务端对象鉴权、复验与独立审批；信任根变更至少两名不同授权人批准。审批绑定操作、节点、规范化参数摘要、期限和用途，签发服务重新核验并原子消费；`approval_id` 自身不是审批证明。
+Agent 主动 HTTPS Pull，不提供入站管理端口；任务投递和 ACK 使用 mTLS，证书身份从 TLS 连接得出，绝不信任请求体自报身份。Master Web、Signer、Agent、root Helper、Core 为独立边界。当前独立 Signer 持有状态任务 Ed25519 私钥，只能签 V2 `core.status`；发布根、节点 CA 和任务密钥相互独立。Web 不直接持有签名私钥。只读查询不单独审批，但由 Master 每次验证管理员角色和节点范围并写审计。未来高危操作须经服务端复验与独立审批；信任根变更至少两名不同授权人批准。审批绑定操作、节点、规范化参数摘要、期限和用途，`approval_id` 自身不是审批证明。
 
 任何签名都不能代替配置语义策略、可信制品验证或 Helper 独立授权。禁止任意 Shell、脚本、URL、文件路径、unit 和 argv；未知类型、字段、策略一律拒绝。主控离线或认证失败时不接收新授权，默认保留运行中的 LKG；已开始事务只能依照下文恢复。完全控制合法签名者或节点 root 仍可能破坏安全。
 
@@ -40,7 +40,7 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 
 | operation | payload 必填字段（除 core 外） |
 |---|---|
-| `core.status` | 无；Phase 0 仅定义签名结构，运行时投递与执行仍未开始 |
+| `core.status` | 无；V1 仅定义签名结构，阶段 2 的运行时使用 V2，规则见[状态任务协议草案](./phase-2-protocol-draft.md) |
 | `core.start`, `core.stop`, `core.restart`, `core.uninstall` | 无 |
 | `core.install`, `core.upgrade`, `core.downgrade` | `version`、`artifact_id` 为标识符；`manifest_version` 为正整数 |
 | `config.apply` | `revision` 正整数、`content_sha256` 摘要、`core_version` 标识符 |
@@ -62,6 +62,14 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 - 本地事务在副作用前持久化任务、步骤意图和足以判定结果的标识，提交并保证落盘；执行后持久化观察结果和状态。进程重启先对账外部实际状态，再确定已完成、可安全恢复或 `NEEDS_RECONCILIATION`；无法证明的副作用不得盲目重试。任务在有效期内开始后，过期或离线仅允许完成已经持久化且明确授权的正在进行步骤、检查及安全回滚；未开始的后续特权步骤不得启动，除非另有新的有效授权。取消同理不自动授权新动作。
 - Helper 通过受限 Unix socket 和 `SO_PEERCRED` 校验 Agent 身份，独立验证原始任务、节点、类型、签名、有效期与实际参数逐字段一致；使用 root 私有账本持久化 `(node_id, task_id, step_id)`、签名授权摘要、步骤意图与结果，定义固定步骤及顺序后才开放相应操作。Agent 的 ACK 或租约不能替代 Helper 验签；Helper 崩溃后先对账，拒绝重复副作用。步骤授权、恢复和参数绑定未实现时相应操作禁用。
 - 状态为 `QUEUED`、`LEASED`、`ACK_ACCEPTED`、`RUNNING`、`VERIFYING`、`SUCCEEDED`、`FAILED`、`ROLLING_BACK`、`ROLLED_BACK`、`EXPIRED`、`CANCELED` 或 `NEEDS_RECONCILIATION`。成功须有操作对应的健康验证；回滚失败明确告警，不伪装成功。任何状态转换与结果均须持久化，终态只返回原结果。
+
+### 阶段 2 已接通的 V2 状态查询子集
+
+当前运行时与上面的 V1 通用格式/控制消息不是同一个 schema。它仅允许 `schema_version: 2`、`operation: core.status`，其 V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。Master 为每节点持久化分配序号，固定任务有效期 5 分钟、投递租约 60 秒；租约到期只重投相同签名消息。Agent 通过 mTLS 拉取/ACK，账本先写入再处理；重复 ACK 带 `last_status_version` 恢复，执行中状态重启后进入 `NEEDS_RECONCILIATION`。
+
+Helper 要求当前 Master 签发租约、提交完整原始签名消息并从 TLS 验证的 Master 获取当前时间和前序终态位置。检查点返回的前序序号只允许将已终结缺口写入 Helper 本地 ledger；未知缺口不跳过。状态读取仅执行固定 `systemctl show` 属性查询。Agent 过期收到的签名任务只持久化 `EXPIRED` 并 ACK，不执行 Helper。执行结果不确定时两端保持 reconciliation 栅栏，不能删除账本恢复。
+
+当前实现没有将 V1 `cancel` / `skip` 消息接入 Master、Agent 或 Helper；无法解释的序号缺口和本地状态丢失仍需人工带外恢复。Master 返回的时间和任务库是与节点账本分开的检查点，但没有独立外部可信时钟，也不能抵御协调回滚 Master 数据库/时间源。状态任务签发/审计数据分属两个 SQLite 文件，预先写授权审计降低未记录签发风险，但不存在跨库原子事务。实现限制和验收状态见[阶段 2 进度](./phase-2-progress.md)。
 
 ### 5.1 阶段 0 冻结的并发与边界规则
 
@@ -101,8 +109,8 @@ Go 测试通过 `internal/protocol` 校验 schema、拒绝负例并比对规范�
 
 ## 8. 实现边界与发布阻断
 
-1. 本文的序号、取消/skip、时限/租约、ACK 和恢复规则现已冻结为实现基线；项目内安全检查及负责人确认仍未记录，故阶段 0 不能视为正式签核完成。
-2. 任务签发服务、独立审批存储、任务/TUF 密钥与人员托管、可信时间告警、Node CA 生产参数及带外恢复仪式尚未实现。没有对应阶段批准前，禁止注册生产节点或开放任务/根变更接口。
-3. V1 任务 parser 与向量没有 Helper 步骤参数、制品摘要、架构或期望状态授权信封。[阶段 2 状态任务 V2 协议](./phase-2-protocol-draft.md)增加了只读步骤字段与跨实现向量，用户于 2026-11-17 批准其作为阶段 2 开发基线；制品和架构的 `not-applicable` 仅适用于只读状态查询。该批准不构成生产授权，实际任务和 Helper 运行时仍须通过独立授权、防重放和恢复验证。
-4. Helper 固定动作策略已列明；Core 逐版本配置允许字段为空，默认拒绝。候选 Core 版本需按 [兼容矩阵](./core-compatibility.md) 实测后再拟定字段表。自更新、安装、配置、统计、真实恢复和制品信任运行时全部禁用。
+1. 本文的一般序号、取消/skip、时限/租约、ACK 和恢复规则冻结为目标实现基线；阶段 2 当前仅落实其中的状态查询子集，项目内安全检查及负责人确认未记录，故阶段 0/2 均不能视为正式签核完成。
+2. 当前 V2 状态签发服务、持久化任务存储和独立进程隔离已有代码；独立审批存储不适用于只读查询且未实现，取消/skip、外部可信时间告警、Node CA 生产参数及带外恢复仪式仍未实现。禁止将状态查询 signer 用于其他操作。
+3. V1 任务 parser/向量与 V2 状态查询格式不同。[阶段 2 状态任务 V2 协议](./phase-2-protocol-draft.md)加入只读步骤字段与共享向量，用户于 2026-11-17 批准其作为阶段 2 开发基线；制品和架构的 `not-applicable` 仅适用于只读状态查询。批准不构成生产授权。
+4. Helper 当前实现固定状态查询；Core 逐版本配置允许字段为空、默认拒绝。候选 Core 版本需按 [兼容矩阵](./core-compatibility.md) 实测后再拟定字段表。自更新、安装、配置、统计、真实恢复、取消/skip 和制品信任运行时仍禁用。
 5. TUF 是已选定的设计基线，但客户端、元数据、密钥、具体维护版本、制品源映射和互操作验证未部署；实际保管人与独立批准人须由组织指定。

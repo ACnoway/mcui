@@ -72,6 +72,7 @@ type Audit struct {
 	Action       string `json:"action"`
 	ResourceType string `json:"resource_type,omitempty"`
 	Resource     string `json:"resource"`
+	NodeID       string `json:"node_id,omitempty"`
 	Outcome      string `json:"outcome"`
 }
 
