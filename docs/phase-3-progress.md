@@ -4,7 +4,7 @@
 
 ## Xray 节点本地生命周期
 
-- Linux amd64/arm64 的 `mcui-xray` 由本地 root 执行。支持安装、启停、升级、单独命令显式降级、卸载、状态和对账恢复。制品操作要求输入精确稳定版和 SHA-256，核对本机架构、审核状态和 TUF 当前 target。启停和卸载要求匹配已提交的版本和摘要。
+- Linux amd64/arm64 的 `mcui-xray` 由本地 root 执行。支持安装、启停、升级、单独命令显式降级、卸载、状态和对账恢复。制品操作要求输入精确的三段数字版本和 SHA-256，核对本机架构、审核状态和 TUF 当前 target。启停和卸载要求匹配已提交的版本和摘要。
 - 下载使用固定上游地址。安装器用同一安全打开的文件描述符复验 ZIP 长度和散列，限制目录大小、条数和展开大小，只提取 `xray`、`geoip.dat` 和 `geosite.dat`，并验证 ELF 机器类型。它生成固定的空 JSON 引导配置，归档内配置和安装钩子均会被拒绝。
 - 根目录与内容寻址的版本目录由 root 管理。运行文件固定为 `0444` 或 `0555`，每次激活或恢复重验文件散列。候选预检和服务分别使用固定 systemd unit、动态低权限身份、无外网沙箱和资源上限。健康确认连续观察 systemd 的运行状态与主 PID 两秒。引导配置供生命周期验证。
 - 事务事前持久化意图，原子切换版本指针，再确认启动或停止结果。失败恢复已提交的二进制、配置和运行状态。失败恢复保留未决状态并报 `ROLLBACK_FAILED`。开机一次性 unit 以最后提交状态对账。卸载清理受控版本目录，保留事务状态和 TUF 私有缓存。
@@ -46,12 +46,16 @@
 
 ## 当前验证边界
 
-目录和备用缓存测试覆盖固定源、分页、下载校验和缓存发布。新增测试覆盖有阈值签名的 TUF 测试仓库、签名不足、root 轮换和 target 撤销，以及合成 Xray 制品的解包拒绝、事务和中断恢复。生产仓库的密钥治理、上游签名事实、真实 Xray 制品、注入磁盘/断电故障与双架构运行证据仍待完成。[分阶段开发流程](./phased-development-workflow.md) · [能力矩阵](./core-compatibility.md)
+目录和备用缓存测试覆盖固定源、分页、下载校验和缓存发布。新增测试覆盖有阈值签名的 TUF 测试仓库、签名不足、root 轮换和 target 撤销，以及合成 Xray 制品的解包拒绝、事务和中断恢复。生产仓库的密钥治理、上游签名事实、真实 Xray 生命周期、注入磁盘/断电故障与双架构运行证据仍待完成。[分阶段开发流程](./phased-development-workflow.md) · [能力矩阵](./core-compatibility.md)
 
 ## 已执行检查
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
+| `bash scripts/check-static.sh` | 通过，提交 `f48ced9`（2026-11-18） | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。Go 格式/vet/build/test、Linux amd64/arm64 交叉构建、协议向量和冻结 Web 生产构建均通过 |
+| `go test -race -count=1 ./internal/artifacttrust ./internal/xrayruntime` | 通过，提交 `f48ced9` | 同一远程环境。阈值不足、轮换保留、目标撤销、归档拒绝和事务恢复测试均通过 |
+| Xray systemd unit 校验及生命周期冒烟测试 | 通过，提交 `f48ced9` | Debian 13.7 amd64、systemd `257.13-1~deb13u1`。临时 unit 和合成可执行制品验证隔离身份、只读运行目录、预检、健康确认、启动失败回滚、启停、卸载和恢复入口。测试后清理临时 unit，未启用系统服务 |
+| 官方 Xray `v26.10.31` amd64 ZIP | 通过文件检查，提交 `f48ced9` | GitHub Release API SHA-256 `e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214` 与下载字节一致；通过 ZIP 白名单解包和 ELF 架构检查。该样本未运行，未使用生产 TUF 授权。[官方发布页](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31) |
 | `bash scripts/check-static.sh` | 通过，提交 `1b7ca21`（2026-11-18），退出码 0 | `ssh ro`，`/root/mcui`，Debian 13 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包括新增 TUF/corecatalog 测试、Go 全量 vet/build/test、amd64/arm64 交叉构建、V1/V2 向量、冻结 Web 安装及 Vue 类型/生产构建 |
 | TUF 客户端与 Core 固定源定向测试 | 通过，提交 `1b7ca21` | `go test ./internal/artifacttrust ./internal/corecatalog`；目标绑定、缓存/跳转/IP 拒绝正反例通过 |
 | `bash scripts/check-static.sh` | 通过，提交 `5db70ad` | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0 |

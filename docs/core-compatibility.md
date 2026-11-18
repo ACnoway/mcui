@@ -1,6 +1,6 @@
 # Core 与平台兼容矩阵（V1 唯一能力状态源）
 
-状态：阶段 0 已冻结首批互操作测试目标。**以下版本仅供后续测试，不构成产品支持、制品信任批准或安装授权；没有 Core 实测或上游制品签名/摘要核验。** 本矩阵是后续阶段唯一的能力状态来源，不以设计意图或上游文档暗示实测通过。[工作流](./phased-development-workflow.md) 中 P0/P1 表示交付要求，不表示支持现状。
+状态：阶段 0 已冻结首批互操作测试目标。**以下版本为测试候选，真实 Core 生命周期和制品信任验收仍待完成。** 本矩阵是后续阶段唯一的能力状态来源。[工作流](./phased-development-workflow.md) 中 P0/P1 表示交付要求，不表示支持现状。
 
 ## 1. 支持目标与平台状态
 
@@ -16,7 +16,7 @@
 
 | Core / 服务端 | 首批精确测试版本 | 构建选项及官方来源 | 上游签名和摘要 | 平台 | 状态 |
 |---|---|---|---|---|---|
-| Xray / `xray` | `v26.10.31` | 上游 Linux amd64/arm64 发布制品；[官方发布页](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31) | 每个架构待独立核验；未记录签名或摘要 | Debian 13.7 amd64 / arm64 | 测试候选，未批准安装 |
+| Xray / `xray` | `v26.10.31` | 上游 Linux amd64/arm64 发布制品；[官方发布页](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31) | amd64 的 GitHub API SHA-256 与下载字节一致；两架构的独立签名与审核证据待登记 | Debian 13.7 amd64 / arm64 | 测试候选，未批准安装。[阶段 3 检查记录](./phase-3-progress.md#已执行检查) |
 | sing-box / `sing-box` | `v1.14.4` | 上游 Linux amd64/arm64 发布制品；[官方发布页](https://github.com/SagerNet/sing-box/releases/tag/v1.14.4) | 每个架构待独立核验；未记录签名或摘要 | Debian 13.7 amd64 / arm64 | 测试候选，未批准安装 |
 | Mieru / `mita` | `v3.39.0` | 上游 Debian amd64/arm64 `.deb`；[官方发布页](https://github.com/enfein/mieru/releases/tag/v3.39.0) | 每个架构待独立核验；未记录签名或摘要 | Debian 13.7 amd64 / arm64 | 测试候选，未批准安装 |
 
