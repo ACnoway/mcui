@@ -115,6 +115,7 @@ type statusTaskEnvelope struct {
 }
 
 type taskAckRequest struct {
+	NodeID        string          `json:"node_id,omitempty"`
 	TaskID        string          `json:"task_id"`
 	Sequence      int64           `json:"sequence"`
 	StatusVersion int64           `json:"status_version"`
@@ -164,6 +165,8 @@ type taskView struct {
 }
 
 func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
 	ctx, ok := s.requireCSRF(w, r)
 	if !ok {
 		return
@@ -302,6 +305,8 @@ func (s *Server) skipExpiredStatusTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) voidUnissuedStatusTask(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
 	ctx, ok := s.requireCSRF(w, r)
 	if !ok {
 		return
@@ -381,6 +386,8 @@ func (s *Server) voidUnissuedStatusTask(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) createStatusControl(w http.ResponseWriter, r *http.Request, kind protocol.Kind) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
 	ctx, ok := s.requireCSRF(w, r)
 	if !ok {
 		return
@@ -702,9 +709,15 @@ func toTaskView(record taskdispatch.Record, publicKey ed25519.PublicKey) taskVie
 }
 
 func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
-	node, _, ok := s.authenticateNode(r)
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	node, ok := s.authenticateNode(r)
 	if !ok {
-		http.Error(w, "node certificate rejected", http.StatusUnauthorized)
+		http.Error(w, "node credential rejected", http.StatusUnauthorized)
+		return
+	}
+	if id := r.URL.Query().Get("node_id"); id != "" && id != node.ID {
+		http.Error(w, "task target rejected", http.StatusForbidden)
 		return
 	}
 	runtime := s.taskRuntime
@@ -778,9 +791,11 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
-	node, _, ok := s.authenticateNode(r)
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	node, ok := s.authenticateNode(r)
 	if !ok {
-		http.Error(w, "node certificate rejected", http.StatusUnauthorized)
+		http.Error(w, "node credential rejected", http.StatusUnauthorized)
 		return
 	}
 	runtime := s.taskRuntime
@@ -794,7 +809,7 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record, err := runtime.Store.GetRecord(in.TaskID)
-	if err != nil || record.NodeID != node.ID || record.Sequence != in.Sequence {
+	if err != nil || (in.NodeID != "" && in.NodeID != node.ID) || record.NodeID != node.ID || record.Sequence != in.Sequence {
 		http.Error(w, "task ACK target rejected", http.StatusNotFound)
 		return
 	}
@@ -844,6 +859,8 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 // Helper still verifies the signature and fixed operation locally. HTTPS is
 // mandatory because this endpoint supplies authoritative time and gap state.
 func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
 	if r.TLS == nil {
 		http.Error(w, "TLS required", http.StatusUpgradeRequired)
 		return
@@ -864,6 +881,16 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 	}
 	var envelope statusTaskEnvelope
 	if _, err := protocol.CanonicalV2TaskBytes(in.Task); err != nil || json.Unmarshal(in.Task, &envelope) != nil || envelope.Operation != "core.status" {
+		http.Error(w, "helper authorization denied", http.StatusForbidden)
+		return
+	}
+	var active bool
+	_ = s.store.View(func(st store.State) error {
+		n := st.Nodes[envelope.NodeID]
+		active = !n.Disabled && n.TokenHash != "" && n.LastSeen > 0
+		return nil
+	})
+	if !active {
 		http.Error(w, "helper authorization denied", http.StatusForbidden)
 		return
 	}

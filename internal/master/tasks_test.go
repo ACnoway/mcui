@@ -3,11 +3,8 @@ package master
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,7 +22,8 @@ type taskTestClient struct {
 	server *Server
 	store  *store.Store
 	csrf   string
-	peer   *tls.ConnectionState
+	nodeID string
+	token  string
 }
 
 func newTaskTestClient(t *testing.T) taskTestClient {
@@ -35,34 +33,16 @@ func newTaskTestClient(t *testing.T) taskTestClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, agentKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	csrPEM, err := security.NewCSR(agentKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	csr, err := security.ParseCSR(csrPEM)
+	nodeToken, err := randomToken(32)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	certificatePEM, serial, notAfter, err := s.nodeCA.IssueNodeCertificate(csr, nodeID, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, _ := pem.Decode(certificatePEM)
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf, s.nodeCA.Certificate}, VerifiedChains: [][]*x509.Certificate{{leaf, s.nodeCA.Certificate}}}
 	actorID, sessionToken, csrf := "operator-1", "test-session-token", "test-csrf-token"
 	err = st.Update(func(state *store.State) error {
 		state.Admins[actorID] = store.Admin{ID: actorID, Username: "operator", Role: "operator", NodeIDs: []string{nodeID}}
 		state.Sessions[hash(sessionToken)] = store.Session{ID: hash(sessionToken), AdminID: actorID, CreatedAt: now.Unix(), LastSeen: now.Unix(), MFAAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(), CSRFToken: csrf}
-		state.Nodes[nodeID] = store.Node{ID: nodeID, Name: "test node", Group: "g1", CurrentSerial: serial, Certificates: map[string]store.NodeCertificate{serial: {NotAfter: notAfter}}, LastSeen: now.Unix()}
+		state.Nodes[nodeID] = store.Node{ID: nodeID, Name: "test node", Group: "g1", TokenHash: hash(nodeToken), Enrolled: true, LastSeen: now.Unix()}
 		return nil
 	})
 	if err != nil {
@@ -81,10 +61,10 @@ func newTaskTestClient(t *testing.T) taskTestClient {
 	if err = s.ConfigureTaskRuntime(TaskRuntime{Store: tasks, Signer: signer, KeyID: "task-key-1", PublicKey: privateKey.Public().(ed25519.PublicKey), Now: time.Now}); err != nil {
 		t.Fatal(err)
 	}
-	return taskTestClient{server: s, store: st, csrf: csrf, peer: peer}
+	return taskTestClient{server: s, store: st, csrf: csrf, nodeID: nodeID, token: nodeToken}
 }
 
-func (c taskTestClient) request(method, path string, body any, useNodeCert bool) *httptest.ResponseRecorder {
+func (c taskTestClient) request(method, path string, body any, useNodeToken bool) *httptest.ResponseRecorder {
 	var raw []byte
 	if body != nil {
 		raw, _ = json.Marshal(body)
@@ -100,17 +80,20 @@ func (c taskTestClient) request(method, path string, body any, useNodeCert bool)
 	if method == http.MethodPost && strings.HasPrefix(req.URL.Path, "/api/v1/admin/tasks") {
 		req.Header.Set("X-CSRF-Token", c.csrf)
 	}
-	if useNodeCert {
-		req.TLS = c.peer
+	if useNodeToken {
+		req.TLS = &tls.ConnectionState{}
+		if strings.HasPrefix(path, "/api/v1/agent/") {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
 	}
 	response := httptest.NewRecorder()
 	c.server.Handler().ServeHTTP(response, req)
 	return response
 }
 
-func TestStatusTaskAPIEnforcesScopeAndCompletesMtlSDelivery(t *testing.T) {
+func TestStatusTaskAPIEnforcesScopeAndCompletesTokenDelivery(t *testing.T) {
 	client := newTaskTestClient(t)
-	rawRequest := statusTaskRequest{RequestID: "request-1234567890123456", NodeID: client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):], Core: "xray"}
+	rawRequest := statusTaskRequest{RequestID: "request-1234567890123456", NodeID: client.nodeID, Core: "xray"}
 	created := client.request(http.MethodPost, "/api/v1/admin/tasks", rawRequest, false)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status task HTTP %d: %s", created.Code, created.Body)
@@ -139,7 +122,10 @@ func TestStatusTaskAPIEnforcesScopeAndCompletesMtlSDelivery(t *testing.T) {
 	}
 	unauthorized := client.request(http.MethodGet, "/api/v1/agent/tasks/next", nil, false)
 	if unauthorized.Code != http.StatusUnauthorized {
-		t.Fatalf("task pull without mTLS returned HTTP %d", unauthorized.Code)
+		t.Fatalf("task pull without a node token returned HTTP %d", unauthorized.Code)
+	}
+	if wrongNode := client.request(http.MethodGet, "/api/v1/agent/tasks/next?node_id=node-other", nil, true); wrongNode.Code != http.StatusForbidden {
+		t.Fatalf("task pull for a different node returned HTTP %d", wrongNode.Code)
 	}
 	lease := client.request(http.MethodGet, "/api/v1/agent/tasks/next", nil, true)
 	if lease.Code != http.StatusOK {
@@ -155,6 +141,23 @@ func TestStatusTaskAPIEnforcesScopeAndCompletesMtlSDelivery(t *testing.T) {
 	}
 	if err := json.Unmarshal(lease.Body.Bytes(), &delivery); err != nil || delivery.TaskID != createdTask.TaskID || delivery.Sequence != 1 || delivery.LeaseID == "" || len(delivery.Task) == 0 {
 		t.Fatalf("delivery = %+v, %v", delivery, err)
+	}
+	other := client
+	other.nodeID = "node-other"
+	token, err := randomToken(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.token = token
+	if err := client.store.Update(func(state *store.State) error {
+		state.Nodes[other.nodeID] = store.Node{ID: other.nodeID, TokenHash: hash(other.token)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	crossNodeACK := taskAckRequest{TaskID: delivery.TaskID, Sequence: 1, StatusVersion: 1, Status: "ACK_ACCEPTED"}
+	if response := other.request(http.MethodPost, "/api/v1/agent/tasks/ack", crossNodeACK, true); response.Code != http.StatusNotFound {
+		t.Fatalf("another node's Token returned HTTP %d for ACK", response.Code)
 	}
 	checkpointDenied := client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", helperAuthorizationRequest{LeaseID: delivery.LeaseID, Task: delivery.Task}, false)
 	if checkpointDenied.Code != http.StatusUpgradeRequired {
@@ -202,7 +205,7 @@ func TestStatusTaskAPIEnforcesScopeAndCompletesMtlSDelivery(t *testing.T) {
 
 func TestStatusTaskFailureClosesReadOnlySlotAndAuditorCannotCreate(t *testing.T) {
 	client := newTaskTestClient(t)
-	nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+	nodeID := client.nodeID
 	request := statusTaskRequest{RequestID: "request-3234567890123456", NodeID: nodeID, Core: "xray"}
 	created := client.request(http.MethodPost, "/api/v1/admin/tasks", request, false)
 	if created.Code != http.StatusCreated {
@@ -252,7 +255,7 @@ func TestStatusTaskAPIRejectsOutOfScopeNodeAndSecretBearingResults(t *testing.T)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("out-of-scope issue returned HTTP %d", response.Code)
 	}
-	malformed := statusTaskRequest{RequestID: "request-2234567890123456", NodeID: client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):], Core: "xray"}
+	malformed := statusTaskRequest{RequestID: "request-2234567890123456", NodeID: client.nodeID, Core: "xray"}
 	created := client.request(http.MethodPost, "/api/v1/admin/tasks", malformed, false)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status task HTTP %d: %s", created.Code, created.Body)
@@ -276,7 +279,7 @@ func TestStatusTaskAPIRejectsOutOfScopeNodeAndSecretBearingResults(t *testing.T)
 func TestStatusTaskControlEndpointsDeliverCancelAndExpiredSkip(t *testing.T) {
 	t.Run("cancel pending", func(t *testing.T) {
 		client := newTaskTestClient(t)
-		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		nodeID := client.nodeID
 		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-6234567890123456", NodeID: nodeID, Core: "xray"}, false)
 		if created.Code != http.StatusCreated {
 			t.Fatalf("create HTTP %d: %s", created.Code, created.Body)
@@ -309,7 +312,7 @@ func TestStatusTaskControlEndpointsDeliverCancelAndExpiredSkip(t *testing.T) {
 
 	t.Run("skip expired", func(t *testing.T) {
 		client := newTaskTestClient(t)
-		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		nodeID := client.nodeID
 		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-7234567890123456", NodeID: nodeID, Core: "xray"}, false)
 		var task taskView
 		if err := json.Unmarshal(created.Body.Bytes(), &task); err != nil || created.Code != http.StatusCreated {
@@ -346,7 +349,7 @@ func TestStatusTaskControlEndpointsDeliverCancelAndExpiredSkip(t *testing.T) {
 func TestTaskRuntimeReconcilesInterruptedIssueAndVoidAudits(t *testing.T) {
 	t.Run("repair missing issue audit", func(t *testing.T) {
 		client := newTaskTestClient(t)
-		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		nodeID := client.nodeID
 		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-8234567890123456", NodeID: nodeID, Core: "xray"}, false)
 		if created.Code != http.StatusCreated {
 			t.Fatalf("create HTTP %d: %s", created.Code, created.Body)
@@ -381,7 +384,7 @@ func TestTaskRuntimeReconcilesInterruptedIssueAndVoidAudits(t *testing.T) {
 
 	t.Run("repair missing void audit", func(t *testing.T) {
 		client := newTaskTestClient(t)
-		nodeID := client.peer.PeerCertificates[0].URIs[0].Opaque[len("mcui:node:"):]
+		nodeID := client.nodeID
 		created := client.request(http.MethodPost, "/api/v1/admin/tasks", statusTaskRequest{RequestID: "request-9234567890123456", NodeID: nodeID, Core: "xray"}, false)
 		var task taskView
 		if err := json.Unmarshal(created.Body.Bytes(), &task); err != nil || created.Code != http.StatusCreated {

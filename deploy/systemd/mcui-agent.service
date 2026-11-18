@@ -12,7 +12,7 @@ UMask=0077
 EnvironmentFile=/etc/mcui-agent/agent.env
 StateDirectory=mcui-agent
 StateDirectoryMode=0700
-ExecStart=/usr/local/bin/mcui-agent -master ${MCUI_MASTER_URL} -name ${MCUI_AGENT_NAME} -group ${MCUI_AGENT_GROUP} -server-ca ${MCUI_SERVER_CA} -invite-file ${MCUI_INVITE_FILE}
+ExecStart=/usr/local/bin/mcui-agent -master ${MCUI_MASTER_URL} -node-id ${MCUI_NODE_ID} -server-ca=${MCUI_SERVER_CA}
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=20s

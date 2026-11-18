@@ -21,7 +21,7 @@ Master 为集中控制面；Agent 非 root、不提供公网管理端口，初�
 
 1. 浏览器/API：所有请求先认证、再按操作及对象授权；页面隐藏不是授权。浏览器输入、节点上报均不可信；会话、CSRF、输出编码和审计按权限文档实施。当前状态查询由 Master 按 `security_admin`/`operator`、节点范围和固定操作授权；`auditor` 只读任务记录。
 2. Master/签发者：Web 进程不直接读取任务签名密钥或发布根私钥。当前 signer 进程仅核验 V2 结构、key ID 与 `core.status` 签名范围；Master 在签名前校验操作者权限、目标和参数，并先记录授权审计。没有独立审批流程，因为只读查询不单独审批。未来高危任务须由签发服务重新核验当前权限、不可变请求、独立审批、目标与摘要，原子消费审批后签发；签名密钥、发布根和节点凭据分离。
-3. Master/Agent：主控先建节点，再生成带一次性安装码的 Agent 安装命令。Agent 用系统 CA 或显式配置的私有 CA 校验 Master 的 HTTPS 服务端证书，安装码换取绑定该节点的 Token。Master 逐请求检查 Token、节点状态与资源归属。该接入方案待实现，现有 mTLS 部署见[阶段 1 运维手册](./phase-1-operations.md)。轮换、撤销及迁移规则见[Agent 协议](./agent-protocol.md#2-节点接入token-轮换和撤销)。
+3. Master/Agent：主控先建节点，再生成带一次性安装码的 Agent 安装命令。Agent 用系统 CA 或显式配置的私有 CA 校验 Master 的 HTTPS 服务端证书，安装码换取绑定该节点的 Token。Master 逐请求检查 Token、节点状态与资源归属。部署与旧节点迁移见[阶段 1 运维手册](./phase-1-operations.md)。轮换、撤销及迁移规则见[Agent 协议](./agent-protocol.md#2-节点接入token-轮换和撤销)。
 4. Agent/Helper：本机 socket 权限和对端凭据不是授权本身；Helper 独立验证签名、目标、操作、固定 Core 映射、租约检查点和有效期，并用 root 私有账本防止重复状态查询。当前只执行固定 `/usr/bin/systemctl show` 查询；不得接受任意 shell、脚本、可执行文件、URL、路径或 unit。后续特权动作须在对应门槛通过后另行设计。
 5. Agent/Core：各 Core 独立用户、配置与状态；不能读取 Agent 凭据、Helper socket 或其他 Core 敏感文件。低端口能力按需最小授予；systemd 限制及实际可用性须逐平台验证。
 6. 发布/配置：独立签名元数据绑定平台、版本与制品摘要；下载、解包、受限预检、健康确认与 LKG 恢复均不可省略。签名配置不等于安全配置：Master 与 Agent 双重按 Core、锁定版本和节点策略检查，未知字段默认拒绝；手动回滚产生新 revision。

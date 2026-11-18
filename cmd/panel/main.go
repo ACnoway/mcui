@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
@@ -29,8 +28,9 @@ func main() {
 	webDir := flag.String("web", "./web/dist", "built web assets directory")
 	tlsCertPath := flag.String("tls-cert", "", "Master HTTPS certificate PEM")
 	tlsKeyPath := flag.String("tls-key", "", "Master HTTPS private key PEM")
-	nodeCACertPath := flag.String("node-ca-cert", "", "node client certificate CA PEM")
-	nodeCAKeyPath := flag.String("node-ca-key", "", "node client certificate CA private key PEM")
+	publicURL := flag.String("public-url", os.Getenv("MCUI_PUBLIC_URL"), "public HTTPS Master origin in Agent install commands")
+	installerURL := flag.String("agent-installer-url", os.Getenv("MCUI_AGENT_INSTALLER_URL"), "approved Agent installer HTTPS URL")
+	installerDigest := flag.String("agent-installer-sha256", os.Getenv("MCUI_AGENT_INSTALLER_SHA256"), "approved Agent installer SHA-256 digest")
 	coreBackupDir := flag.String("core-backup-dir", "./data/core-backups", "directory for one latest stable Core backup per official project")
 	taskDBPath := flag.String("task-db", "", "durable status-task database; task APIs stay disabled when omitted")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
@@ -39,30 +39,14 @@ func main() {
 	taskSignerTokenPath := flag.String("task-signer-token-file", "", "shared token file for the isolated task signer")
 	flag.Parse()
 	usingTLS := *tlsCertPath != "" || *tlsKeyPath != ""
-	if usingTLS && (*tlsCertPath == "" || *tlsKeyPath == "" || *nodeCACertPath == "" || *nodeCAKeyPath == "") {
-		log.Fatal("TLS mode requires -tls-cert, -tls-key, -node-ca-cert, and -node-ca-key")
-	}
-	if !usingTLS && (*nodeCACertPath != "" || *nodeCAKeyPath != "") {
-		log.Fatal("node CA options require TLS mode")
+	if usingTLS && (*tlsCertPath == "" || *tlsKeyPath == "") {
+		log.Fatal("TLS mode requires -tls-cert and -tls-key")
 	}
 	if !usingTLS && !loopbackListen(*addr) {
 		log.Fatal("HTTP mode is development-only and must listen on loopback")
 	}
-	var nodeCA *security.CertificateAuthority
 	var tlsConfig *tls.Config
 	if usingTLS {
-		certPEM, err := os.ReadFile(*nodeCACertPath)
-		if err != nil {
-			log.Fatalf("read node CA certificate: %v", err)
-		}
-		keyPEM, err := readPrivateKey(*nodeCAKeyPath)
-		if err != nil {
-			log.Fatalf("read node CA private key: %v", err)
-		}
-		nodeCA, err = security.LoadCertificateAuthority(certPEM, keyPEM)
-		if err != nil {
-			log.Fatalf("load node CA: %v", err)
-		}
 		serverCertPEM, err := os.ReadFile(*tlsCertPath)
 		if err != nil {
 			log.Fatalf("read Master TLS certificate: %v", err)
@@ -75,11 +59,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("load Master TLS certificate: %v", err)
 		}
-		clientCAs := x509.NewCertPool()
-		if !clientCAs.AppendCertsFromPEM(certPEM) {
-			log.Fatal("node CA certificate contains no certificates")
-		}
-		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverCert}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: clientCAs}
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverCert}}
 	}
 	_ = os.MkdirAll(filepath.Dir(*dbPath), 0700)
 	s, err := store.Open(*dbPath)
@@ -87,7 +67,15 @@ func main() {
 		log.Fatal(err)
 	}
 	defer s.Close()
-	srv := master.NewWithNodeCA(s, os.Getenv("MCUI_BOOTSTRAP_TOKEN"), *webDir, nodeCA)
+	srv := master.New(s, os.Getenv("MCUI_BOOTSTRAP_TOKEN"), *webDir)
+	if *publicURL != "" || *installerURL != "" || *installerDigest != "" {
+		if !usingTLS {
+			log.Fatal("Agent install commands require Master HTTPS")
+		}
+		if err := srv.ConfigureAgentInstaller(*publicURL, *installerURL, *installerDigest); err != nil {
+			log.Fatalf("configure Agent installer: %v", err)
+		}
+	}
 	catalog := corecatalog.NewClient()
 	srv.ConfigureCoreCatalog(catalog)
 	backupStore, backupErr := corecatalog.NewBackupStore(*coreBackupDir, catalog)
@@ -134,7 +122,7 @@ func main() {
 		}
 		log.Printf("read-only status-task runtime enabled with signing key %s", *taskKeyID)
 	}
-	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second, TLSConfig: tlsConfig}
+	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, TLSConfig: tlsConfig}
 	if usingTLS {
 		log.Printf("mcui Master listening with TLS 1.3 on %s", *addr)
 		log.Fatal(httpServer.ListenAndServeTLS("", ""))

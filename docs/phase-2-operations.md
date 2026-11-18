@@ -6,9 +6,9 @@
 
 | 组件 | 账号/接口 | 持有材料 |
 |---|---|---|
-| Master | `mcui`；现有 TLS 1.3/mTLS API | task 数据库、状态签名公钥、仅供 loopback signer 使用的共享 token |
+| Master | `mcui`；TLS 1.3 API | task 数据库、状态签名公钥、仅供 loopback signer 使用的共享 token |
 | Signer | 独立 `mcui-signer`；仅监听 `127.0.0.1:9231` | 状态任务 Ed25519 私钥、共享 token；签名 API 只接受 V2 状态任务 |
-| Agent | 非 root `mcui-agent`；出站 HTTPS/mTLS | Master CA、状态签名公钥、Agent 身份和私有任务账本；无任务签名私钥 |
+| Agent | 非 root `mcui-agent`；出站 HTTPS、节点 Token | Master CA、状态签名公钥、Agent 身份和私有任务账本；无任务签名私钥 |
 | Helper | root；`/run/mcui/helper.sock` | 状态签名公钥、Master CA、root 私有账本；只可连接 Master checkpoint 和读取固定 systemd 属性 |
 
 生产密钥必须由经批准的独立流程产生、保管、备份和轮换。不要使用测试向量 seed。Signer 私钥不得复制给 Master、Agent 或 Helper；只分发状态签名公钥。Signer token 至少 32 字节随机值，只用于两个本机账号之间的 HTTP bearer 认证。
@@ -65,7 +65,7 @@ install -o root -g root -m 0644 deploy/systemd/mcui-agent-task-runtime.conf /etc
 /etc/mcui-task-signer/task-key.pem         Signer 读取，0600 mcui-signer:mcui-signer
 /etc/mcui-task-signer/token               Master 和 Signer 读取，0640 root:mcui-task
 /etc/mcui-agent/task-signing.pub          Agent 与 Helper 读取，0644 root:root
-/etc/mcui-agent/master-ca.pem             Agent 与 Helper 读取，0644 root:root
+/etc/mcui-agent/master-ca.pem             私有 CA 部署时提供，0644 root:root
 ```
 
 `task-key.pem` 必须是 PKCS#8 Ed25519 PEM；公钥文件可用 PKIX PEM 或 Base64 编码的 32 字节 raw key。Signer token 文件至少 32 字节；它不可由其他用户或组写入。Master 账号通过 `mcui-task` 补充组读取 token；Helper 和 Agent 不读取该 token。
@@ -82,17 +82,17 @@ install -o root -g root -m 0644 deploy/systemd/mcui-agent-task-runtime.conf /etc
   MCUI_TASK_KEY_ID=<同一个 key ID>
 ```
 
-Agent 基础设置继续使用 `/etc/mcui-agent/agent.env` 中的 `MCUI_MASTER_URL`、`MCUI_AGENT_NAME`、`MCUI_AGENT_GROUP`、`MCUI_SERVER_CA` 与 `MCUI_INVITE_FILE`。Helper 的 Master URL 必须是 HTTPS origin，不包含路径、query、用户信息或片段；主机名必须与 Master 证书匹配。
+Agent 和 Helper 的运行配置由安装程序写入。手工部署时，`agent.env` 和 `helper.env` 需设置相同的 `MCUI_MASTER_URL`、`MCUI_NODE_ID` 和可选的 `MCUI_SERVER_CA`。Helper 的 Master URL 必须是 HTTPS origin，不包含路径、query、用户信息或片段；主机名必须与 Master 证书匹配。
 
 ## 4. 为已有节点显式初始化本地账本
 
-新节点在首次注册前会显式创建 Agent 任务账本；Helper 账本始终需要单独的一次性初始化。对已有阶段 1 节点启用阶段 2 前，先确认 Master 任务历史为空，停止 Agent，并用现有 Master/CA/名称参数只运行一次：
+安装程序在新节点首次兑换安装码前创建两份账本，迁移时则验证已有账本。对已有阶段 1 节点启用阶段 2 前，先确认 Master 任务历史为空，停止 Agent，并用现有 Master 和节点参数只运行一次：
 
 ```sh
 systemctl stop mcui-agent.service
 sudo -u mcui-agent /usr/local/bin/mcui-agent \
   -master https://master.example.net:8443 \
-  -name edge-01 -group west \
+  -node-id "$MCUI_NODE_ID" \
   -server-ca /etc/mcui-agent/master-ca.pem \
   -initialize-task-ledger \
   -task-ledger /var/lib/mcui-agent/tasks.db
@@ -108,7 +108,7 @@ set -a
 set +a
 /usr/local/bin/mcui-helper \
   -node-id "$MCUI_NODE_ID" -master "$MCUI_MASTER_URL" \
-  -master-ca /etc/mcui-agent/master-ca.pem \
+  -master-ca="${MCUI_SERVER_CA:-}" \
   -task-key-id "$MCUI_TASK_KEY_ID" \
   -task-public-key /etc/mcui-agent/task-signing.pub \
   -state-dir /var/lib/mcui-helper -initialize-ledger

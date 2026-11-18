@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -23,10 +24,11 @@ import (
 
 func main() {
 	masterURL := flag.String("master", "", "HTTPS master URL")
-	name := flag.String("name", "", "node display name")
-	group := flag.String("group", "default", "node group")
-	inviteFile := flag.String("invite-file", "", "path to a one-time invitation file readable only by the Agent account")
-	serverCA := flag.String("server-ca", "", "pre-trusted Master CA certificate PEM")
+	expectedNode := flag.String("node-id", "", "expected node ID for enrollment and service identity checks")
+	serverCA := flag.String("server-ca", "", "optional locally trusted Master CA certificate PEM")
+	enroll := flag.Bool("enroll", false, "read a one-time installation code from stdin, redeem it and exit")
+	prepareEnrollment := flag.Bool("prepare-enrollment", false, "verify the local identity and task ledger before enrollment")
+	allowNewLedger := flag.Bool("allow-new-ledger", false, "initialize a missing ledger for a newly created node during enrollment preparation")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
 	taskLedgerPath := flag.String("task-ledger", "/var/lib/mcui-agent/tasks.db", "private durable status-task ledger")
@@ -36,30 +38,38 @@ func main() {
 	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		log.Fatal("Agent must run as a non-root account")
 	}
-	if *masterURL == "" || *name == "" || *serverCA == "" {
-		log.Fatal("-master, -name, and -server-ca are required")
-	}
-	invite := ""
-	if *inviteFile != "" {
-		info, err := os.Lstat(*inviteFile)
-		if err != nil {
-			log.Fatalf("read invitation file metadata: %v", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			log.Fatal("invitation file must be a regular file")
-		}
-		if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
-			log.Fatal("invitation file permissions must exclude group and other access")
-		}
-		data, err := os.ReadFile(*inviteFile)
-		if err != nil {
-			log.Fatalf("read invitation file: %v", err)
-		}
-		invite = strings.TrimSpace(string(data))
-	}
-	client, err := agent.New(*masterURL, *name, *group, invite, *serverCA)
+	client, err := agent.New(*masterURL, *serverCA)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *expectedNode != "" || *prepareEnrollment || *enroll {
+		if err = client.CheckEnrollment(*expectedNode); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if *prepareEnrollment {
+		nodeID, err := client.NodeID()
+		if err != nil {
+			log.Fatal(err)
+		}
+		ledger, err := openTaskLedger(*taskLedgerPath, *allowNewLedger && nodeID == "")
+		if err != nil {
+			log.Fatalf("verify Agent task ledger: %v", err)
+		}
+		if err = ledger.Close(); err != nil {
+			log.Fatalf("close Agent task ledger: %v", err)
+		}
+		return
+	}
+	if *enroll {
+		code, err := io.ReadAll(io.LimitReader(os.Stdin, 64))
+		if err != nil {
+			log.Fatal("read installation code")
+		}
+		if err = client.Enroll(*expectedNode, strings.TrimSpace(string(code))); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	if *initializeTaskLedger {
 		nodeID, err := client.NodeID()
@@ -78,6 +88,13 @@ func main() {
 		}
 		return
 	}
+	nodeID, err := client.NodeID()
+	if err != nil {
+		log.Fatalf("read Agent identity: %v", err)
+	}
+	if nodeID == "" {
+		log.Fatal("no node identity; run the installation command first")
+	}
 	if *taskKeyID != "" || *taskPublicKeyPath != "" {
 		if *taskKeyID == "" || *taskPublicKeyPath == "" {
 			log.Fatal("status-task runtime requires both -task-key-id and -task-public-key")
@@ -90,11 +107,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("parse task public key: %v", err)
 		}
-		nodeID, err := client.NodeID()
-		if err != nil {
-			log.Fatalf("read Agent identity: %v", err)
-		}
-		ledger, err := openTaskLedger(*taskLedgerPath, nodeID == "")
+		ledger, err := openTaskLedger(*taskLedgerPath, false)
 		if err != nil {
 			log.Fatalf("open Agent task ledger: %v", err)
 		}

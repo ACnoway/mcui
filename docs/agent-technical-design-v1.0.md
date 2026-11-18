@@ -10,7 +10,7 @@
 
 ## 0. 阅读说明与关键决定
 
-节点接入采用主控建节点后生成安装命令的流程，运行期采用 Agent 主动 HTTPS 拉取与上报。本节接入设计待实现，现有 mTLS 部署见[阶段 1 运维手册](./phase-1-operations.md)。通信参考 [MMWX Agent 部署](https://miaomiaowux.com/docs/install-agent/)和 [XBoard UniProxy 路由](https://github.com/cedar2025/Xboard/blob/master/app/Http/Routes/V1/ServerRoute.php)。
+节点接入采用主控建节点后生成安装命令的流程，运行期采用 Agent 主动 HTTPS 拉取与上报。部署与旧节点迁移见[阶段 1 运维手册](./phase-1-operations.md)。通信参考 [MMWX Agent 部署](https://miaomiaowux.com/docs/install-agent/)和 [XBoard UniProxy 路由](https://github.com/cedar2025/Xboard/blob/master/app/Http/Routes/V1/ServerRoute.php)。
 
 **已确定的 V1 约束：**
 

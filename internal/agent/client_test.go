@@ -1,131 +1,117 @@
 package agent
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
-	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/master"
-	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/store"
 )
 
-func testNodeAuthority(t *testing.T) *security.CertificateAuthority {
-	t.Helper()
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(42), Subject: pkix.Name{CommonName: "Agent Test CA"},
-		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0),
-		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ca, err := security.LoadCertificateAuthority(
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ca
-}
-
-func TestRunOnceEnrollsWithMTLSHeartbeatAndRotates(t *testing.T) {
+func TestAgentMigratesIdentityAndAuthenticatesOverVerifiedHTTPS(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "identity.json")
 	t.Setenv("MCUI_AGENT_STATE", statePath)
-	storePath := filepath.Join(dir, "master.db")
-	st, err := store.Open(storePath)
+	st, err := store.Open(filepath.Join(dir, "panel.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
-	invite := "test-once-invitation"
-	inviteDigest := sha256.Sum256([]byte(invite))
-	inviteHash := hex.EncodeToString(inviteDigest[:])
-	if err := st.Update(func(state *store.State) error {
-		state.Invites[inviteHash] = store.Invite{Hash: inviteHash, NodeGroup: "test-group", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	defer st.Close()
+	nodeID := "node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	code := strings.Repeat("A", 43)
+	digest := sha256.Sum256([]byte(code))
+	codeHash := hex.EncodeToString(digest[:])
+	if err = st.Update(func(state *store.State) error {
+		state.Nodes[nodeID] = store.Node{ID: nodeID, Name: "existing", Enrolled: true, InstallCodeHash: codeHash, InstallCodeExpiresAt: time.Now().Add(time.Minute).Unix()}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	nodeCA := testNodeAuthority(t)
-	caPool := x509.NewCertPool()
-	caPool.AddCert(nodeCA.Certificate)
-	server := master.NewWithNodeCA(st, "", "", nodeCA)
-	ts := httptest.NewUnstartedServer(server.Handler())
-	ts.TLS = &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: caPool}
-	ts.StartTLS()
-	t.Cleanup(ts.Close)
-	masterCAPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
-	masterCAPath := filepath.Join(dir, "master-ca.pem")
-	if err := os.WriteFile(masterCAPath, masterCAPEM, 0600); err != nil {
+	server := httptest.NewUnstartedServer(master.New(st, "", "").Handler())
+	server.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	server.StartTLS()
+	defer server.Close()
+	if err = os.WriteFile(statePath, []byte(`{"node_id":"node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","private_key":"legacy","certificate_pem":"legacy"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := New(ts.URL, "node-test", "test-group", invite, masterCAPath)
+	client, err := New(server.URL, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.RunOnce(); err != nil {
-		t.Fatalf("initial mTLS run: %v", err)
+	if err = client.Enroll(nodeID, code); err == nil {
+		t.Fatal("trusted a private test certificate through system roots")
 	}
-	state, err := client.loadOrCreate()
+	ca := filepath.Join(dir, "ca.pem")
+	if err = os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err = New(server.URL, ca)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.NodeID == "" || state.CertificatePEM == "" || state.CertificateSerial == "" {
-		t.Fatal("enrollment did not persist the client identity")
+	if err = client.Enroll("another-node", code); err == nil {
+		t.Fatal("would replace an existing local node ID")
 	}
-	var beforeLastSeen int64
-	if err := st.View(func(current store.State) error {
-		node := current.Nodes[state.NodeID]
-		if node.ID == "" || node.Disabled || node.CurrentSerial != state.CertificateSerial {
-			t.Fatalf("Master stored an invalid node identity: %+v", node)
-		}
-		beforeLastSeen = node.LastSeen
-		return nil
-	}); err != nil {
+	if err = client.Enroll(nodeID, code); err != nil {
 		t.Fatal(err)
 	}
-	oldSerial := state.CertificateSerial
-	state, err = client.rotate(state)
+	if err = client.RunOnce(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.load()
+	if err != nil || state.NodeID != nodeID || state.NodeToken == "" {
+		t.Fatal("enrollment did not persist the expected identity")
+	}
+	info, err := os.Stat(statePath)
 	if err != nil {
-		t.Fatalf("certificate rotation: %v", err)
+		t.Fatal(err)
 	}
-	if state.CertificateSerial == oldSerial || state.PendingKey != "" {
-		t.Fatal("rotation did not atomically replace the local certificate identity")
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Fatal("credential file permissions are not 0600")
 	}
-	if err := client.RunOnce(); err != nil {
-		t.Fatalf("heartbeat with rotated certificate: %v", err)
+	raw, err := os.ReadFile(statePath)
+	if err != nil || strings.Contains(string(raw), "legacy") {
+		t.Fatal("legacy private identity was retained")
 	}
-	if err := st.View(func(current store.State) error {
-		node := current.Nodes[state.NodeID]
-		if node.CurrentSerial != state.CertificateSerial || node.LastSeen < beforeLastSeen {
-			t.Fatalf("Master did not accept rotated certificate: %+v", node)
+	if err = st.View(func(state store.State) error {
+		if state.Nodes[nodeID].LastSeen == 0 {
+			t.Error("heartbeat did not update the existing node")
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnrollmentDoesNotFollowRedirects(t *testing.T) {
+	t.Setenv("MCUI_AGENT_STATE", filepath.Join(t.TempDir(), "identity.json"))
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("enrollment redirected to another origin")
+	}))
+	defer target.Close()
+	master := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer master.Close()
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: master.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(master.URL, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = client.Enroll("node-test", strings.Repeat("A", 43)); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("expected enrollment to reject redirect: %v", err)
 	}
 }

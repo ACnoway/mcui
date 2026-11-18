@@ -4,7 +4,7 @@ MCUI is a multi-Core control plane in staged development. The repository contain
 
 ## Current stage
 
-Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 connects scoped status-task creation, external signing, mTLS pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only executable node action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Phase 3 has a read-only official Core release catalog, a Master-side cache of one latest stable official release per Core for amd64/arm64, and an unintegrated TUF client foundation. The client has no production trust root or signing keys, and Agent installation still does not exist. Future normal downloads are intended to use fixed official sources, with the Master copy reserved as an exact-version and digest-matched backup. See [Phase 3 progress](docs/phase-3-progress.md). A successful build does not constitute phase exit or production approval.
+Phase 0/1 repository engineering work is complete, while formal exit evidence remains outstanding; see [Phase 0/1 implementation status](docs/phase-0-1-implementation.md). Phase 2 connects scoped status-task creation, external signing, Token-authenticated pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The only executable node action is a fixed read-only service status query. Its implementation and remaining gates are tracked in [the Phase 2 progress record](docs/phase-2-progress.md); deployment configuration is in [Phase 2 operations](docs/phase-2-operations.md). Phase 3 has a read-only official Core release catalog, a Master-side cache of one latest stable official release per Core for amd64/arm64, and an unintegrated TUF client foundation. The client has no production trust root or signing keys, and Agent-side Core installation has yet to be implemented. Future normal downloads are intended to use fixed official sources, with the Master copy reserved as an exact-version and digest-matched backup. See [Phase 3 progress](docs/phase-3-progress.md). A successful build does not constitute phase exit or production approval.
 
 ## Development checks
 
@@ -32,27 +32,20 @@ Provide a one-time `MCUI_BOOTSTRAP_TOKEN` through a trusted local mechanism, the
 
 ## TLS panel and Agent enrollment
 
-Agent enrollment requires a TLS-enabled Master, an operator-provisioned Master server certificate, a pre-trusted CA file on the Agent, and a separate node-client CA. Private key files must be readable only by the Master account. See [Phase 1 operations](docs/phase-1-operations.md) for the exact flags and trust responsibilities.
+In the TLS panel, a scoped security administrator creates a node and generates a one-time install command after MFA. The command verifies the approved installer SHA-256 before running it. The installer configures the Agent and the status-only Helper, then redeems the code over HTTPS. See [Agent deployment and migration](docs/phase-1-operations.md) for release metadata, trust provisioning, and service setup.
 
-The Agent takes `-master https://<master-host>:<port>`, `-server-ca <trusted-master-ca.pem>`, and on first registration `-invite-file <restricted-file>`. It generates an Ed25519 private key locally, submits a CSR, and persists its client certificate and key under `/var/lib/mcui-agent/identity.json` (or the `MCUI_AGENT_STATE` override). It authenticates heartbeats and certificate rotation with mTLS; it has no bearer-token runtime mode.
+The Agent uses the system CA store or an explicit locally trusted CA. Its node Token is stored in a private identity file and authenticates heartbeat, task delivery, and ACK. Re-enrollment preserves the node ID and ledgers. The old Token expires as soon as the replacement is redeemed.
 
-## Security boundary
-
-- The Master exposes login, bootstrap, scoped node inventory/detail, audit, invitation, disable, mTLS enrollment, heartbeat, certificate rotation, and optional status-task create/list/detail and Agent delivery/ACK routes. A narrow HTTPS Helper checkpoint accepts only the exact currently leased status task. The signer API is loopback-only and accepts only `core.status` task messages.
-- TLS mode uses TLS 1.3 and validates Agent client certificates against the configured node CA. Configure it directly; reverse-proxy TLS termination is not supported by this baseline.
-- Existing nodes from the legacy bearer-token schema are marked for re-enrollment during migration. Legacy bearer-token hashes are not carried into the normalized schema.
-- SQLite entities are stored in versioned tables. The migration is covered by code tests; a snapshot and non-overwriting restore-candidate tool is available; production backup and disaster recovery have not been completed or rehearsed.
-- The node CA private key is loaded by the Master to issue/rotate node certificates. Keep it separate from the Master TLS key and from all future task/release signing keys. Offline key custody and disaster recovery remain design decisions.
-- This is not production release approval. See [Phase 0/1 status](docs/phase-0-1-implementation.md), the [phased workflow](docs/phased-development-workflow.md), and the design documents for open gates.
+SQLite migrations cover the previous certificate-backed and serialized database formats. The supported backup utility creates a verified snapshot or a separate restore candidate. See the [phased workflow](docs/phased-development-workflow.md) for the remaining release gates.
 
 ## Components
 
 - `cmd/panel`: TLS-capable Master panel/API server; loopback-only development HTTP mode
-- `cmd/agent`: Core-free Agent enrollment, mTLS heartbeat/rotation, and status-task client
+- `cmd/agent`: Core-free Agent enrollment, Token-authenticated heartbeat, and status-task client
 - `cmd/mcui-helper`: root-owned Linux status Helper with a fixed Unix socket and systemd query mapping
 - `cmd/mcui-signerd`: isolated loopback-only status-task signing process
 - `internal/store`: versioned SQLite schema and legacy-state migration
-- `internal/master`: bootstrap, MFA sessions, scoped reads, invites, disable, and mTLS identity endpoints
+- `internal/master`: bootstrap, MFA sessions, scoped node management and Token enrollment
 - `internal/protocol`: signed-message schema validation and canonicalization, including status-only V2
 - `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: signed status verification, V1 cancel/skip verification and signing for the restricted Phase 2 controls, plus isolated task signing
 - `internal/taskledger`, `internal/taskslots`, `internal/taskdispatch`, `internal/agenttasks`: durable status-task intake, delivery, ACK, and Helper checkpoint flow

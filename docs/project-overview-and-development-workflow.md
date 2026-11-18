@@ -1,7 +1,7 @@
 # 轻量化多 Core 主控面板——项目大纲与基础开发流程
 
 > 当前阶段 0/1 实施及验证记录见[阶段状态文档](./phase-0-1-implementation.md)。阶段 2 已接通只读状态任务、pending cancel 和 expired skip；通用序号缺口、外部可信时间、恢复和正式验收仍未完成；详情见[阶段 2 进度](./phase-2-progress.md)。
-> 本版接入流程和节点 Token 鉴权待实现。仓库当前仍使用 mTLS，现有版本的部署方式见[阶段 1 运维手册](./phase-1-operations.md)。
+> 节点 Token 接入和旧节点迁移见[阶段 1 运维手册](./phase-1-operations.md)。
 
 > 版本：V1.2（实施草案）
 > 参考方向：3x-ui 的入站管理、XBoard 的 HTTP 拉取与上报、MMWX 的面板生成 Agent 安装命令。

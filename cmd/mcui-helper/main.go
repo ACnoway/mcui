@@ -32,7 +32,7 @@ var statusToken = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 func main() {
 	nodeID := flag.String("node-id", "", "provisioned MCUI node ID")
 	masterURL := flag.String("master", "", "HTTPS Master origin")
-	masterCAPath := flag.String("master-ca", "", "pre-trusted Master CA certificate PEM")
+	masterCAPath := flag.String("master-ca", "", "optional locally trusted Master CA certificate PEM")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key")
 	stateDir := flag.String("state-dir", "/var/lib/mcui-helper", "root-owned private helper state directory")
@@ -40,12 +40,13 @@ func main() {
 	agentUser := flag.String("agent-user", "mcui-agent", "unprivileged Agent account")
 	socketGroup := flag.String("socket-group", "mcui-agent", "group permitted to connect to the socket")
 	initialize := flag.Bool("initialize-ledger", false, "explicitly initialize a new helper ledger and exit")
+	check := flag.Bool("check-ledger", false, "verify an existing Helper ledger and exit")
 	flag.Parse()
 	if os.Geteuid() != 0 {
 		log.Fatal("mcui-helper must run as root")
 	}
-	if *nodeID == "" || *masterURL == "" || *masterCAPath == "" || *taskKeyID == "" || *taskPublicKeyPath == "" {
-		log.Fatal("-node-id, -master, -master-ca, -task-key-id, and -task-public-key are required")
+	if *nodeID == "" || *masterURL == "" || *taskKeyID == "" || *taskPublicKeyPath == "" {
+		log.Fatal("-node-id, -master, -task-key-id, and -task-public-key are required")
 	}
 	account, err := user.Lookup(*agentUser)
 	if err != nil {
@@ -71,9 +72,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("parse task signing public key: %v", err)
 	}
-	caPEM, err := os.ReadFile(*masterCAPath)
-	if err != nil {
-		log.Fatalf("read Master CA: %v", err)
+	var caPEM []byte
+	if *masterCAPath != "" {
+		caPEM, err = os.ReadFile(*masterCAPath)
+		if err != nil {
+			log.Fatalf("read Master CA: %v", err)
+		}
 	}
 	checkpoint, err := helper.NewHTTPCheckpoint(*masterURL, caPEM)
 	if err != nil {
@@ -109,6 +113,9 @@ func main() {
 		log.Fatalf("open helper ledger: %v", err)
 	}
 	defer instance.Close()
+	if *check {
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("mcui status-only Helper listening on %s for node %s", *socketPath, *nodeID)

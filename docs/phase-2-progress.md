@@ -7,7 +7,7 @@
 - Master 为状态任务逐请求校验管理员身份、角色和节点范围；授权审计先于入队。独立 signer 只为固定 V2 状态任务签名。任务序号、完整签名消息和投递租约保存在独立任务库。
 - Agent 使用其私有 SQLite 账本的 `next_sequence` 向 Master 报告期望序号。节点序号历史存在已过期终态时，Master 可返回对应原任务和签名 `EXPIRED` skip；Agent 验签后只消费该历史槽，不调用 Helper，也不重发已存在的终态 ACK。已签发但从未租出的任务可由面板签名 `VOID_UNISSUED` 关闭；Agent 以合成 `CANCELED` 墓碑原子消费空槽并 ACK。未知、活动或不可证明的缺口仍失败关闭。当前未实现独立 `CANCELED` skip。
 - Agent 先验签并持久化任务再进入 Helper，ACK 历史按版本幂等重放。过期任务只写入 `EXPIRED`；`RUNNING` 重启后进入 `NEEDS_RECONCILIATION` 并保持序号栅栏。Helper 只接受 Unix Socket peer UID、独立签名校验、当前 Master TLS 检查点和有效租约；执行边界仅为固定 `systemctl show` 状态读取。
-- Master、Agent 和 Helper 通过本机 chrony 检查 Cloudflare NTS。应用要求选中的来源精确为 `time.cloudflare.com`、最近样本不超过 300 秒、`authdata` 显示 NTS/有效 AEAD/cookie、tracking 为同步状态且误差界限不超过 1 秒；不接受未认证来源或本地时钟回退作为替代。Agent/Helper 还将本机 NTS 时间与 mTLS/TLS Master 时间比较，偏差超过 30 秒时拒绝处理。
+- Master、Agent 和 Helper 通过本机 chrony 检查 Cloudflare NTS。应用要求选中的来源精确为 `time.cloudflare.com`、最近样本不超过 300 秒、`authdata` 显示 NTS/有效 AEAD/cookie、tracking 为同步状态且误差界限不超过 1 秒；不接受未认证来源或本地时钟回退作为替代。Agent/Helper 还将本机 NTS 时间与 经 HTTPS 验证的 Master 时间比较，偏差超过 30 秒时拒绝处理。
 - Master 启动前交叉核对任务库和主控审计库。缺少授权的任务、无任务的签发审计、签名任务与授权节点/Core 不符都会阻止启动。任务已经持久化但后置签发/关闭审计因进程崩溃而缺失时，在独立可信时间可用的前提下补写恢复审计。
 - 控制表通过已知的加表迁移升级旧任务库；Agent 与 Helper 均保留私有账本。部署说明包括 NTS 配置、读状态 API、恢复边界与服务启动检查。
 

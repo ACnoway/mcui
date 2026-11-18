@@ -5,15 +5,12 @@ package helper
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
+
+	"github.com/ACnoway/mcui/internal/security"
 )
 
 type HTTPCheckpoint struct {
@@ -31,28 +28,19 @@ type checkpointResponse struct {
 	PreviousSequence int64  `json:"previous_sequence"`
 }
 
-// NewHTTPCheckpoint creates a pinned HTTPS client for the Master-side status
+// NewHTTPCheckpoint creates a server-authenticated HTTPS client for the Master-side status
 // task checkpoint. The endpoint is read-only and authorizes only the exact
 // signed envelope under its current delivery lease.
 func NewHTTPCheckpoint(masterURL string, caPEM []byte) (*HTTPCheckpoint, error) {
-	u, err := url.Parse(masterURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return nil, errors.New("Master checkpoint URL must be an HTTPS origin")
+	origin, err := security.MasterOrigin(masterURL)
+	if err != nil {
+		return nil, err
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("Master checkpoint CA contains no certificates")
+	client, err := security.NewMasterHTTPClient(caPEM, 5*time.Second)
+	if err != nil {
+		return nil, err
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}
-	return &HTTPCheckpoint{
-		endpoint: strings.TrimRight(masterURL, "/"),
-		client: &http.Client{
-			Timeout:       5 * time.Second,
-			Transport:     transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-	}, nil
+	return &HTTPCheckpoint{endpoint: origin, client: client}, nil
 }
 
 func (c *HTTPCheckpoint) AuthorizeStatus(ctx context.Context, raw []byte, leaseID string) (time.Time, int64, error) {

@@ -77,10 +77,6 @@ func (c *Client) SetTaskSequenceProvider(provider func() (int64, error)) error {
 }
 
 func (c *Client) processStatusTask(state localState) error {
-	client, err := c.httpClient(state)
-	if err != nil {
-		return err
-	}
 	endpoint := c.masterURL + "/api/v1/agent/tasks/next"
 	if c.taskSequenceProvider != nil {
 		next, sequenceErr := c.taskSequenceProvider()
@@ -93,7 +89,8 @@ func (c *Client) processStatusTask(state localState) error {
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
+	req.Header.Set("Authorization", "Bearer "+state.NodeToken)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}

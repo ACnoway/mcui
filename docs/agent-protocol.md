@@ -1,7 +1,7 @@
 # Agent 身份、任务与配置协议（阶段 0 冻结基线）
 
 > 状态：阶段 0 已冻结 V1 签名编码与一般任务/序号/恢复语义基线，等待项目负责人确认及项目内安全检查。V1 schema 和共享向量由 `internal/protocol` 实现；阶段 2 另以 V2 接通只读 `core.status` 状态查询，并复用 V1 独立域实现 pending cancel / expired skip 的受限子集。本文一般控制语义仍宽于当前运行时，当前不开放任何会改变系统的操作。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)；旧示例 JSON 仅作示意。阶段状态见[阶段 2 进度](./phase-2-progress.md)。
-> 第 2 节和文中 Token 鉴权条款为待实现的接入设计。当前运行时的 mTLS 注册与部署见[阶段 1 运维手册](./phase-1-operations.md)。
+> 节点接入部署与旧节点迁移见[阶段 1 运维手册](./phase-1-operations.md)。
 
 ## 1. 信任边界与基本约束
 
@@ -16,7 +16,7 @@ Agent 主动 HTTPS Pull，任务投递和 ACK 按节点 Token 鉴权。Master �
 3. **兑换凭据。** `POST /api/v1/agent/enroll` 使用 JSON `{"install_code":"..."}`。Master 校验安装码摘要、用途、有效期及关联节点的启用状态，在同一事务中消费安装码、登记新 Token 摘要并使原凭据失效。并发兑换至多成功一次，过期、已使用或被替换的码均拒绝。成功返回 HTTP 200 和 JSON `{"node_id":"...","node_token":"..."}`，凭据响应禁止缓存。兑换按来源限流。响应丢失或本地未保存成功时，由管理员为原节点重新生成命令。
 4. **持续认证。** 安装码与节点 Token 分别用密码学安全随机源生成，Token 至少含 32 字节随机数据。主控仅存摘要，安装程序原子写入仅 Agent 账户可读的 Token 文件。随后每次 Agent API 请求携带 `Authorization: Bearer <node_token>`。Master 按 Token 摘要解析唯一节点，逐请求检查启用、撤销及任务/配置归属。请求字段中的 `node_id` 仅用于一致性检查。首次有效心跳使原节点上线。安装码和 Token 禁止进入 URL、常规日志、审计详情和错误内容。节点 Token 的权限限定为该节点的 Agent API。
 5. **轮换与恢复。** 为原节点重新生成命令，成功兑换时使旧 Token 立即失效。发现泄露时可立即禁用节点，同时撤销未兑换安装码和 Token，并停止签发及投递。通信失败或节点被禁用时，已运行的 Core 默认维持 LKG。节点重装时仍按第 6 节确认账本连续性后才恢复任务执行。
-6. **现有节点迁移。** 为现有 `node_id` 生成安装命令，保留 Master、Agent 和 Helper 原有任务账本、序号及配置状态。成功兑换后该节点改用 Token 鉴权，Master 拒绝旧客户端证书和旧邀请。状态连续性无法确认时按第 6 节隔离恢复。
+6. **现有节点迁移。** 为现有 `node_id` 生成安装命令，保留 Master、Agent 和 Helper 原有任务账本、序号及配置状态。升级后的 Master 停用旧 CSR、客户端证书和邀请认证。现有节点成功兑换新 Token 后恢复通信。状态连续性无法确认时按第 6 节隔离恢复。
 
 Master 地址、显式私有 CA 和任务/配置验证公钥的变更通过受信配置更新流程授权和分发。公有 CA 签发的服务端证书可随主机名正常续期。
 
@@ -67,7 +67,7 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 
 ### 阶段 2 已接通的 V2 状态查询子集
 
-当前任务只允许 `schema_version: 2`、`operation: core.status`，V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。Master 为每节点持久化分配序号，固定任务有效期 5 分钟、投递租约 60 秒；租约到期只重投相同签名消息。Agent 通过 mTLS 拉取任务与可选的 V1 控制信封并回传 ACK，账本先写入再处理；重复 ACK 带 `last_status_version` 恢复，执行中状态重启后进入 `NEEDS_RECONCILIATION`。
+当前任务只允许 `schema_version: 2`、`operation: core.status`，V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。Master 为每节点持久化分配序号，固定任务有效期 5 分钟、投递租约 60 秒；租约到期只重投相同签名消息。Agent 通过 HTTPS 和节点 Token 拉取任务与可选的 V1 控制信封并回传 ACK，账本先写入再处理；重复 ACK 带 `last_status_version` 恢复，执行中状态重启后进入 `NEEDS_RECONCILIATION`。
 
 Helper 要求当前 Master 签发租约、提交完整原始签名消息并从 TLS 验证的 Master 获取当前时间和前序终态位置。检查点返回的前序序号只允许将已终结缺口写入 Helper 本地 ledger；未知缺口不跳过。状态读取仅执行固定 `systemctl show` 属性查询。Agent 过期收到的签名任务只持久化 `EXPIRED` 并 ACK，不执行 Helper。执行结果不确定时两端保持 reconciliation 栅栏，不能删除账本恢复。
 

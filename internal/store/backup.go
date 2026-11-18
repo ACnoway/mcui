@@ -111,27 +111,32 @@ func VerifyDatabase(path string) (int, error) {
 	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
 		return 0, fmt.Errorf("read database schema version: %w", err)
 	}
-	if version != schemaVersion {
-		return version, fmt.Errorf("database schema version %d is not supported (expected %d)", version, schemaVersion)
+	if version < 1 || version > schemaVersion {
+		return version, fmt.Errorf("database schema version %d is not supported (versions 1 through %d)", version, schemaVersion)
 	}
-	if err := validateSchema(db); err != nil {
+	if err := validateSchema(db, version); err != nil {
 		return version, err
 	}
 	return version, nil
 }
 
-func validateSchema(db *sql.DB) error {
+func validateSchema(db *sql.DB, version int) error {
 	expectedTables := map[string][]string{
 		"schema_migrations": {"version", "applied_at"},
 		"admins":            {"id", "username", "role", "disabled", "payload"},
-		"invites":           {"token_hash", "node_group", "expires_at", "used", "payload"},
-		"nodes":             {"id", "node_group", "last_seen", "disabled", "payload"},
-		"sessions":          {"id_hash", "admin_id", "created_at", "last_seen", "expires_at", "payload"},
-		"enrollments":       {"request_id", "node_id", "created_at", "payload"},
-		"audit_logs":        {"event_seq", "at", "actor", "resource_type", "resource", "action", "outcome", "payload"},
+
+		"nodes":    {"id", "node_group", "last_seen", "disabled", "payload"},
+		"sessions": {"id_hash", "admin_id", "created_at", "last_seen", "expires_at", "payload"},
+
+		"audit_logs": {"event_seq", "at", "actor", "resource_type", "resource", "action", "outcome", "payload"},
 	}
 	expectedIndexes := map[string]struct{}{
-		"invites_expiry_idx": {}, "nodes_group_seen_idx": {}, "sessions_admin_idx": {}, "audit_resource_idx": {},
+		"nodes_group_seen_idx": {}, "sessions_admin_idx": {}, "audit_resource_idx": {},
+	}
+	if version == 1 {
+		expectedTables["invites"] = []string{"token_hash", "node_group", "expires_at", "used", "payload"}
+		expectedTables["enrollments"] = []string{"request_id", "node_id", "created_at", "payload"}
+		expectedIndexes["invites_expiry_idx"] = struct{}{}
 	}
 	for table, expected := range expectedTables {
 		rows, err := db.Query("PRAGMA table_info(" + table + ")")
