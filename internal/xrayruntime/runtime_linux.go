@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
+	"github.com/ACnoway/mcui/internal/corecatalog"
 )
 
 const StateDir = "/var/lib/mcui-xray"
@@ -28,11 +28,6 @@ const (
 	Start     Action = "start"
 	Stop      Action = "stop"
 	Uninstall Action = "uninstall"
-)
-
-var (
-	stableVersion = regexp.MustCompile(`^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$`)
-	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 type Release struct {
@@ -275,7 +270,7 @@ func (r *Runtime) runPreflight(ctx context.Context, release Release) (err error)
 func (r *Runtime) clearCandidate() error { return r.point("candidate", Release{}) }
 
 func (r Release) valid() bool {
-	return stableVersion.MatchString(r.Version) && digestPattern.MatchString(r.SHA256)
+	return corecatalog.ValidXrayRelease(r.Version, r.SHA256)
 }
 
 func (r Release) key() string { return r.Version + "-" + r.SHA256 }

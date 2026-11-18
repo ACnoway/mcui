@@ -1,5 +1,7 @@
 # 阶段 3 Xray 本地生命周期
 
+远程安装签发基础的独立试验步骤见 [Xray 安装的独立审批与签发](./phase-3-approval.md)。
+
 `mcui-xray` 在 Linux amd64/arm64 节点上由本地 root 管理独立的 `mcui-xray.service`。服务使用固定空 JSON 引导配置和独立的低权限 systemd 沙箱，供阶段 3 生命周期验证。现有 Agent 安装器和面板任务继续使用阶段 2 的只读路径。指定版本和架构的产品状态见[能力矩阵](./core-compatibility.md)。
 
 ## 1. 准备验证节点
