@@ -54,6 +54,7 @@
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
+| Xray 安装双人审批与签发 | 通过，提交 `57ae0d9` 和 `3adee1b`（2026-11-18） | `ro:/root/mcui` 全量 `scripts/check-static.sh` 及签发、可信时间、Xray 生命周期和制品缓存的竞态测试通过。使用临时测试密钥和 chrony 4.6.1 的私有网络及挂载命名空间，以 `chronyd -x` 验证真实 NTS 签发、OpenSSL 验签、相同证据幂等重试及同序号冲突拒绝。普通 NTP 下签发被拒且账本保持空白。已清理临时进程和文件。正式独立信任与远程投递待接入。[签发说明](./phase-3-approval.md) |
 | 主控双库回滚检测 | 通过，提交 `405771d`（2026-11-18） | `ro:/root/mcui` 全量检查、主控和检查点竞态测试、真实主控与检查点进程的 mTLS 恢复演练通过。旧两库和旧 journal 一并恢复时拒绝启动，外部 revision 保持。独立主机上的生产恢复仍待验收。[阶段 2 验证记录](./phase-2-progress.md#验证状态) |
 | 独立检查点服务 | 通过，提交 `1ba38ce`（2026-11-18） | `ro:/root/mcui` 完整 `scripts/check-static.sh`、检查点竞态测试及临时 systemd 服务冒烟通过。验证 mTLS 拒绝未登记客户端、旧 journal 拒绝、CAS 幂等和重启后 revision 持久化。[阶段 2 验证记录](./phase-2-progress.md#验证状态) |
 | Agent/Helper 发布包、TUF 轮换与竞态检测 | 通过，提交 `6ea294b`（2026-11-18） | `ro:/root/mcui` 完整 `scripts/check-static.sh`、`go test -race -count=1 ./cmd/mcui-tuf ./internal/artifacttrust ./internal/xrayruntime` 和 `scripts/build-runtime-release.sh` 通过。测试验证新旧 root 阈值、更新角色签署、两架构 ZIP 成员、ELF 机器类型及 SHA-256；arm64 仅构建和检查制品 |
