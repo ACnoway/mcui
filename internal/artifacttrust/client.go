@@ -5,7 +5,6 @@ package artifacttrust
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
