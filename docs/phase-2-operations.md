@@ -143,3 +143,14 @@ systemctl restart mcui-panel.service mcui-agent.service
 ## 7. 当前限制
 
 当前实现只适用于只读状态查询、pending cancel、expired skip、过期终态补取和 `VOID_UNISSUED` 空槽关闭。通用 `CANCELED` skip、跨数据库原子恢复、两库同时回滚检测、硬件可信时间根、密钥轮换仪式和 Debian amd64 的 systemd 故障演练仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。
+
+独立检查点已有测试部署入口 `mcui-checkpointd`，主控任务和审计库的提交仍未接入。正式恢复继续执行上一节的冻结与人工核验。
+
+## 8. 部署隔离的检查点验证实例
+
+`mcui-checkpointd` 为一个检查点身份和 epoch 持久化最新 revision 与 SHA-256，提供读取和比较后更新两个接口。服务使用 TLS 1.3 验证客户端签发链，并核对其公钥 SPKI 的 SHA-256 指纹。客户端用指定 CA 验证服务端证书和主机名，每次请求绑定新的随机挑战。客户端凭据供未来的主控对接使用。
+
+1. 在验证环境构建 `go build -trimpath -o mcui-checkpointd ./cmd/mcui-checkpointd`。将二进制和 `deploy/systemd/mcui-checkpointd.service` 安装到独立检查点主机，创建专用系统账号和组 `mcui-checkpoint`。
+2. 在 `/etc/mcui-checkpoint` 部署服务端证书链 `server-chain.pem`、私钥 `server-key.pem`、客户端专用 CA `client-ca.pem`。目录由 root 管理，服务账号只读；私钥使用 `root:mcui-checkpoint 0640`。在 `checkpoint.env` 写入 `MCUI_CHECKPOINT_LISTEN`（管理网络的监听地址和端口）及 `MCUI_CHECKPOINT_CLIENT_KEY_SHA256`（已批准客户端 SPKI 的 64 位十六进制 SHA-256）。将服务端 CA 通过独立渠道交给客户端。
+3. 首次引导时创建 `mcui-checkpoint:mcui-checkpoint 0700` 的 `/var/lib/mcui-checkpoint`。从测试 journal 引导记录取得身份、epoch 与初始摘要，再以服务账号执行 `mcui-checkpointd init -db /var/lib/mcui-checkpoint/authority.db -node "$IDENTITY" -epoch "$EPOCH" -sha256 "$DIGEST"`。初始化只创建新库。执行 `systemctl daemon-reload` 和 `systemctl start mcui-checkpointd.service`，检查日志和 mTLS 访问。
+4. Authority 数据必须置于主控及其备份回滚域之外，由独立账号与主机管理。库缺失或损坏时保持签发冻结，由独立保管方核对证据。部署测试实例后仍需接通主控持久化边界和进行真实备份恢复演练。

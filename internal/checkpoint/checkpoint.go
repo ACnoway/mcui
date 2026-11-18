@@ -1,8 +1,8 @@
 // Package checkpoint is an experimental, transport-neutral transition model.
-// It is not wired to runtime and supplies neither storage nor authentication.
+// It is not wired to the task runtime and supplies neither storage nor authentication.
 // Security depends on independently protected, authenticated, linearizable
-// authority and crash-durable, integrity-protected journal implementations;
-// none are provided. The journal and transition requests must be authorized:
+// authority and crash-durable, integrity-protected journal implementations.
+// The journal and transition requests must be authorized:
 // a forged intent can otherwise cause recovery to anchor an attacker-chosen
 // digest. This model does not authenticate requests or compute/verify digests.
 package checkpoint

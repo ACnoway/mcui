@@ -1,6 +1,6 @@
 // Package checkpointstore provides an experimental SQLite checkpoint storage
-// primitive. It is not production-ready or connected to any runtime. Echoing a
-// challenge neither authenticates a caller nor protects responses from forgery.
+// primitive for the checkpoint authority. Echoing a challenge neither
+// authenticates a caller nor protects responses from forgery.
 // Deployments must independently provide authenticated transport, secure identity,
 // request authorization, separately administered durable storage, and anti-rollback
 // protection. Use a trusted, access-controlled directory: pathname checks cannot
