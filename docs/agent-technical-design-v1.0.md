@@ -10,7 +10,7 @@
 
 ## 0. 阅读说明与关键决定
 
-本文的 Agent 借鉴 [miaomiaowuX / mmw-agent](https://github.com/iluobei/miaomiaowuX) 的主控—子节点管理方式，但**不复制其通信协议或安装策略**。下文出现的 JSON、Go 接口、目录和状态机均为本项目**拟定规范**，不是现有项目或上游 Core 已经实现的接口。
+节点接入采用主控建节点后生成安装命令的流程，运行期采用 Agent 主动 HTTPS 拉取与上报。本节接入设计待实现，现有 mTLS 部署见[阶段 1 运维手册](./phase-1-operations.md)。通信参考 [MMWX Agent 部署](https://miaomiaowux.com/docs/install-agent/)和 [XBoard UniProxy 路由](https://github.com/cedar2025/Xboard/blob/master/app/Http/Routes/V1/ServerRoute.php)。
 
 **已确定的 V1 约束：**
 
@@ -43,8 +43,8 @@
 
 ### 1.1 Agent 必须支持（P0）
 
-- 空安装、首次注册、独立节点身份、证书轮换和节点撤销。
-- 仅向可信 Master 发起 HTTPS 连接，正常管理接口使用 mTLS。
+- 主控添加节点并生成安装命令、空 Agent 接入、节点 Token 轮换和撤销。
+- 仅向验证了服务端证书的 Master 发起 HTTPS 连接，日常请求用独立节点 Token 鉴权。
 - 心跳、能力和运行状态上报；主控失联后的本地持续运行。
 - 安全任务领取、签名验证、防重放、持久化状态、幂等与 ACK。
 - Xray / sing-box / mita 三类 Core 的**按需安装、启动、停止、更新、降级、卸载**。
@@ -65,7 +65,7 @@
 - Agent 上开放公网 Web 管理面板或公网命令执行服务。
 - 主控 SSH 登录节点、传递 root 密码或让 Agent 执行 `bash -c`。
 - 由用户任意上传 ELF、修改下载 URL、指定可执行文件路径。
-- 让 Core 进程访问 Agent 私钥、Helper Socket 或其他 Core 的敏感配置。
+- 让 Core 进程访问 Agent 凭据、Helper Socket 或其他 Core 的敏感配置。
 - 将三种 Core 的热重载、统计 API、用户管理方式假设为完全相同。
 
 ---
@@ -83,7 +83,7 @@
                   | 配置 / 制品目录 / 流量       |
                   +-------------+--------------+
                                 ^
-                TLS / mTLS + 签名任务（Agent 主动 Pull）
+                HTTPS + 节点 Token（Agent 主动 Pull）
                                 |
 +-------------------------------+----------------------------------+
 | Node / Linux                                                       |
@@ -114,11 +114,11 @@
 | 组件 | 应当拥有 | 不应拥有 |
 |---|---|---|
 | Master | 节点元数据、任务授权、配置和用户管理 | 节点 root SSH 权限、远程通用命令入口 |
-| Agent | 出站网络连接、本地状态库、节点私钥、受限 Unix Socket 访问 | root 权限、系统任意路径写权限 |
+| Agent | 出站网络连接、本地状态库、节点 Token、受限 Unix Socket 访问 | root 权限、系统任意路径写权限 |
 | Helper | 受控安装目录的文件管理、限定的 systemd 单元操作 | 任意 URL 下载、任意可执行路径、任意 Shell |
 | Core | 配置读取、必要的业务端口和数据面资源 | Agent 凭据、Helper Socket、主控管理员权限 |
 
-**特别提醒：**`mTLS` 保护的是通信和节点身份，不等于任务天然安全；**任务签名、制品签名、Helper 独立校验分别解决不同问题**，不能互相替代。
+Agent 用 HTTPS 验证主控身份，Master 用 Token 验证节点身份。任务、配置和制品按各自的签名和策略校验，Helper 独立检查执行授权。
 
 ### 2.2 强制威胁假设
 
@@ -148,48 +148,31 @@
 1. `lightpanel-agent` 可执行文件；
 2. 最小 `agent-helper` 可执行文件；
 3. Agent 和 Helper 的固定 systemd 单元/Socket 配置；
-4. 根信任材料（Master CA/固定 SPKI 或经验证的根公钥、制品根公钥等）与默认配置模板。
+4. 已验证的任务、配置及制品信任材料与默认配置模板。Master HTTPS 默认使用系统 CA，私有 CA 部署可显式提供 CA 文件。
 
 **不应包含任何 Core 二进制，也不应在安装脚本中自动下载 Core。** 安装引导脚本本身也需通过受信任渠道分发；不能把“curl 下载脚本直接以 root 执行”当作默认安全部署模式。
 
-### 3.2 注册流程
+### 3.2 主控建节点与安装命令
 
 ```text
-[运维人员在 Master 创建注册邀请]
+[管理员在主控添加节点，记录状态为「待接入」]
           |
-一次性邀请码（短有效期、限定节点组/用途）
+[在该节点生成安装命令，包含 Master 地址、节点 ID 和一次性安装码]
           |
-[节点本地安装 Agent，预置可信 Master 身份]
+[在目标服务器粘贴执行命令，安装 Agent 和 Helper]
           |
-Agent 本地生成不可导出的/受限访问的设备私钥 + CSR
+[安装程序调用 HTTPS /enroll，将安装码兑换为节点 ID 和 Token]
           |
-HTTPS 到可信 Master 的 /enroll（校验服务器证书）
-          |
-Master 校验邀请、CSR 的私钥持有证明、频率/来源限制
-          |
-人工批准或按策略批准；分配 node_id
-          |
-签发绑定 node_id 的客户端证书；吊销/过期信息入库
-          |
-Agent 持久化证书与身份；之后只使用 mTLS 管理接口
+[保存节点凭据并启动 Agent，首次成功心跳使原节点上线]
 ```
 
-**注册注意事项：**
+面板以一段可直接复制的 Shell 命令完成下载、摘要校验和安装。命令使用从批准发布元数据取得的安装程序地址和预期摘要，参数包含主控地址、节点 ID 与安装码。安装程序先检查环境及现有节点身份，准备服务文件和受信公钥，再兑换安装码并核对返回的节点 ID。核对成功后落盘节点凭据并启动服务。安装码随命令一起交付，长期 Token 由安装程序通过 HTTPS 获取并写入受限文件。新节点接入时三种 Core 均为「未安装」。
 
-- 首次注册尚无客户端证书，`/enroll` 不能要求现有 mTLS 客户端身份，但**必须**验证 Master 的 TLS 身份；不允许以跳过证书校验代替引导。
-- 一次性邀请码在主控端仅存储哈希，成功使用后原子标记消耗；设置短有效期、尝试次数限制、防枚举和审计。
-- 在 Agent 上生成私钥，优先使用 OS 的密钥保护能力；绝不将私钥发送给 Master。
-- `node_id` 由主控分配，注册后绑定到客户端证书的 SAN/受控身份字段；不允许 Agent 自行决定自己的身份。
-- 二次注册、节点重装和证书丢失属于**恢复流程**，不能自动重用原邀请码。
-- 证书撤销不应仅依赖 CRL/OCSP 的“在线可用性”：Master 应在应用层检查节点身份的当前状态、证书序列号与有效期。
+### 3.3 Token 轮换与失联
 
-### 3.3 证书轮换与失联
-
-- Agent 在证书有效期到达预设阈值前发起轮换；使用当前有效证书申请新的证书，并证明新私钥持有权。
-- 为避免服务中断，可允许短期双证书重叠，但应有精确的作废时间和审计记录。
-- 若证书已过期、被吊销或 Master 身份不可信，**拒绝接受新任务/新配置**。已运行 Core 按离线策略继续使用 LKG。
-- 系统时间明显失准时，进入受限状态并告警；不得为“修复”而关闭证书或任务时间校验。
-- Master 地址变更或信任根轮换必须使用旧信任链授权的专用流程；彻底丢失信任时采用本地人工恢复。
+- 为原节点重新生成安装命令可补发凭据。新安装码在成功兑换时作废旧 Token。失效或被禁用后，Agent 暂停接受新任务与配置，已运行 Core 按离线策略继续使用 LKG。
+- 生成安装命令和凭据兑换按[Agent 协议第 2 节](./agent-protocol.md#2-节点接入token-轮换和撤销)处理。重装及凭据迁移须保留节点状态与 Helper 账本。状态连续性无法确认时进入恢复流程。
+- 系统时间明显失准时进入受限状态并告警，继续校验 HTTPS 证书和任务时间。
 
 ---
 
@@ -231,7 +214,7 @@ root                 受限 Helper（仅必要动作）
 /var/log/lightpanel/                     脱敏审计与诊断（可用 journald）
 ```
 
-**目录原则：**所有最终 Core 可执行文件必须由 root 拥有且对 Agent/Core 不可写；Core 不得读取 Agent 的证书、私钥和状态数据库。配置目录与运行日志目录也应分开。
+**目录原则：**所有最终 Core 可执行文件必须由 root 拥有且对 Agent/Core 不可写；Core 不得读取 Agent 的 Token 文件和状态数据库。配置目录与运行日志目录也应分开。
 
 ### 4.3 Helper 接口安全（强制）
 
@@ -282,13 +265,13 @@ Agent/Core 分别设置合适的 `User=`、`NoNewPrivileges=yes`、`ProtectSyste
 
 | API | 作用 | 主要认证 |
 |---|---|---|
-| `POST /api/v1/agent/enroll` | 首次注册/证书申请 | Master TLS + 一次性邀请 + CSR 证明 |
-| `POST /api/v1/agent/heartbeat` | 心跳、版本、节点健康摘要 | mTLS + 节点状态校验 |
-| `GET /api/v1/agent/tasks` | 顺序领取任务 | mTLS，响应内任务另行验签 |
-| `POST /api/v1/agent/tasks/{id}/ack` | 状态、结果、错误码 | mTLS + 任务归属校验 |
-| `GET /api/v1/agent/config?revision=...` | 获取签名/哈希绑定配置 | mTLS + revision + 签名校验 |
-| `POST /api/v1/agent/traffic` | 幂等流量批次提交（P1） | mTLS + 批次 ID / 序号 |
-| `POST /api/v1/agent/health` | Core 与资源指标（P1） | mTLS |
+| `POST /api/v1/agent/enroll` | 接入主控已创建的节点 | 一次性安装码 |
+| `POST /api/v1/agent/heartbeat` | 心跳、版本、节点健康摘要 | 节点 Token + 节点状态校验 |
+| `GET /api/v1/agent/tasks/next` | 顺序领取任务 | 节点 Token，响应内任务另行验签 |
+| `POST /api/v1/agent/tasks/ack` | 状态、结果、错误码 | 节点 Token + 任务归属校验 |
+| `GET /api/v1/agent/config?revision=...` | 获取签名/哈希绑定配置 | 节点 Token + revision + 签名校验 |
+| `POST /api/v1/agent/traffic` | 幂等流量批次提交（P1） | 节点 Token + 批次 ID / 序号 |
+| `POST /api/v1/agent/health` | Core 与资源指标（P1） | 节点 Token |
 
 **建议默认周期**：心跳 15 秒、任务轮询 15 秒、流量补报 30 秒、主控将 60 秒无心跳判定为“离线”。增加随机抖动和指数退避，避免大量 Agent 同时重连导致主控雪崩。
 
@@ -341,7 +324,6 @@ Agent/Core 分别设置合适的 `User=`、`NoNewPrivileges=yes`、`ProtectSyste
 | `core.uninstall` | 卸载指定 Core | 高 | 二次确认、默认保留审计数据 |
 | `core.start` / `core.stop` / `core.restart` | 控制固定服务 | 中 | 仅作用于任务目标 Core |
 | `config.apply` | 应用指定 revision | 高 | 预检、受控切换、失败恢复 |
-| `agent.rotate_credentials` | 轮换节点凭据 | 高 | 双证书短暂重叠、可撤销 |
 | `agent.update` | 更新 Agent/Helper | 极高 | 独立发布签名及恢复流程 |
 
 不增加 `exec`、`script.run`、`systemd.manage_any` 等通用命令任务。
@@ -375,7 +357,7 @@ Agent 重启后：依据本地 WAL/状态库恢复、对账，不能盲目重放
 ### 5.5 错误码约定
 
 ```text
-AUTH_INVALID_CERT
+AUTH_INVALID_TOKEN
 AUTH_NODE_REVOKED
 TASK_BAD_SIGNATURE
 TASK_EXPIRED
@@ -601,7 +583,7 @@ Agent 每次启动需检查：
 | 情况 | Agent 应对 |
 |---|---|
 | Master 暂时不可达 | 已运行 Core 保持原状；任务延后；周期性退避重连 |
-| mTLS 失效/节点撤销 | 不接受新任务；维持或停止 Core 由预先配置的安全策略决定；记录告警 |
+| Token 失效或节点禁用 | 不接受新任务；维持或停止 Core 由预先配置的安全策略决定；记录告警 |
 | 正在下载时断线 | 可保留已校验的分片，但不得在缺失授权/清单新鲜度时激活 |
 | 已通过校验且正在安装时断线 | 依据本地已授权任务和事务日志完成安全恢复；不得接收新的未验证指令 |
 | 配置获取不完整或摘要不匹配 | 不应用，保持 LKG |
@@ -668,8 +650,8 @@ lightpanel/
 ├── internal/
 │   ├── agent/
 │   │   ├── bootstrap/          # 首次注册、Master 身份校验
-│   │   ├── identity/           # 节点证书、密钥、轮换
-│   │   ├── transport/          # HTTPS/mTLS、限流、重试
+│   │   ├── identity/           # 节点 ID 与 Token
+│   │   ├── transport/          # HTTPS、限流、重试
 │   │   ├── heartbeat/          # 健康及版本上报
 │   │   ├── tasks/              # 验签、调度、状态机、幂等
 │   │   ├── coremanager/        # 制品事务、版本与 LKG
@@ -723,11 +705,11 @@ security_events           最小必要安全事件
 
 | 编号 | 用例 | 期望结果 |
 |---|---|---|
-| SEC-ID-01 | 未注册 Agent 请求任务 | 拒绝 |
+| SEC-ID-01 | 未提供 Token 或用 A 的 Token 请求 B 的任务 | 拒绝 |
 | SEC-ID-02 | 伪造 Master 证书 / MITM | Agent 拒绝连接 |
-| SEC-ID-03 | 重复使用一次性邀请码 | 仅首次有效，后续拒绝 |
-| SEC-ID-04 | 撤销节点证书仍请求任务 | Master 拒绝 |
-| SEC-ID-05 | 证书轮换后旧证书超出重叠期 | 拒绝 |
+| SEC-ID-03 | 安装码过期、替换或重复兑换 | 拒绝 |
+| SEC-ID-04 | 节点被禁用后复用已有连接请求任务 | Master 拒绝 |
+| SEC-ID-05 | 成功轮换后使用旧 Token | 立即拒绝 |
 | SEC-ID-06 | 时间回拨或过期任务 | 拒绝高危任务并告警 |
 
 ### 11.2 任务与 Helper 测试
@@ -768,7 +750,7 @@ security_events           最小必要安全事件
 - 对任务解析、JCS/签名验证、解包处理、Helper 请求解析执行 fuzz 测试。
 - `go test -race`、静态分析、依赖漏洞扫描、生成 SBOM、发布制品签名与可追溯构建。
 - 使用非 root、无 Core 的干净 Linux VM 做端到端验收；覆盖 amd64/arm64。
-- 提供主控离线 24 小时、Agent 异常重启、失联恢复、证书轮换失败、系统重启等故障演练。
+- 提供主控离线 24 小时、Agent 异常重启、失联恢复、安装码兑换中断、Token 轮换和系统重启等故障演练。
 - 公开发布前进行项目内安全检查，尤其检查 Helper、签名、制品解包和密钥管理。
 
 ---
@@ -793,8 +775,8 @@ security_events           最小必要安全事件
 
 | Issue | 标题 | 依赖 | 优先级 |
 |---|---|---|---|
-| AG-001 | 定义注册与证书绑定协议 | 无 | P0 |
-| AG-002 | 实现 Agent 安全密钥存储与 mTLS | AG-001 | P0 |
+| AG-001 | 定义主控建节点、安装命令与安装码兑换协议 | 无 | P0 |
+| AG-002 | 实现安装引导、节点 Token 存储与 HTTPS 鉴权 | AG-001 | P0 |
 | AG-003 | 实现任务 JSON Schema / JCS / Ed25519 | 无 | P0 |
 | AG-004 | 实现任务序号、幂等、WAL 和恢复 | AG-003 | P0 |
 | AG-005 | 实现 Helper UDS 身份与授权模型 | AG-003 | P0 |
@@ -816,7 +798,7 @@ security_events           最小必要安全事件
 上线前至少满足下列全部条件：
 
 - [ ] **空安装**：Agent 首次安装无 Xray、sing-box、mita，未预置任何 Core 进程。
-- [ ] **身份可信**：Agent 只信任已绑定 Master，mTLS 节点可吊销、凭据可轮换。
+- [ ] **节点接入**：主控生成的安装命令能使原节点上线，节点 Token 可轮换、撤销且仅限本节点。
 - [ ] **任务可信**：所有有副作用操作均来自签名任务，Node 绑定、防重放、过期和幂等可测。
 - [ ] **Helper 最小权限**：不存在任意 Shell/路径/Unit 管理能力，其他本地用户不可越权调用。
 - [ ] **制品可信**：三种 Core 仅能从可信签名清单选择安装；恶意包、错误摘要、错误架构一律拒绝。
@@ -837,7 +819,7 @@ security_events           最小必要安全事件
 
 这些是**编码前应形成决议**的少量问题，不应在开发中随意漂移：
 
-1. **信任根部署**：采用证书 CA 固定根，还是 Master SPKI Pin；如何安全轮换。
+1. **签名信任部署**：确定任务与配置验证公钥的可信分发和轮换流程。
 2. **任务和制品签名体系**：正式采用 JCS + Ed25519，还是 TUF 元数据体系；钥匙由谁保管。
 3. **高危操作审批**：卸载、降级、Agent/Helper 更新、信任根变更是否必须双人审批（推荐至少更新信任根需要独立授权）。
 4. **本机权限管理**：Helper 使用独立 root 守护进程还是严格限定的 systemd 激活服务；V1 建议后者可按需启动，但仍要实现完整授权。
