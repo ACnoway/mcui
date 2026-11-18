@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ACnoway/mcui/internal/corecatalog"
+	"github.com/ACnoway/mcui/internal/tufrepo"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/config"
 	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
@@ -51,6 +52,7 @@ type Config struct {
 	RootHistoryDir     string
 	TargetCacheDir     string
 	TrustedTimeHealthy func() error
+	RequireCoreRole    bool
 }
 
 // Target is an in-memory authorization result from verified TUF metadata.
@@ -75,15 +77,16 @@ type Target struct {
 }
 
 type Client struct {
-	metadataURL    *url.URL
-	trustedRoot    []byte
-	metadataDir    string
-	rootHistoryDir string
-	targetCacheDir string
-	timeHealthy    func() error
-	metadataHTTP   *http.Client
-	artifactHTTP   *http.Client
-	mu             sync.Mutex
+	metadataURL     *url.URL
+	trustedRoot     []byte
+	metadataDir     string
+	rootHistoryDir  string
+	targetCacheDir  string
+	timeHealthy     func() error
+	metadataHTTP    *http.Client
+	artifactHTTP    *http.Client
+	requireCoreRole bool
+	mu              sync.Mutex
 }
 
 type targetCustom struct {
@@ -105,8 +108,12 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || len(cfg.TrustedRoot) == 0 || len(cfg.TrustedRoot) > maxRootBytes || cfg.TrustedTimeHealthy == nil {
 		return nil, ErrUnavailable
 	}
-	if _, err = trustedmetadata.New(cfg.TrustedRoot); err != nil {
+	initial, err := trustedmetadata.New(cfg.TrustedRoot)
+	if err != nil {
 		return nil, fmt.Errorf("%w: invalid offline TUF root", ErrUntrustedTarget)
+	}
+	if cfg.RequireCoreRole && tufrepo.ValidateRootLayout(initial.Root.Signed) != nil {
+		return nil, fmt.Errorf("%w: offline TUF root lacks the MCUI release roles", ErrUntrustedTarget)
 	}
 	metadataDir, err := preparePrivateDirectory(cfg.MetadataDir)
 	if err != nil {
@@ -148,6 +155,7 @@ func New(cfg Config) (*Client, error) {
 		metadataURL: metadataURL, trustedRoot: append([]byte(nil), cfg.TrustedRoot...),
 		metadataDir: metadataDir, rootHistoryDir: rootHistoryDir, targetCacheDir: targetCacheDir,
 		timeHealthy: cfg.TrustedTimeHealthy, metadataHTTP: metadataHTTP, artifactHTTP: artifactHTTP,
+		requireCoreRole: cfg.RequireCoreRole,
 	}, nil
 }
 
@@ -256,12 +264,24 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	if refreshErr != nil {
 		return Target{}, fmt.Errorf("%w: refresh trusted TUF metadata", ErrUntrustedTarget)
 	}
+	if c.requireCoreRole {
+		trusted := tufClient.GetTrustedMetadataSet()
+		if err := tufrepo.ValidateDelegations(trusted.Root.Signed, trusted.Targets[metadata.TARGETS].Signed); err != nil {
+			return Target{}, fmt.Errorf("%w: %v", ErrUntrustedTarget, err)
+		}
+	}
 	if err = ctx.Err(); err != nil {
 		return Target{}, err
 	}
 	files, err := tufClient.GetTargetInfo(targetPath)
 	if err != nil || files == nil {
 		return Target{}, fmt.Errorf("%w: target missing or delegated metadata invalid", ErrUntrustedTarget)
+	}
+	if c.requireCoreRole {
+		role := tufClient.GetTrustedMetadataSet().Targets[tufrepo.CoreRole]
+		if role == nil || role.Signed.Delegations != nil || role.Signed.Targets[targetPath] != files {
+			return Target{}, fmt.Errorf("%w: target lacks direct Core role authorization", ErrUntrustedTarget)
+		}
 	}
 	if err = ctx.Err(); err != nil {
 		return Target{}, err

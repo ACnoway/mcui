@@ -749,7 +749,7 @@ security_events           最小必要安全事件
 
 - 对任务解析、JCS/签名验证、解包处理、Helper 请求解析执行 fuzz 测试。
 - `go test -race`、静态分析、依赖漏洞扫描、生成 SBOM、发布制品签名与可追溯构建。
-- 使用非 root、无 Core 的干净 Linux VM 做端到端验收；覆盖 amd64/arm64。
+- 在隔离的 Debian 13.7 amd64 环境中用非 root、无 Core 的 Agent 做端到端验收。Linux arm64 验证构建。
 - 提供主控离线 24 小时、Agent 异常重启、失联恢复、安装码兑换中断、Token 轮换和系统重启等故障演练。
 - 公开发布前进行项目内安全检查，尤其检查 Helper、签名、制品解包和密钥管理。
 

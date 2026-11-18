@@ -1,10 +1,10 @@
 # 制品信任方案（阶段 0 决议基线）
 
-状态：已选择标准 **TUF** 作为发布元数据基线；只读客户端基础已用官方 [`go-tuf/v2` v2.4.2](https://github.com/theupdateframework/go-tuf/releases/tag/v2.4.2) 实现并锁定。**生产信任根、签名密钥、发布审核流程和节点安装授权尚未部署或验收。** 适用于 Core、Agent 与 Helper 的分离授权仍须按阶段实现；阶段划分见[工作流](./phased-development-workflow.md)，版本状态以[能力矩阵](./core-compatibility.md)为准。
+状态：TUF 客户端及发布工具使用锁定的官方 `go-tuf/v2 v2.4.2`。发布工具支持分角色签名和校验后的版本化仓库输出。实际生产保管人、信任根及上线的 HTTPS 仓库待部署。[TUF 发布手册](./phase-3-release.md) · [依赖版本](https://github.com/theupdateframework/go-tuf/releases/tag/v2.4.2)
 
 ## 1. 方案与角色
 
-选择标准 **TUF** 客户端和仓库，而非自制简化清单。Go 客户端固定使用 `go-tuf/v2 v2.4.2`；发布端、角色密钥和互操作测试仍待确定，不得声称已验收。离线根角色 2-of-3 独立保管人；targets 2-of-3 独立发布审核人；snapshot 和 timestamp 各 1-of-1 在线专用密钥，最小权限且彼此分离。根私钥不进入 Web、任务签发或节点；Core targets 与 Agent/Helper targets 使用独立委派角色和密钥，各 2-of-3，授权路径互不重叠。单人不得同时控制同一角色阈值。制品发布审核人与任务签发人职责分离；高危任务仍须单独审批，TUF 不替代任务签名。
+离线根角色 2-of-3 独立保管人，targets 2-of-3 独立发布审核人，snapshot 和 timestamp 各 1-of-1 在线专用密钥。根私钥保留在带外签名环境。Core 与 Agent/Helper 使用互不重叠的 `core-targets` 和 `runtime-targets` 委派及独立密钥，各 2-of-3。单人不得同时控制同一角色阈值。高危任务仍须单独审批。
 
 通过已验证的线下渠道在安装包中引导可信 TUF root，核对公钥指纹，包本身也必须通过独立可信渠道校验；不得通过首次联网自动信任根。TUF 元数据按所选规范实现标准签名封装和规范化，任务/配置签名另遵循其协议，不能混用或自行改写 TUF 格式。
 
@@ -18,7 +18,7 @@ Master 的只读目录从固定的官方 GitHub Releases API 获取版本和资�
 - 每次解析都从离线引导 root 顺序验证本地保存的 root 轮换记录，再刷新上游元数据。新 root 经旧/新阈值链验证后按版本原子追加到独立私有目录，即使后续角色刷新失败也保留已接受的轮换。元数据、root 历史和制品缓存使用互不嵌套、无符号链接的 `0700` 目录。独立于节点本地状态的单调检查点仍待实现。
 - target 路径由固定 Core、精确版本和本机 Linux 架构生成。TUF 自定义字段必须逐项绑定内容寻址的制品 ID、Core、版本、OS、架构、`upstream-prebuilt` 构建来源、固定归档格式、固定上游 source ID、审核记录 ID 及上游签名事实状态；未知/重复字段、无审核 ID、非 SHA-256、空/超 512 MiB target 均拒绝。该签名事实状态是已签 TUF 审核记录中的声明，不代表客户端独立验证了上游签名。
 - 二进制只从该 Core 的固定 GitHub Release asset URL 下载；最多 5 次 HTTPS 跳转至 GitHub 官方资产/CDN 主机，禁用代理，DNS 结果只拨号到公网单播地址。字节数和 SHA-256 与已验证 target 不符时丢弃临时文件。成功文件按摘要写入私有缓存，权限为 `0400`，采用不覆盖的链接发布。
-- 节点本地 `mcui-xray` 使用该客户端验证精确版本和摘要。它在发布前通过同一文件描述符核验归档字节，以固定名称和权限解包，在隔离的单元中预检，并在激活前重新核对 TUF 授权。生产离线 root、在线元数据、targets 角色密钥、审核记录服务以及 Agent/Helper 远程授权仍待部署或实现。[阶段 3 操作说明](./phase-3-operations.md)
+- 节点本地 `mcui-xray` 要求独立委派的 `core-targets` 直接授权目标，校验 root 与 targets 阈值和角色密钥分离。工具在激活前通过同一文件描述符复验归档，完成隔离预检并再次确认 TUF 授权。生产签名材料、审核记录保管和 Agent/Helper 远程授权仍待部署或实现。[阶段 3 操作说明](./phase-3-operations.md)
 
 ## 2. 入库与消费
 

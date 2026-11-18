@@ -116,11 +116,12 @@ func openTrust(url string) (*artifacttrust.Client, error) {
 	dir := filepath.Join(xrayruntime.StateDir, "control")
 	clock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
 	return artifacttrust.New(artifacttrust.Config{
-		MetadataURL:    url,
-		TrustedRoot:    root,
-		MetadataDir:    filepath.Join(dir, "tuf-metadata"),
-		RootHistoryDir: filepath.Join(dir, "tuf-roots"),
-		TargetCacheDir: filepath.Join(dir, "artifact-cache"),
+		MetadataURL:     url,
+		TrustedRoot:     root,
+		MetadataDir:     filepath.Join(dir, "tuf-metadata"),
+		RootHistoryDir:  filepath.Join(dir, "tuf-roots"),
+		TargetCacheDir:  filepath.Join(dir, "artifact-cache"),
+		RequireCoreRole: true,
 		TrustedTimeHealthy: func() error {
 			_, err := clock.Now()
 			return err

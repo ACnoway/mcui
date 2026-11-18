@@ -142,4 +142,4 @@ systemctl restart mcui-panel.service mcui-agent.service
 
 ## 7. 当前限制
 
-当前实现只适用于只读状态查询、pending cancel、expired skip、过期终态补取和 `VOID_UNISSUED` 空槽关闭。通用 `CANCELED` skip、跨数据库原子恢复、两库同时回滚检测、硬件可信时间根、密钥轮换仪式、systemd 实机演练和 Debian 双架构验收仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。执行本说明中的安装步骤不表示阶段 2 通过或生产部署获批。
+当前实现只适用于只读状态查询、pending cancel、expired skip、过期终态补取和 `VOID_UNISSUED` 空槽关闭。通用 `CANCELED` skip、跨数据库原子恢复、两库同时回滚检测、硬件可信时间根、密钥轮换仪式和 Debian amd64 的 systemd 故障演练仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。

@@ -357,7 +357,7 @@ V1 使用 SQLite 与事务保证一致性；高频原始流量记录应做汇总
 | 部分 | 技术 |
 |---|---|
 | Master | Go + Gin（或标准库 `net/http`） |
-| Agent / Helper | Go + systemd（先支持 Linux amd64/arm64） |
+| Agent / Helper | Go + systemd（Linux amd64 运行验收，arm64 构建验证） |
 | Web UI | Vue 3 + TypeScript + Naive UI |
 | 数据库 | SQLite + GORM 或 sqlc |
 | 主控与节点认证 | HTTPS 服务端证书、每节点独立 Bearer Token |

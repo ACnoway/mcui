@@ -1,6 +1,6 @@
 # 开发基线与阶段门禁
 
-> 状态：工具链和静态 CI 基线已固定；阶段 0/1 仍待项目内安全检查、双架构干净 VM 验收及远程检查核验。当前代码、静态检查和未决门槛见[阶段 0/1 实施状态](./phase-0-1-implementation.md)。本文 2026-11-16 的首次环境盘点是历史记录，不代表当前远端工具状态或安全验收证明。完整 V1 还须满足[项目大纲](./project-overview-and-development-workflow.md)第 12 章与 [Agent 设计](./agent-technical-design-v1.0.md)第 14 章。
+> 状态：工具链和静态 CI 基线已固定。Debian amd64 承担运行验收，Linux arm64 进行构建验证。阶段 0/1 仍待项目内安全检查和 amd64 运行验收。2026-11-16 的环境盘点作为历史记录保留。[阶段 0/1 实施状态](./phase-0-1-implementation.md) · [项目大纲](./project-overview-and-development-workflow.md) · [Agent 设计](./agent-technical-design-v1.0.md)
 
 ## 1. 环境检查记录
 

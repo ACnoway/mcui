@@ -4,7 +4,7 @@
 
 ## 1. 范围与部署
 
-首个验收目标为 Debian 13.7/systemd `257.13-1~deb13u1` amd64/arm64；三个 Core 首批测试候选版本见[兼容矩阵](./core-compatibility.md)。目标组合尚未逐架构实测，不构成已支持声明。完整 V1 包含三种 Core 生命周期、配置与用户、可用统计及订阅；P0 先行并非完整 V1。阶段 2 仅开放带 Master 租约检查点的 `core.status` 只读查询，以及 pending cancel / expired skip 控制；没有节点副作用操作。通用缺口恢复、独立可信时间、恢复和安全验收仍未完成。
+首个运行验收目标为 Debian 13.7 amd64/systemd `257.13-1~deb13u1`，Linux arm64 验证构建。三个 Core 首批测试候选版本见[兼容矩阵](./core-compatibility.md)。完整 V1 包含三种 Core 生命周期、配置与用户、可用统计及订阅；P0 先行并非完整 V1。阶段 2 仅开放带 Master 租约检查点的 `core.status` 只读查询，以及 pending cancel / expired skip 控制；没有节点副作用操作。通用缺口恢复、独立可信时间、恢复和安全验收仍未完成。
 
 ```text
 浏览器 --HTTPS--> Master Web/API --受限接口--> 独立任务签发者
