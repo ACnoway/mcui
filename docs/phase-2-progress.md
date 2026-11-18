@@ -29,6 +29,8 @@
 | `scripts/check-static.sh` 远程构建与测试 | 通过（`1ba38ce`，2026-11-18） | `ro:/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。Go vet、全量 Go 测试、Linux 双架构构建、协议向量、冻结安装和 Web 构建通过 |
 | 检查点竞态与恢复测试 | 通过（`1ba38ce`） | `go test -race -count=1 ./internal/checkpoint ./internal/checkpointstore ./internal/checkpointjournal ./internal/checkpointhttp`；覆盖旧 journal 拒绝、CAS 幂等、认证和挑战不匹配 |
 | 检查点 systemd 冒烟 | 通过（`1ba38ce`） | `ro` 的 systemd 257.13 环境，使用临时 unit、隔离账号、loopback 和测试证书。验证重复初始化被拒、无证书和未登记公钥被拒、revision 递增及服务重启后可读。临时资源已清理 |
+| 主控双库检查点、全量检查和竞态测试 | 通过（`405771d`，2026-11-18） | `ro:/root/mcui`，Debian 13.7 amd64。全量 `scripts/check-static.sh` 与 `go test -race -count=1 ./internal/master ./internal/store ./internal/taskdispatch ./internal/checkpoint ./internal/checkpointstore ./internal/checkpointjournal ./internal/checkpointhttp` 通过。集成测试覆盖签发、租约、协调旧备份、远端提交响应丢失和未匹配 intent |
+| 主控与检查点进程恢复演练 | 通过（`405771d`） | `ro` 上用实际二进制、临时 SQLite 文件和测试证书，通过 mTLS 验证主控提交推动外部 revision。同一 journal 拒绝第二个主控进程，检查点离线时数据 API 返回 503，恢复连接后重新可用。当前两库可重启，旧两库搭配当前及旧 journal 均被拒，独立端 revision 保持。测试进程和文件已清理 |
 
 ## 阶段退出门槛
 

@@ -54,7 +54,8 @@
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
-| 独立检查点服务 | 通过，提交 `1ba38ce`（2026-11-18） | `ro:/root/mcui` 完整 `scripts/check-static.sh`、检查点竞态测试及临时 systemd 服务冒烟通过。验证 mTLS 拒绝未登记客户端、旧 journal 拒绝、CAS 幂等和重启后 revision 持久化。主控双库恢复验收仍待接入。[阶段 2 验证记录](./phase-2-progress.md#验证状态) |
+| 主控双库回滚检测 | 通过，提交 `405771d`（2026-11-18） | `ro:/root/mcui` 全量检查、主控和检查点竞态测试、真实主控与检查点进程的 mTLS 恢复演练通过。旧两库和旧 journal 一并恢复时拒绝启动，外部 revision 保持。独立主机上的生产恢复仍待验收。[阶段 2 验证记录](./phase-2-progress.md#验证状态) |
+| 独立检查点服务 | 通过，提交 `1ba38ce`（2026-11-18） | `ro:/root/mcui` 完整 `scripts/check-static.sh`、检查点竞态测试及临时 systemd 服务冒烟通过。验证 mTLS 拒绝未登记客户端、旧 journal 拒绝、CAS 幂等和重启后 revision 持久化。[阶段 2 验证记录](./phase-2-progress.md#验证状态) |
 | Agent/Helper 发布包、TUF 轮换与竞态检测 | 通过，提交 `6ea294b`（2026-11-18） | `ro:/root/mcui` 完整 `scripts/check-static.sh`、`go test -race -count=1 ./cmd/mcui-tuf ./internal/artifacttrust ./internal/xrayruntime` 和 `scripts/build-runtime-release.sh` 通过。测试验证新旧 root 阈值、更新角色签署、两架构 ZIP 成员、ELF 机器类型及 SHA-256；arm64 仅构建和检查制品 |
 | TUF 发布工具与完整仓库检查 | 通过，提交 `acff3db`（2026-11-18） | `ssh ro` 的 `/root/mcui`。测试覆盖 Core 签名不足、首版组装、撤销和版本复用拒绝。全量 Go vet/build/test、amd64/arm64 交叉构建、Web 生产构建通过 |
 | 真实 Xray amd64 本地生命周期与故障注入 | 通过，提交 `acff3db`（2026-11-18） | `ro` 的 Debian 13.7、systemd `257.13-1~deb13u1`，临时 unit、临时 TLS metadata 和测试签名。官方 `v26.10.31` 和 `v26.11.9` ZIP 经 GitHub API 与附带 `.dgst` 校验，实际运行于隔离低权限服务。验证未批准目标、截断下载、安装、升级、显式降级、启停、卸载、撤销、真实 tmpfs 写满和切指针后 `SIGKILL` 恢复。测试副本使用隔离路径、loopback metadata 与测试时钟，制品从固定官方 URL 下载。临时资源已清理。[v26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31) · [v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9) |
