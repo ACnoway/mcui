@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/checkpoint"
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/master"
 	"github.com/ACnoway/mcui/internal/security"
@@ -37,6 +38,7 @@ func main() {
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
 	taskSignerURL := flag.String("task-signer-url", "", "loopback URL of the isolated task signer")
 	taskSignerTokenPath := flag.String("task-signer-token-file", "", "shared token file for the isolated task signer")
+	checkpointConfig := registerTaskCheckpointFlags()
 	flag.Parse()
 	usingTLS := *tlsCertPath != "" || *tlsKeyPath != ""
 	if usingTLS && (*tlsCertPath == "" || *tlsKeyPath == "") {
@@ -61,8 +63,27 @@ func main() {
 		}
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{serverCert}}
 	}
-	_ = os.MkdirAll(filepath.Dir(*dbPath), 0700)
-	s, err := store.Open(*dbPath)
+	var machine *checkpoint.Machine
+	var s *store.Store
+	var err error
+	if checkpointConfig.enabled() {
+		if *taskDBPath == "" || !usingTLS {
+			log.Fatal("task checkpoint requires -task-db and Master HTTPS")
+		}
+		if err = checkpointConfig.validate(); err != nil {
+			log.Fatal(err)
+		}
+		var closeCheckpoint func()
+		machine, closeCheckpoint, err = checkpointConfig.open()
+		if err != nil {
+			log.Fatalf("open task checkpoint: %v", err)
+		}
+		defer closeCheckpoint()
+		s, err = store.OpenExisting(*dbPath)
+	} else {
+		_ = os.MkdirAll(filepath.Dir(*dbPath), 0700)
+		s, err = store.Open(*dbPath)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -108,13 +129,13 @@ func main() {
 		if err = os.MkdirAll(filepath.Dir(*taskDBPath), 0700); err != nil {
 			log.Fatalf("create task database directory: %v", err)
 		}
-		tasks, err := openTaskStore(*taskDBPath)
+		tasks, err := openTaskStore(*taskDBPath, machine == nil)
 		if err != nil {
 			log.Fatalf("open task database: %v", err)
 		}
 		defer tasks.Close()
 		trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
-		if err = srv.ConfigureTaskRuntime(master.TaskRuntime{Store: tasks, Signer: signer, KeyID: *taskKeyID, PublicKey: publicKey, TrustedNow: trustedClock.Now}); err != nil {
+		if err = srv.ConfigureTaskRuntime(master.TaskRuntime{Store: tasks, Signer: signer, KeyID: *taskKeyID, PublicKey: publicKey, TrustedNow: trustedClock.Now, Checkpoint: machine}); err != nil {
 			log.Fatalf("configure task runtime: %v", err)
 		}
 		if err = srv.ReconcileTaskRuntime(); err != nil {
@@ -143,7 +164,10 @@ func syncCoreBackups(backups *corecatalog.BackupStore) {
 	}
 }
 
-func openTaskStore(path string) (*taskdispatch.Store, error) {
+func openTaskStore(path string, initializeMissing bool) (*taskdispatch.Store, error) {
+	if !initializeMissing {
+		return taskdispatch.Open(path)
+	}
 	if _, err := os.Stat(path); err == nil {
 		return taskdispatch.Open(path)
 	} else if !os.IsNotExist(err) {

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/checkpoint"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
@@ -35,6 +36,7 @@ type TaskRuntime struct {
 	PublicKey  ed25519.PublicKey
 	Now        func() time.Time
 	TrustedNow func() (time.Time, error)
+	Checkpoint *checkpoint.Machine
 }
 
 func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
@@ -43,7 +45,16 @@ func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
 	}
 	copy := runtime
 	copy.PublicKey = append(ed25519.PublicKey(nil), runtime.PublicKey...)
+	if runtime.Checkpoint != nil && (runtime.Checkpoint.Journal == nil || runtime.Checkpoint.Authority == nil) {
+		return errors.New("incomplete task checkpoint configuration")
+	}
+	if s.taskCheckpoint != nil && runtime.Checkpoint == nil {
+		return errors.New("cannot remove the configured task checkpoint")
+	}
 	s.taskRuntime = &copy
+	if runtime.Checkpoint != nil {
+		s.taskCheckpoint = &taskCheckpoint{machine: *runtime.Checkpoint}
+	}
 	return nil
 }
 

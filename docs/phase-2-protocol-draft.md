@@ -14,7 +14,7 @@
 
 `VerifyV2Task` 仅检查草案结构和调用方传入的公钥对应的签名。它不选择或验证受信密钥及用途，不检查本机身份、当前可信时间、序号、审批、撤销、对端凭据或持久化重放账本，也不执行任何动作。签名正确不等于具有执行授权。
 
-现有角色文档对高危任务发起人的要求仍见[权限基线](./panel-authz.md)与本文件第 5.2 节。**本阶段已决定：只读 `core.status` 查询不单独审批**；Master 实现逐请求验证 `security_admin`/`operator` 身份、节点对象范围及只读操作权限并写授权审计。此决定不适用于后续高危任务。Master、Agent 和 Helper 已通过 chrony 检查 `time.cloudflare.com` 的 NTS 认证、样本新鲜度和 tracking 误差；部署前必须按[操作说明](./phase-2-operations.md)配置 chrony。独立密钥生产保管流程、两库同时回滚检测和跨数据库原子事务仍未落实。
+现有角色文档对高危任务发起人的要求仍见[权限基线](./panel-authz.md)与本文件第 5.2 节。**本阶段已决定：只读 `core.status` 查询不单独审批**；Master 实现逐请求验证 `security_admin`/`operator` 身份、节点对象范围及只读操作权限并写授权审计。此决定不适用于后续高危任务。Master、Agent 和 Helper 已通过 chrony 检查 `time.cloudflare.com` 的 NTS 认证、样本新鲜度和 tracking 误差；部署前必须按[操作说明](./phase-2-operations.md)配置 chrony。主控可配置独立检查点检测两库同时回滚；生产密钥保管、完整灾难恢复和跨数据库原子事务仍待落实。
 
 ## 验证与待办
 

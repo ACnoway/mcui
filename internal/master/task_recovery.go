@@ -1,6 +1,7 @@
 package master
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,15 @@ var ErrTaskAuditReconciliation = errors.New("task and audit databases require re
 // authorization exists but whose post-issue audit was interrupted gets a
 // recovery audit entry.
 func (s *Server) ReconcileTaskRuntime() error {
+	if s != nil && s.taskCheckpoint != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), taskCheckpointTimeout)
+		defer cancel()
+		return s.runWithTaskCheckpoint(ctx, s.reconcileTaskRuntime)
+	}
+	return s.reconcileTaskRuntime()
+}
+
+func (s *Server) reconcileTaskRuntime() error {
 	if s == nil || s.store == nil || s.taskRuntime == nil || s.taskRuntime.Store == nil {
 		return ErrTaskAuditReconciliation
 	}

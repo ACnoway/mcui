@@ -20,16 +20,18 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("usage: mcui-checkpointd <init|serve> [flags]")
+		log.Fatal("usage: mcui-checkpointd <init|init-master-journal|serve> [flags]")
 	}
 	var err error
 	switch os.Args[1] {
 	case "init":
 		err = initialize(os.Args[2:])
+	case "init-master-journal":
+		err = initializeMasterJournal(os.Args[2:])
 	case "serve":
 		err = serve(os.Args[2:])
 	default:
-		err = errors.New("expected init or serve")
+		err = errors.New("expected init, init-master-journal or serve")
 	}
 	if err != nil {
 		log.Fatal(err)

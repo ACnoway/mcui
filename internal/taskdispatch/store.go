@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/protocol"
@@ -164,7 +165,11 @@ func connect(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	uriPath := filepath.ToSlash(abs)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	u := url.URL{Scheme: "file", Path: uriPath}
 	q := u.Query()
 	q.Set("mode", "rw")
 	q.Add("_pragma", "busy_timeout(10000)")

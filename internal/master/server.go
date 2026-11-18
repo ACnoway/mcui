@@ -45,6 +45,7 @@ type Server struct {
 	installer      *agentInstaller
 	nodeAccess     sync.RWMutex
 	taskRuntime    *TaskRuntime
+	taskCheckpoint *taskCheckpoint
 	coreCatalog    corecatalog.Source
 	coreBackups    corecatalog.BackupSnapshotter
 	mux            *http.ServeMux
@@ -76,32 +77,32 @@ type NodeView struct {
 func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x := &Server{store: s, bootstrapToken: bootstrapToken, coreCatalog: corecatalog.NewClient(), mux: http.NewServeMux(), attempts: map[string]attempt{}}
 	x.mux.HandleFunc("GET /healthz", x.health)
-	x.mux.HandleFunc("POST /api/v1/bootstrap", x.bootstrap)
-	x.mux.HandleFunc("POST /api/v1/admin/login", x.login)
-	x.mux.HandleFunc("POST /api/v1/admin/logout", x.logout)
-	x.mux.HandleFunc("GET /api/v1/admin/me", x.me)
-	x.mux.HandleFunc("GET /api/v1/admin/admins", x.admins)
-	x.mux.HandleFunc("POST /api/v1/admin/admins", x.createAdmin)
-	x.mux.HandleFunc("POST /api/v1/admin/admins/disable", x.disableAdmin)
-	x.mux.HandleFunc("POST /api/v1/admin/nodes", x.createNode)
-	x.mux.HandleFunc("POST /api/v1/admin/nodes/{id}/install-command", x.createInstallCommand)
-	x.mux.HandleFunc("GET /api/v1/admin/nodes", x.nodes)
-	x.mux.HandleFunc("GET /api/v1/admin/nodes/{id}", x.nodeDetail)
-	x.mux.HandleFunc("GET /api/v1/admin/audit", x.audit)
-	x.mux.HandleFunc("POST /api/v1/admin/tasks", x.createStatusTask)
-	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/cancel", x.cancelStatusTask)
-	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/skip", x.skipExpiredStatusTask)
-	x.mux.HandleFunc("POST /api/v1/admin/tasks/{id}/void", x.voidUnissuedStatusTask)
-	x.mux.HandleFunc("GET /api/v1/admin/tasks", x.listTasks)
-	x.mux.HandleFunc("GET /api/v1/admin/tasks/{id}", x.taskDetail)
-	x.mux.HandleFunc("GET /api/v1/admin/cores/releases", x.coreReleases)
-	x.mux.HandleFunc("GET /api/v1/admin/cores/backups", x.coreBackupsSnapshot)
-	x.mux.HandleFunc("POST /api/v1/admin/nodes/disable", x.disableNode)
-	x.mux.HandleFunc("POST /api/v1/agent/enroll", x.enroll)
-	x.mux.HandleFunc("POST /api/v1/agent/heartbeat", x.heartbeat)
-	x.mux.HandleFunc("GET /api/v1/agent/tasks/next", x.nextTask)
-	x.mux.HandleFunc("POST /api/v1/agent/tasks/ack", x.acknowledgeTask)
-	x.mux.HandleFunc("POST /api/v1/helper/tasks/authorize", x.authorizeHelperTask)
+	x.handleAPI("POST /api/v1/bootstrap", x.bootstrap)
+	x.handleAPI("POST /api/v1/admin/login", x.login)
+	x.handleAPI("POST /api/v1/admin/logout", x.logout)
+	x.handleAPI("GET /api/v1/admin/me", x.me)
+	x.handleAPI("GET /api/v1/admin/admins", x.admins)
+	x.handleAPI("POST /api/v1/admin/admins", x.createAdmin)
+	x.handleAPI("POST /api/v1/admin/admins/disable", x.disableAdmin)
+	x.handleAPI("POST /api/v1/admin/nodes", x.createNode)
+	x.handleAPI("POST /api/v1/admin/nodes/{id}/install-command", x.createInstallCommand)
+	x.handleAPI("GET /api/v1/admin/nodes", x.nodes)
+	x.handleAPI("GET /api/v1/admin/nodes/{id}", x.nodeDetail)
+	x.handleAPI("GET /api/v1/admin/audit", x.audit)
+	x.handleAPI("POST /api/v1/admin/tasks", x.createStatusTask)
+	x.handleAPI("POST /api/v1/admin/tasks/{id}/cancel", x.cancelStatusTask)
+	x.handleAPI("POST /api/v1/admin/tasks/{id}/skip", x.skipExpiredStatusTask)
+	x.handleAPI("POST /api/v1/admin/tasks/{id}/void", x.voidUnissuedStatusTask)
+	x.handleAPI("GET /api/v1/admin/tasks", x.listTasks)
+	x.handleAPI("GET /api/v1/admin/tasks/{id}", x.taskDetail)
+	x.handleAPI("GET /api/v1/admin/cores/releases", x.coreReleases)
+	x.handleAPI("GET /api/v1/admin/cores/backups", x.coreBackupsSnapshot)
+	x.handleAPI("POST /api/v1/admin/nodes/disable", x.disableNode)
+	x.handleAPI("POST /api/v1/agent/enroll", x.enroll)
+	x.handleAPI("POST /api/v1/agent/heartbeat", x.heartbeat)
+	x.handleAPI("GET /api/v1/agent/tasks/next", x.nextTask)
+	x.handleAPI("POST /api/v1/agent/tasks/ack", x.acknowledgeTask)
+	x.handleAPI("POST /api/v1/helper/tasks/authorize", x.authorizeHelperTask)
 	if webDir != "" {
 		x.mux.Handle("/", x.staticHandler(webDir))
 	}

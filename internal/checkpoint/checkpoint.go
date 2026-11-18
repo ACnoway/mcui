@@ -1,5 +1,5 @@
-// Package checkpoint is an experimental, transport-neutral transition model.
-// It is not wired to the task runtime and supplies neither storage nor authentication.
+// Package checkpoint implements a transport-neutral transition model.
+// Callers supply durable storage and authenticated transport.
 // Security depends on independently protected, authenticated, linearizable
 // authority and crash-durable, integrity-protected journal implementations.
 // The journal and transition requests must be authorized:

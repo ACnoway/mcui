@@ -1,19 +1,45 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 var ErrNotFound = errors.New("record not found")
 
 const schemaVersion = 2
+
+const driverName = "mcui-master-sqlite"
+
+func init() {
+	driver := &sqlite.Driver{}
+	driver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
+		for _, query := range []string{
+			"PRAGMA busy_timeout=5000",
+			"PRAGMA journal_mode=WAL",
+			"PRAGMA synchronous=FULL",
+			"PRAGMA foreign_keys=ON",
+		} {
+			if _, err := conn.ExecContext(context.Background(), query, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	sql.Register(driverName, driver)
+}
 
 type State struct {
 	Admins map[string]Admin `json:"admins"`
@@ -81,22 +107,38 @@ type executor interface {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open(driverName, path)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	for _, query := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.Exec(query); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	}
 	if err := migrate(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// OpenExisting opens a regular database without creating a replacement for a
+// missing file. A checkpoint-enabled Master requires an explicitly enrolled DB.
+func OpenExisting(path string) (*Store, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("panel database must be a regular file")
+	}
+	uriPath := filepath.ToSlash(abs)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=rw"}
+	return Open(uri.String())
 }
 
 func migrate(db *sql.DB) error {
@@ -318,14 +360,24 @@ func sortedKeys[T any](items map[string]T) []string {
 	return keys
 }
 
-func (s *Store) Update(fn func(*State) error) error {
+func (s *Store) Update(fn func(*State) error) (result error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.Begin()
+	conn, err := s.db.Conn(context.Background())
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			result = errors.Join(result, fmt.Errorf("roll back panel transaction: %w", err))
+		}
+	}()
 	state, err := loadState(tx)
 	if err != nil {
 		return err
@@ -336,7 +388,13 @@ func (s *Store) Update(fn func(*State) error) error {
 	if err := persistState(tx, state); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		// A failed SQLite COMMIT can leave its transaction open. Never let a
+		// checkpoint hash uncommitted state from that same connection.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return err
+	}
+	return nil
 }
 
 func (s *Store) View(fn func(State) error) error {

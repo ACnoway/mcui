@@ -138,19 +138,39 @@ systemctl restart mcui-panel.service mcui-agent.service
 - Agent 收到过期消息时只持久化并回报 `EXPIRED`，不调用 Helper。节点离线期间，未完成序号会继续阻塞该节点后续任务；节点重新上线处理过期任务后才可继续。
 - 面板可取消未过期且未开始的状态查询；若任务已经开始或状态未决，Agent 账本会拒绝取消并回报现有状态/对账要求。过期状态任务可通过签名 `EXPIRED` skip 确认终态，Agent 仍先将原始任务写为过期，不调用 Helper。面板上的控制状态可刷新查看。
 - Agent 账本重启时发现执行中状态会进入 `NEEDS_RECONCILIATION`；Helper 存在未决记录、Master 无法确认前序序号终态或本地账本不匹配时不继续。Master 只自动补取可证明的、已过期终态历史槽，或投递已签名 `VOID_UNISSUED` 空槽；未知、活动、未过期或运行中缺口继续隔离。过期历史只补齐 Agent 序号，不恢复原任务结果。Master 启动时会对账任务与审计库，并修复已持久化签发/关闭但因崩溃缺失的后置审计。
-- 不要删除 SQLite 文件、编辑任务序号、复用请求 ID、删除 Helper ledger 或改写 `NEEDS_RECONCILIATION`。跨库事务和识别两库同时回滚的独立检查点尚未实现；备份恢复仍需隔离并带外核验。NTS 配置失效时不得临时切换到普通 NTP。
+- 保留原始 SQLite 文件及诊断日志，使用向前一致的备份恢复。配置独立检查点的主控会拒绝与最新检查点不一致的数据库；见下方的恢复步骤。NTS 配置失效时按 1.1 节修复认证时间源。
 
 ## 7. 当前限制
 
-当前实现只适用于只读状态查询、pending cancel、expired skip、过期终态补取和 `VOID_UNISSUED` 空槽关闭。通用 `CANCELED` skip、跨数据库原子恢复、两库同时回滚检测、硬件可信时间根、密钥轮换仪式和 Debian amd64 的 systemd 故障演练仍未完成。旧 Master 任务库启动时会在严格校验后增建控制表；升级前仍应保留受保护备份。
+任务运行时目前支持只读状态查询、pending cancel、expired skip、过期终态补取和 `VOID_UNISSUED` 空槽关闭。通用 `CANCELED` skip、跨数据库原子恢复、硬件可信时间根、密钥轮换仪式和 Agent/Helper 故障演练仍待完成。独立检查点须显式配置，受保护模式只支持单 Linux 主控进程，数据 API 串行核对两库逻辑摘要。旧 Master 任务库启动时会在严格校验后增建控制表；升级前保留受保护备份。
 
-独立检查点已有测试部署入口 `mcui-checkpointd`，主控任务和审计库的提交仍未接入。正式恢复继续执行上一节的冻结与人工核验。
+## 8. 部署独立检查点
 
-## 8. 部署隔离的检查点验证实例
-
-`mcui-checkpointd` 为一个检查点身份和 epoch 持久化最新 revision 与 SHA-256，提供读取和比较后更新两个接口。服务使用 TLS 1.3 验证客户端签发链，并核对其公钥 SPKI 的 SHA-256 指纹。客户端用指定 CA 验证服务端证书和主机名，每次请求绑定新的随机挑战。客户端凭据供未来的主控对接使用。
+`mcui-checkpointd` 为一个检查点身份和 epoch 持久化最新 revision 与 SHA-256，提供读取和比较后更新两个接口。服务使用 TLS 1.3 验证客户端签发链，并核对其公钥 SPKI 的 SHA-256 指纹。主控用指定 CA 验证服务端证书和主机名，每次请求绑定新的随机挑战。
 
 1. 在验证环境构建 `go build -trimpath -o mcui-checkpointd ./cmd/mcui-checkpointd`。将二进制和 `deploy/systemd/mcui-checkpointd.service` 安装到独立检查点主机，创建专用系统账号和组 `mcui-checkpoint`。
 2. 在 `/etc/mcui-checkpoint` 部署服务端证书链 `server-chain.pem`、私钥 `server-key.pem`、客户端专用 CA `client-ca.pem`。目录由 root 管理，服务账号只读；私钥使用 `root:mcui-checkpoint 0640`。在 `checkpoint.env` 写入 `MCUI_CHECKPOINT_LISTEN`（管理网络的监听地址和端口）及 `MCUI_CHECKPOINT_CLIENT_KEY_SHA256`（已批准客户端 SPKI 的 64 位十六进制 SHA-256）。将服务端 CA 通过独立渠道交给客户端。
-3. 首次引导时创建 `mcui-checkpoint:mcui-checkpoint 0700` 的 `/var/lib/mcui-checkpoint`。从测试 journal 引导记录取得身份、epoch 与初始摘要，再以服务账号执行 `mcui-checkpointd init -db /var/lib/mcui-checkpoint/authority.db -node "$IDENTITY" -epoch "$EPOCH" -sha256 "$DIGEST"`。初始化只创建新库。执行 `systemctl daemon-reload` 和 `systemctl start mcui-checkpointd.service`，检查日志和 mTLS 访问。
-4. Authority 数据必须置于主控及其备份回滚域之外，由独立账号与主机管理。库缺失或损坏时保持签发冻结，由独立保管方核对证据。部署测试实例后仍需接通主控持久化边界和进行真实备份恢复演练。
+3. 在首次启用检查点前，核验主控任务库、面板库及撤销状态的新鲜度，停止主控并备份两库。由主控服务账号在私有目录生成新 journal，记下命令输出的初始摘要。
+
+   ```sh
+   mcui-checkpointd init-master-journal -db /var/lib/mcui/mcui.db \
+     -task-db /var/lib/mcui/tasks.db -journal /var/lib/mcui/task-checkpoint.db \
+     -node "$IDENTITY" -epoch "$EPOCH"
+   ```
+
+4. 通过独立渠道将身份、epoch 和初始摘要交给检查点保管人。首次引导时创建 `mcui-checkpoint:mcui-checkpoint 0700` 的 `/var/lib/mcui-checkpoint`，以服务账号执行 `mcui-checkpointd init -db /var/lib/mcui-checkpoint/authority.db -node "$IDENTITY" -epoch "$EPOCH" -sha256 "$DIGEST"`。执行 `systemctl daemon-reload` 和 `systemctl start mcui-checkpointd.service`。该数据库由独立账号和主机管理，须置于主控的备份回滚域之外。两个初始化命令都只创建新文件。
+5. 在 `/etc/mcui/panel-task-runtime.env` 添加以下配置。主控客户端私钥由 `mcui` 账号以 `0600` 读取，服务端 CA 和客户端证书使用已核验的 PEM 文件。启用后保持这组配置与两库和 journal 一同纳入部署审计。
+
+   ```dotenv
+   MCUI_TASK_CHECKPOINT_URL=https://checkpoint.example.net:9232
+   MCUI_TASK_CHECKPOINT_JOURNAL=/var/lib/mcui/task-checkpoint.db
+   MCUI_TASK_CHECKPOINT_CA=/etc/mcui/checkpoint-server-ca.pem
+   MCUI_TASK_CHECKPOINT_CLIENT_CERT=/etc/mcui/checkpoint-client.pem
+   MCUI_TASK_CHECKPOINT_CLIENT_KEY=/etc/mcui/checkpoint-client-key.pem
+   ```
+
+6. 启动主控并确认任务查询和节点心跳可用。每个数据 API 在处理前核对面板库和任务库的逻辑摘要及远端 revision。摘要包含任务、租约、控制、ACK、账号、凭据、会话和审计，排除节点心跳更新时间。变更提交后先写入本地 intent 并更新独立检查点，再回传任务、租约、凭据或成功结果。运行时校验失败返回 `503`。配置错误或启动对账失败时主控拒绝启动。
+
+### 协调备份和恢复
+
+停主控后将两库与本地 journal 一起做受保护快照。启动时同时核对真实数据库摘要、本地 journal 和独立端；同一时点的旧两库即使能互相对账，仍会因摘要或 revision 落后被拒绝。保留的 intent 只有在真实摘要匹配其目标记录、独立端处于原 revision 或目标 revision 时才自动完成。若进程在数据库提交后、intent 落盘前中断，可能需要带外人工对账。保留原文件并冻结 API，由保管方核对最新独立端记录与候选恢复数据。现有 `/healthz` 检查的是进程存活，验证任务可用性需观察已认证的数据 API 和主控日志。

@@ -28,7 +28,17 @@ type taskTestClient struct {
 
 func newTaskTestClient(t *testing.T) taskTestClient {
 	t.Helper()
-	s, st := testServer(t)
+	return newTaskTestClientAt(t, t.TempDir())
+}
+
+func newTaskTestClientAt(t *testing.T, dir string) taskTestClient {
+	t.Helper()
+	st, err := store.Open(filepath.Join(dir, "mcui.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := New(st, "test-bootstrap-token", "")
 	nodeID, err := security.NewNodeID()
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +63,7 @@ func newTaskTestClient(t *testing.T) taskTestClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tasks, err := taskdispatch.Init(filepath.Join(t.TempDir(), "tasks.db"))
+	tasks, err := taskdispatch.Init(filepath.Join(dir, "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
