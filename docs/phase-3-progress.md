@@ -44,6 +44,8 @@
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
+| `bash scripts/check-static.sh` | 通过，提交 `1b7ca21`（2026-11-18），退出码 0 | `ssh ro`，`/root/mcui`，Debian 13 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包括新增 TUF/corecatalog 测试、Go 全量 vet/build/test、amd64/arm64 交叉构建、V1/V2 向量、冻结 Web 安装及 Vue 类型/生产构建 |
+| TUF 客户端与 Core 固定源定向测试 | 通过，提交 `1b7ca21` | `go test ./internal/artifacttrust ./internal/corecatalog`；目标绑定、缓存/跳转/IP 拒绝正反例通过 |
 | `bash scripts/check-static.sh` | 通过，提交 `5db70ad` | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0 |
 | Go 格式、vet、构建与全量测试 | 通过，提交 `5db70ad` | 包含备用缓存摘要/长度/跳转/更新失败测试、Master 备份 API 认证测试及全量现有测试 |
 | Linux amd64/arm64 构建 | 通过，提交 `5db70ad` | 交叉构建；没有 arm64 实机或干净 VM 证据 |

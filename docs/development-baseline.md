@@ -24,6 +24,10 @@
 
 在本分支提交 `9283224` 上，使用 Go `1.27.4`、Node `26.13.1`、npm `11.20.0`、pnpm `12.17.0` 再次运行完整脚本，所有检查通过。Linux 主机为 `6.12.107+deb13-cloud-amd64`，systemd `257.13-1~deb13u1`；Go 双架构结果是交叉构建。另以临时 alternate root 和实际编译出的程序运行 `systemd-analyze verify`，两个 unit 通过。该检查没有部署/启动服务，也不替代 Debian 干净 VM、arm64 实机、灾备演练或项目内安全检查。
 
+### 阶段 3 TUF 客户端验证（2026-11-18）
+
+在 `ssh ro` 的 `/root/mcui` 提交 `1b7ca21` 上，远端为 Debian 13 amd64，Go `1.27.4`。原环境缺少 Node/pnpm；按用户授权将 Node.js `26.13.1` 安装到 `/opt/node-v26.13.1-linux-x64`，先用 Node 官方 `SHASUMS256.txt` 校验 tarball，再安装 pnpm `12.17.0` 到 `/opt/mcui-pnpm`。随后 `bash scripts/check-static.sh` 退出码 0，Go 全量 vet/build/test、Linux amd64/arm64 交叉构建、V1/V2 协议向量、冻结 pnpm 安装、Vue 类型检查和 Vite 生产构建均通过；该提交的 TUF/corecatalog 定向测试也通过。此次仅为自动化检查，不包含真实 TUF 发布仓库/密钥轮换互操作、arm64 实机、归档解包、节点安装、systemd 生命周期故障恢复或项目内安全验收。
+
 ## 2. 依赖及工具链锁定规则
 
 - 工具链基线更新为 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0`（按 2026-11-16 官方最新补丁锁定）。Go 1.27.4 的发布记录包含 TLS/HTTP 等安全修复；Go 项目仅支持最近两个主要版本，故 1.24 已不适合作为当前基线。Node 26.13.1 是 LTS 安全更新；pnpm 12.16.0 修复了 zstd 处理与签名相关安全问题，基线锁到后续的 12.17.0。参见 [Go Release History](https://go.dev/doc/devel/release)、[Node.js 26.13.1](https://nodejs.org/en/blog/release/v26.13.1)、[pnpm 12.16.0 security fixes](https://pnpm.io/blog/releases/12.16.0) 和 [pnpm 12.17.0](https://pnpm.io/blog/releases/12.17.0)。`scripts/check-static.sh` 强制精确值，`.nvmrc` 与 `web/package.json` 记录 Node/pnpm 版本。维护者仍须设定更新负责人和生命周期更新节奏，不能因版本固定而长期停更。
