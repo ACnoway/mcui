@@ -17,7 +17,7 @@
 - 独立检查点已有 `mcui-checkpointd` 测试部署入口。服务通过 TLS 1.3 双向认证，核对客户端公钥指纹，再由 SQLite 执行 revision 比较和递增。主控两库的提交和启动恢复仍待接入，检查点的存储与运维也需独立于主控恢复域。[检查点验证实例](./phase-2-operations.md#8-部署隔离的检查点验证实例)
 - 序号恢复仅覆盖可证明的过期终态历史和已持久化 `VOID_UNISSUED` 槽。活动任务、未过期历史任务、运行中/结果未决任务和无法证明的缺口继续隔离；不支持通用 `CANCELED` skip，也不从备份自动恢复 Agent/Helper 的任务结果。
 - 可信时间运行时依赖部署主机的 chrony 已配置 NTS 且只读监控命令可从 loopback 使用。源不可用、NTS 认证失效、样本过旧或偏差过大时，任务创建、轮询、执行和 ACK 会失败关闭。它不等于独立硬件时间根或防止同时篡改本地 chrony/系统状态的安全审计。
-- 自动化构建不能证明真实节点上的 peer credentials、root Helper 沙箱、目标 Core 状态读取、断电恢复或安全边界。用户要求的实机演练和安全审核本次未进行。
+- 真实节点上的 peer credentials、root Helper 沙箱、目标 Core 状态读取、断电恢复和项目安全审核仍待整体验收。
 
 ## 验证状态
 
@@ -25,10 +25,10 @@
 |---|---|---|
 | Go 格式检查 | 通过 | 本地改动运行 `gofmt`；远端脚本检查全部 `cmd/`、`internal/` Go 文件 |
 | `git diff --check` | 通过 | 每次提交前检查 |
-| 本地 Go 构建/测试 | 未运行 | 本机 Go wrapper 无法下载仓库指定工具链；依用户要求使用远程环境 |
-| `scripts/check-static.sh` 远程构建与测试 | 通过（`be46e50`） | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。包含 `go vet`、全量 Go 测试、Linux amd64/arm64 构建、V1/V2 向量、冻结依赖安装、前端类型检查和生产构建 |
-| systemd unit 语法检查 | 未单独重跑 | 本次提交没有修改 unit 或 drop-in 文件 |
-| Linux 实机演练/安全审核 | 未进行 | 按本次范围明确排除 |
+| 本地静态检查 | 通过（`1ba38ce`） | 临时工具链环境通过 Linux Go vet、amd64/arm64 交叉构建、协议向量、检查点状态机测试和 Web 类型/生产构建。Windows 上 pnpm 冻结安装进程发生栈溢出，Web 构建使用已有依赖 |
+| `scripts/check-static.sh` 远程构建与测试 | 通过（`1ba38ce`，2026-11-18） | `ro:/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。Go vet、全量 Go 测试、Linux 双架构构建、协议向量、冻结安装和 Web 构建通过 |
+| 检查点竞态与恢复测试 | 通过（`1ba38ce`） | `go test -race -count=1 ./internal/checkpoint ./internal/checkpointstore ./internal/checkpointjournal ./internal/checkpointhttp`；覆盖旧 journal 拒绝、CAS 幂等、认证和挑战不匹配 |
+| 检查点 systemd 冒烟 | 通过（`1ba38ce`） | `ro` 的 systemd 257.13 环境，使用临时 unit、隔离账号、loopback 和测试证书。验证重复初始化被拒、无证书和未登记公钥被拒、revision 递增及服务重启后可读。临时资源已清理 |
 
 ## 阶段退出门槛
 
