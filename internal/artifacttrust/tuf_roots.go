@@ -2,6 +2,7 @@ package artifacttrust
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -20,16 +21,34 @@ import (
 )
 
 type rootRecordingFetcher struct {
+	ctx      context.Context
 	delegate fetcher.Fetcher
 	mu       sync.Mutex
 	roots    map[int64][]byte
 }
 
-func newRootRecordingFetcher(delegate fetcher.Fetcher) *rootRecordingFetcher {
-	return &rootRecordingFetcher{delegate: delegate, roots: make(map[int64][]byte)}
+func newRootRecordingFetcher(ctx context.Context, delegate fetcher.Fetcher) *rootRecordingFetcher {
+	return &rootRecordingFetcher{ctx: ctx, delegate: delegate, roots: make(map[int64][]byte)}
 }
 
 func (f *rootRecordingFetcher) DownloadFile(urlPath string, maxLength int64, timeout time.Duration) ([]byte, error) {
+	if err := f.ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Snapshot and delegated targets can carry caller-provided length limits
+	// from signed metadata. Preserve a hard ceiling even for those requests.
+	if maxLength <= 0 || maxLength > 5<<20 {
+		return nil, errors.New("TUF metadata request exceeds the size limit")
+	}
+	if deadline, ok := f.ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+		if timeout == 0 || remaining < timeout {
+			timeout = remaining
+		}
+	}
 	data, err := f.delegate.DownloadFile(urlPath, maxLength, timeout)
 	if err != nil {
 		return data, err
@@ -125,14 +144,16 @@ func (c *Client) latestTrustedRoot() ([]byte, error) {
 	return latest, nil
 }
 
-func (c *Client) persistVerifiedRootChain(baseRoot []byte, candidates map[int64][]byte) error {
+func (c *Client) persistVerifiedRootChain(baseRoot []byte, candidates map[int64][]byte, acceptedVersion int64) error {
 	trusted, err := trustedmetadata.New(baseRoot)
 	if err != nil {
 		return err
 	}
 	versions := make([]int64, 0, len(candidates))
 	for version := range candidates {
-		versions = append(versions, version)
+		if version <= acceptedVersion {
+			versions = append(versions, version)
+		}
 	}
 	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
 	expected := trusted.Root.Signed.Version + 1
@@ -149,6 +170,9 @@ func (c *Client) persistVerifiedRootChain(baseRoot []byte, candidates map[int64]
 			return err
 		}
 		expected++
+	}
+	if expected-1 != acceptedVersion {
+		return errors.New("verified TUF root history did not reach the updater version")
 	}
 	rootPath := filepath.Join(c.metadataDir, metadata.ROOT+".json")
 	rootInfo, err := os.Lstat(rootPath)

@@ -184,6 +184,23 @@ func (c *Client) Download(ctx context.Context, target Target) (string, error) {
 	return c.downloadLocked(ctx, current)
 }
 
+// Revalidate checks that a staged artifact is still authorized before activation.
+func (c *Client) Revalidate(ctx context.Context, target Target) error {
+	if c == nil || ctx == nil || target.owner != c {
+		return ErrUntrustedTarget
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, err := c.lookupLocked(ctx, target.Core, target.Version)
+	if err != nil {
+		return err
+	}
+	if !sameTarget(target, current) {
+		return ErrChangedTarget
+	}
+	return c.checkTime()
+}
+
 func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target, error) {
 	if err := ctx.Err(); err != nil {
 		return Target{}, err
@@ -223,17 +240,21 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	if err = updaterConfig.SetDefaultFetcherRetry(250*time.Millisecond, 1); err != nil {
 		return Target{}, fmt.Errorf("%w: configure TUF retry policy", ErrUnavailable)
 	}
-	recorder := newRootRecordingFetcher(updaterConfig.Fetcher)
+	recorder := newRootRecordingFetcher(ctx, updaterConfig.Fetcher)
 	updaterConfig.Fetcher = recorder
 	tufClient, err := updater.New(updaterConfig)
 	if err != nil {
 		return Target{}, fmt.Errorf("%w: load trusted TUF root", ErrUntrustedTarget)
 	}
-	if err = tufClient.Refresh(); err != nil {
-		return Target{}, fmt.Errorf("%w: refresh trusted TUF metadata", ErrUntrustedTarget)
-	}
-	if err = c.persistVerifiedRootChain(trustedRoot, recorder.snapshot()); err != nil {
+	refreshErr := tufClient.Refresh()
+	// A valid rotation must survive failure to fetch or verify a later role.
+	// The updater may have fetched a newer root without accepting its signature.
+	latestVersion := tufClient.GetTrustedMetadataSet().Root.Signed.Version
+	if err = c.persistVerifiedRootChain(trustedRoot, recorder.snapshot(), latestVersion); err != nil {
 		return Target{}, fmt.Errorf("%w: persist verified TUF root history", ErrUntrustedTarget)
+	}
+	if refreshErr != nil {
+		return Target{}, fmt.Errorf("%w: refresh trusted TUF metadata", ErrUntrustedTarget)
 	}
 	if err = ctx.Err(); err != nil {
 		return Target{}, err
@@ -241,6 +262,9 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	files, err := tufClient.GetTargetInfo(targetPath)
 	if err != nil || files == nil {
 		return Target{}, fmt.Errorf("%w: target missing or delegated metadata invalid", ErrUntrustedTarget)
+	}
+	if err = ctx.Err(); err != nil {
+		return Target{}, err
 	}
 	return c.targetFromMetadata(files, core, version, runtime.GOARCH, filename)
 }
