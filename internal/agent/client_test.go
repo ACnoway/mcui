@@ -20,7 +20,11 @@ import (
 
 func TestAgentMigratesIdentityAndAuthenticatesOverVerifiedHTTPS(t *testing.T) {
 	dir := t.TempDir()
-	statePath := filepath.Join(dir, "identity.json")
+	stateDir := filepath.Join(dir, "agent")
+	if err := os.Mkdir(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(stateDir, "identity.json")
 	t.Setenv("MCUI_AGENT_STATE", statePath)
 	st, err := store.Open(filepath.Join(dir, "panel.db"))
 	if err != nil {
@@ -94,7 +98,7 @@ func TestAgentMigratesIdentityAndAuthenticatesOverVerifiedHTTPS(t *testing.T) {
 }
 
 func TestEnrollmentDoesNotFollowRedirects(t *testing.T) {
-	t.Setenv("MCUI_AGENT_STATE", filepath.Join(t.TempDir(), "identity.json"))
+	t.Setenv("MCUI_AGENT_STATE", filepath.Join(t.TempDir(), "agent", "identity.json"))
 	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("enrollment redirected to another origin")
 	}))
