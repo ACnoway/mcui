@@ -17,7 +17,9 @@
 
 Master、Agent 和 Helper 的任务时限判断依赖本机 chrony。选用 Cloudflare 官方 NTS 服务 `time.cloudflare.com`；NTS 通过 TLS 建立密钥，并认证 NTP 时间包。应用只接受它被 chrony 选为当前来源且 `authdata` 证明 NTS 正在工作，不会因 NTS 失败改用未认证来源。
 
-安装并配置 chrony。修改 `/etc/chrony/chrony.conf`，确认没有其他未认证 `pool`/`server` 源参与时间选择，并保留本机 loopback command socket：
+安装并配置 chrony。下方 UDP 监控配置要求 chronyd 支持 `opencommands`。Debian 13.7 的 chrony 4.6.1 会拒绝该指令，且默认 UDP 端口拒绝 `authdata`。这种部署下，面板和节点任务服务仍须提供受控的只读认证时间接口；已有权限的本地操作员可通过 `/run/chrony/chronyd.sock` 核对状态。
+
+使用支持 `opencommands` 的版本时，修改 `/etc/chrony/chrony.conf`，确认未认证的 `pool`/`server` 源退出选择，保留本机 loopback command socket。
 
 ```conf
 server time.cloudflare.com iburst nts

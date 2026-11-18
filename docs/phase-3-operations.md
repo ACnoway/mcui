@@ -23,7 +23,7 @@ systemctl enable mcui-xray-recover.service
 
 1. 通过独立渠道核对离线 TUF root 和指纹，将 root 以 `root:root`、`0444` 装入 root 管理的 `/etc/mcui-xray/root.json`。仓库角色分离、保管人和制品审核要求见[制品信任](./artifact-trust.md)。
 2. 记录仓库 HTTPS metadata 地址、当前有效的 Xray 可审核 target、本机架构、版本和已审核 SHA-256。Xray 本地工具接受 `v主版本.次版本.补丁版本` 格式及有明确上游签名核验事实或无签名记录的已审核目标。面板目录里的 GitHub API digest 只用于发现及缓存校验。
-3. 按[阶段 2 认证时间配置](./phase-2-operations.md#11-配置认证-nts-时间)配置并检查 chrony。TUF 未授权、时间异常、摘要不符或仓库刷新失败均会中止制品操作。
+3. 按[阶段 2 认证时间配置](./phase-2-operations.md#11-配置认证-nts-时间)配置并检查 chrony。本地 root 工具通过 `/run/chrony/chronyd.sock` 读取认证状态。TUF 未授权、时间异常、摘要不符或仓库刷新失败均会中止制品操作。
 
 将环境变量填入已审核的具体值后执行。升级和降级的版本必须分别高于和低于已提交版本。节点原先已停止时仍会短暂检查候选进程，确认后恢复停止状态。
 

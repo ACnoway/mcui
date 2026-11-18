@@ -14,6 +14,7 @@ import (
 )
 
 const DefaultNTSSource = "time.cloudflare.com"
+const chronyCommandSocket = "/run/chrony/chronyd.sock"
 
 var ErrUntrusted = errors.New("authenticated time source is unavailable")
 
@@ -23,17 +24,28 @@ type commandRunner func(context.Context, string, ...string) ([]byte, error)
 // accept unauthenticated fallback sources as evidence that the local clock is
 // trusted.
 type Chrony struct {
-	source string
-	run    commandRunner
-	now    func() time.Time
+	source      string
+	commandHost string
+	run         commandRunner
+	now         func() time.Time
 }
 
 func NewChrony(source string) *Chrony {
+	return newChrony(source, "127.0.0.1")
+}
+
+// NewChronyUnix is for local tools run by an operator already authorized to
+// access the chrony command socket. Some releases only expose authdata there.
+func NewChronyUnix(source string) *Chrony {
+	return newChrony(source, chronyCommandSocket)
+}
+
+func newChrony(source, commandHost string) *Chrony {
 	if source == "" {
 		source = DefaultNTSSource
 	}
 	return &Chrony{
-		source: source,
+		source: source, commandHost: commandHost,
 		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "/usr/bin/chronyc", args...).Output()
 		},
@@ -44,20 +56,20 @@ func NewChrony(source string) *Chrony {
 // Now returns the local system time only after verifying chrony's selected
 // source, NTS authentication state, synchronization status, and sample age.
 func (c *Chrony) Now() (time.Time, error) {
-	if c == nil || c.source == "" || c.run == nil || c.now == nil {
+	if c == nil || c.source == "" || c.commandHost == "" || c.run == nil || c.now == nil {
 		return time.Time{}, ErrUntrusted
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	sources, err := c.run(ctx, "chronyc", "-h", "127.0.0.1", "-N", "sources")
+	sources, err := c.run(ctx, "chronyc", "-h", c.commandHost, "-N", "sources")
 	if err != nil || !selectedSourceFresh(string(sources), c.source) {
 		return time.Time{}, ErrUntrusted
 	}
-	auth, err := c.run(ctx, "chronyc", "-h", "127.0.0.1", "-N", "authdata")
+	auth, err := c.run(ctx, "chronyc", "-h", c.commandHost, "-N", "authdata")
 	if err != nil || !sourceAuthenticated(string(auth), c.source) {
 		return time.Time{}, ErrUntrusted
 	}
-	tracking, err := c.run(ctx, "chronyc", "-h", "127.0.0.1", "-N", "tracking")
+	tracking, err := c.run(ctx, "chronyc", "-h", c.commandHost, "-N", "tracking")
 	if err != nil || !trackingHealthy(string(tracking)) {
 		return time.Time{}, ErrUntrusted
 	}

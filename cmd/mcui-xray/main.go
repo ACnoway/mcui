@@ -114,7 +114,7 @@ func openTrust(url string) (*artifacttrust.Client, error) {
 		return nil, err
 	}
 	dir := filepath.Join(xrayruntime.StateDir, "control")
-	clock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+	clock := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource)
 	return artifacttrust.New(artifacttrust.Config{
 		MetadataURL:     url,
 		TrustedRoot:     root,

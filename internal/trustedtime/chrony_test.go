@@ -1,6 +1,32 @@
 package trustedtime
 
-import "testing"
+import (
+	"context"
+	"slices"
+	"testing"
+	"time"
+)
+
+func TestChronyUnixQueriesAuthenticatedStatus(t *testing.T) {
+	clock := NewChronyUnix(DefaultNTSSource)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	clock.now = func() time.Time { return now }
+	replies := map[string]string{
+		"sources":  "^* time.cloudflare.com 8 2 377 3 +6385ns[+7762ns] +/- 20us\n",
+		"authdata": "time.cloudflare.com NTS 1 30 128 0 0 0 8 100\n",
+		"tracking": "System time : 0.0001 seconds slow of NTP time\nRoot delay : 0.01 seconds\nRoot dispersion : 0.02 seconds\nUpdate interval : 4.0 seconds\nLeap status : Normal\n",
+	}
+	clock.run = func(_ context.Context, command string, args ...string) ([]byte, error) {
+		if command != "chronyc" || len(args) != 4 || !slices.Equal(args[:3], []string{"-h", "/run/chrony/chronyd.sock", "-N"}) {
+			t.Fatalf("unexpected chrony invocation: %s %v", command, args)
+		}
+		return []byte(replies[args[3]]), nil
+	}
+	got, err := clock.Now()
+	if err != nil || !got.Equal(now) {
+		t.Fatalf("authenticated time = %v, err = %v", got, err)
+	}
+}
 
 func TestSelectedSourceFreshAcceptsChronyLastRxSeconds(t *testing.T) {
 	output := "MS Name/IP address Stratum Poll Reach LastRx Last sample\n^* time.cloudflare.com 3 6 377 23 -10us[ -12us] +/- 1ms\n"

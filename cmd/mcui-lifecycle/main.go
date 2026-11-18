@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	err := run(os.Args[1:], os.Stdout, trustedtime.NewChrony(trustedtime.DefaultNTSSource).Now)
+	err := run(os.Args[1:], os.Stdout, trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource).Now)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
