@@ -23,6 +23,8 @@ type Client struct {
 	http                 *http.Client
 	statePath            string
 	failures             int
+	taskFailures         int
+	nextTaskAttempt      time.Time
 	taskHandler          TaskHandler
 	taskHandlerFactory   StatusTaskHandlerFactory
 	taskSequenceProvider func() (int64, error)
@@ -199,41 +201,56 @@ func (c *Client) post(state localState, path string, body any) ([]byte, int, err
 }
 
 func (c *Client) RunOnce() error {
-	err := c.runOnce()
+	state, err := c.heartbeat()
 	if err != nil {
 		c.failures++
-	} else {
-		c.failures = 0
-	}
-	return err
-}
-
-func (c *Client) runOnce() error {
-	state, err := c.load()
-	if err != nil {
 		return err
 	}
+	c.failures = 0
+	if time.Now().Before(c.nextTaskAttempt) {
+		return nil
+	}
+	if err = c.pollTasks(state); err != nil {
+		c.taskFailures++
+		c.nextTaskAttempt = time.Now().Add(retryDelay(c.taskFailures))
+		return fmt.Errorf("status-task polling failed: %w", err)
+	}
+	c.taskFailures = 0
+	c.nextTaskAttempt = time.Time{}
+	return nil
+}
+
+func (c *Client) heartbeat() (localState, error) {
+	state, err := c.load()
+	if err != nil {
+		return localState{}, err
+	}
 	if state.NodeToken == "" {
-		return errors.New("Agent must redeem an installation code before connecting")
+		return localState{}, errors.New("Agent must redeem an installation code before connecting")
 	}
 	raw, status, err := c.post(state, "/api/v1/agent/heartbeat", map[string]string{"node_id": state.NodeID})
 	if err != nil {
-		return err
+		return localState{}, err
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("heartbeat rejected (HTTP %d)", status)
+		return localState{}, fmt.Errorf("heartbeat rejected (HTTP %d)", status)
 	}
 	var reply struct {
 		NodeID string `json:"node_id"`
 	}
 	if json.Unmarshal(raw, &reply) != nil || reply.NodeID != state.NodeID {
-		return errors.New("Master returned a mismatched heartbeat identity")
+		return localState{}, errors.New("Master returned a mismatched heartbeat identity")
 	}
+	return state, nil
+}
+
+func (c *Client) pollTasks(state localState) error {
 	if c.taskHandlerFactory != nil && c.taskHandler == nil {
-		c.taskHandler, err = c.taskHandlerFactory(state.NodeID)
+		handler, err := c.taskHandlerFactory(state.NodeID)
 		if err != nil {
 			return fmt.Errorf("initialize status-task handler: %w", err)
 		}
+		c.taskHandler = handler
 	}
 	if c.taskHandler != nil {
 		return c.processStatusTask(state)
@@ -242,9 +259,13 @@ func (c *Client) runOnce() error {
 }
 
 func (c *Client) NextDelay() time.Duration {
+	return retryDelay(c.failures)
+}
+
+func retryDelay(failures int) time.Duration {
 	base := 15 * time.Second
-	if c.failures > 0 {
-		shift := min(c.failures-1, 5)
+	if failures > 0 {
+		shift := min(failures-1, 5)
 		base = min(base*time.Duration(1<<shift), 5*time.Minute)
 	}
 	jitter := time.Duration(mrand.Int64N(int64(base/5)+1)) - base/10

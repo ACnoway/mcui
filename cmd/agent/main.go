@@ -144,7 +144,7 @@ func main() {
 	}
 	for {
 		if err := client.RunOnce(); err != nil {
-			log.Printf("agent heartbeat failed: %v", err)
+			log.Printf("agent cycle failed: %v", err)
 		}
 		time.Sleep(client.NextDelay())
 	}

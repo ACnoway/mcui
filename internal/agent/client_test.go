@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -94,6 +95,20 @@ func TestAgentMigratesIdentityAndAuthenticatesOverVerifiedHTTPS(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	attempts := 0
+	if err = client.SetTaskHandlerFactory(func(string) (TaskHandler, error) {
+		attempts++
+		return nil, errors.New("task runtime unavailable")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client.failures = 5
+	if err = client.RunOnce(); err == nil || client.failures != 0 || client.taskFailures != 1 {
+		t.Fatalf("task failure should leave successful heartbeats on their usual interval: %v", err)
+	}
+	if err = client.RunOnce(); err != nil || attempts != 1 {
+		t.Fatalf("task retry should wait while heartbeats continue: %v, attempts=%d", err, attempts)
 	}
 }
 
