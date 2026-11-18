@@ -38,7 +38,11 @@ mkdir signed
   -key "$MY_CORE_SIGNING_KEY" -output core-partial.json
 ```
 
-依次收齐各角色签名，保存离线信任根 `offline-root.json`，并将签好的 `targets.json`、`core-targets.json` 和 `runtime-targets.json` 放入 `signed/`。当前保留独立的空 `runtime-targets` 委派，Agent/Helper 更新器接入后再发布该类制品。
+依次收齐各角色签名，保存离线信任根 `offline-root.json`，并将签好的 `targets.json`、`core-targets.json` 和 `runtime-targets.json` 放入 `signed/`。
+
+### Agent/Helper 更新制品
+
+`bash scripts/build-runtime-release.sh NEW_DIRECTORY` 从同一源码构建两架构的 Agent/Helper ZIP，并生成 `SHA256SUMS`。每个 ZIP 只含该架构的 `mcui-agent` 和 `mcui-helper`。如需签署候选制品，对各架构核验源码、构建、长度和散列，将 `version`、`architecture`、`length`、`sha256`、`review_id` 写成 JSON 数组，通过 `prepare -role runtime-targets -input INVENTORY` 准备元数据，再由独立保管人签名。组装工具核验版本、架构、固定路径和专用委派。自动切换、服务健康监督、旧版恢复和远程更新通道仍待实现。
 
 在签好的三个 targets 文件上生成 snapshot，并用 snapshot 单用途密钥签名。然后按同样步骤生成 timestamp 并用 timestamp 单用途密钥签名。
 

@@ -46,6 +46,9 @@ func TestAssembleChecksThresholdsAndPublishesRevocation(t *testing.T) {
 		Core: "xray", Version: "v26.10.31", Architecture: "amd64", Length: 42, SHA256: strings.Repeat("1", 64),
 		ReviewID: "release-test", SignatureStatus: "verified",
 	}})
+	runtimeReview := writeTestJSON(t, filepath.Join(work, "runtime.json"), []tufrepo.RuntimeReview{{
+		Version: "v0.1.0", Architecture: "amd64", Length: 100, SHA256: strings.Repeat("2", 64), ReviewID: "runtime-test",
+	}})
 	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	build := func(role, input, output string, version int64, keys ...string) {
 		t.Helper()
@@ -72,7 +75,7 @@ func TestAssembleChecksThresholdsAndPublishesRevocation(t *testing.T) {
 	root := filepath.Join(work, "offline-root.json")
 	build(metadata.ROOT, rootManifest, root, 1, private[metadata.ROOT][:2]...)
 	build(metadata.TARGETS, targetManifest, filepath.Join(staged, "targets.json"), 1, private[metadata.TARGETS][:2]...)
-	build(tufrepo.RuntimeRole, "", filepath.Join(staged, tufrepo.RuntimeRole+".json"), 1, private[tufrepo.RuntimeRole][:2]...)
+	build(tufrepo.RuntimeRole, runtimeReview, filepath.Join(staged, tufrepo.RuntimeRole+".json"), 1, private[tufrepo.RuntimeRole][:2]...)
 	build(tufrepo.CoreRole, inventory, filepath.Join(staged, tufrepo.CoreRole+".json"), 1, private[tufrepo.CoreRole][:1]...)
 	rebuildBindings(1)
 	first := filepath.Join(work, "generation-1")
@@ -90,6 +93,9 @@ func TestAssembleChecksThresholdsAndPublishesRevocation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(first, "1.core-targets.json")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(filepath.Join(first, "1.runtime-targets.json")); err != nil {
+		t.Fatal(err)
+	}
 
 	revoke := writeTestJSON(t, filepath.Join(work, "revocation.json"), []artifacttrust.CoreReview{})
 	build(tufrepo.CoreRole, revoke, filepath.Join(staged, tufrepo.CoreRole+".json"), 2, private[tufrepo.CoreRole][:2]...)
@@ -103,6 +109,24 @@ func TestAssembleChecksThresholdsAndPublishesRevocation(t *testing.T) {
 	}
 	if err := assemble(root, staged, second, filepath.Join(work, "timestamp-reuse")); err == nil {
 		t.Fatal("accepted a reused timestamp version")
+	}
+
+	replacementPub, replacementKey := generateTestKey(t, work)
+	rootKeys[metadata.ROOT][0] = replacementPub
+	rotation := writeTestJSON(t, filepath.Join(work, "rotation-keys.json"), rootKeys)
+	nextRoot := filepath.Join(staged, "2.root.json")
+	third := filepath.Join(work, "generation-3")
+	rebuildBindings(3)
+	build(metadata.ROOT, rotation, nextRoot, 2, private[metadata.ROOT][:2]...)
+	if err := assemble(root, staged, second, third); err == nil {
+		t.Fatal("rotated root without the new root threshold")
+	}
+	build(metadata.ROOT, rotation, nextRoot, 2, append(private[metadata.ROOT][:2:2], replacementKey)...)
+	if err := assemble(root, staged, second, third); err != nil {
+		t.Fatalf("valid root rotation failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(third, "2.root.json")); err != nil {
+		t.Fatal(err)
 	}
 }
 

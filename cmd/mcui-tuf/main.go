@@ -166,11 +166,28 @@ func prepare(role, input string, version int64, expires time.Time) (document, er
 		}
 		return doc, nil
 	case tufrepo.RuntimeRole:
-		if input != "" {
-			return nil, errors.New("runtime release role is currently initialized empty")
-		}
 		doc := metadata.Targets(expires)
 		doc.Signed.Version = version
+		if input == "" {
+			return doc, nil
+		}
+		var reviews []tufrepo.RuntimeReview
+		if err := readJSON(input, &reviews); err != nil {
+			return nil, err
+		}
+		if reviews == nil {
+			return nil, errors.New("runtime release inventory must be a JSON array")
+		}
+		for _, review := range reviews {
+			target, err := tufrepo.ReviewedRuntimeTarget(review)
+			if err != nil {
+				return nil, err
+			}
+			if _, exists := doc.Signed.Targets[target.Path]; exists {
+				return nil, fmt.Errorf("duplicate reviewed target %s", target.Path)
+			}
+			doc.Signed.Targets[target.Path] = target
+		}
 		return doc, nil
 	case metadata.SNAPSHOT:
 		doc := metadata.Snapshot(expires)

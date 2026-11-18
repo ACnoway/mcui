@@ -15,20 +15,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/tufrepo"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
 )
 
 type rootRecordingFetcher struct {
-	ctx      context.Context
-	delegate fetcher.Fetcher
-	mu       sync.Mutex
-	roots    map[int64][]byte
+	ctx           context.Context
+	delegate      fetcher.Fetcher
+	requireLayout bool
+	mu            sync.Mutex
+	roots         map[int64][]byte
 }
 
-func newRootRecordingFetcher(ctx context.Context, delegate fetcher.Fetcher) *rootRecordingFetcher {
-	return &rootRecordingFetcher{ctx: ctx, delegate: delegate, roots: make(map[int64][]byte)}
+func newRootRecordingFetcher(ctx context.Context, delegate fetcher.Fetcher, requireLayout bool) *rootRecordingFetcher {
+	return &rootRecordingFetcher{ctx: ctx, delegate: delegate, requireLayout: requireLayout, roots: make(map[int64][]byte)}
 }
 
 func (f *rootRecordingFetcher) DownloadFile(urlPath string, maxLength int64, timeout time.Duration) ([]byte, error) {
@@ -65,6 +67,12 @@ func (f *rootRecordingFetcher) DownloadFile(urlPath string, maxLength int64, tim
 	version, err := strconv.ParseInt(versionText, 10, 64)
 	if err != nil || version < 1 {
 		return data, errors.New("invalid versioned TUF root filename")
+	}
+	if f.requireLayout {
+		root, err := metadata.Root().FromBytes(data)
+		if err != nil || tufrepo.ValidateRootLayout(root.Signed) != nil {
+			return nil, errors.New("TUF root rotation violates MCUI role policy")
+		}
 	}
 	f.mu.Lock()
 	f.roots[version] = append([]byte(nil), data...)
@@ -137,6 +145,11 @@ func (c *Client) latestTrustedRoot() ([]byte, error) {
 		updated, updateErr := trusted.UpdateRoot(data)
 		if updateErr != nil || updated.Signed.Version != record.version {
 			return nil, errors.New("TUF root history signature or version is invalid")
+		}
+		if c.requireCoreRole {
+			if err := tufrepo.ValidateRootLayout(updated.Signed); err != nil {
+				return nil, err
+			}
 		}
 		latest = data
 		expected++

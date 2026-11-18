@@ -176,12 +176,13 @@ func verifyTargets(trusted *trustedmetadata.TrustedMetadata, release *generation
 	if doc.Signed.Delegations != nil {
 		return errors.New("release roles must sign targets directly")
 	}
-	if name == tufrepo.RuntimeRole && len(doc.Signed.Targets) != 0 {
-		return errors.New("runtime release targets are not enabled")
-	}
 	for path, target := range doc.Signed.Targets {
-		if err := artifacttrust.ValidateReviewedCoreTarget(path, target); err != nil {
-			return fmt.Errorf("invalid Core target %q: %w", path, err)
+		validate := artifacttrust.ValidateReviewedCoreTarget
+		if name == tufrepo.RuntimeRole {
+			validate = tufrepo.ValidateRuntimeTarget
+		}
+		if err := validate(path, target); err != nil {
+			return fmt.Errorf("invalid release target %q: %w", path, err)
 		}
 	}
 	return nil

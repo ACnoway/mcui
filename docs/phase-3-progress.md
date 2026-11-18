@@ -41,17 +41,19 @@
 2. 将客户端安全接入 Agent 固定下载路径，绑定签名任务中的制品 ID、精确版本、架构和摘要；实现 Helper 独立重验、精确匹配备用缓存回退条件和归档安全解包。
 3. 建立高危操作 MFA 复验、独立审批和签发者的可信授权来源，接通签名生命周期任务及 Helper 固定操作，面板展示任务实际结果。
 4. 在故障注入环境验证本地事务的磁盘写满、断电、启动失败及恢复失败路径，并核对官方制品与固定 unit 的兼容性。
-5. 实现 Agent/Helper 独立授权更新、旧版本监督、自动恢复和本地人工修复；完成失败恢复演练前保持远程自身更新关闭。
+5. Agent/Helper 同源双架构制品已可打包，TUF 发布端可使用独立的 `runtime-targets` 审核和签署候选包。本地人工修复已有手册。独立更新任务授权、启动监督和自动恢复待实现。
 6. 在 `ro` 的隔离 Debian 13.7 amd64 环境测试制品拒绝、下载中断、磁盘不足、错误架构、恶意归档、启动失败和恢复。Linux arm64 验证构建，按证据更新能力矩阵。
 
 ## 当前验证边界
 
-目录和备用缓存测试覆盖固定源、分页、下载校验和缓存发布。新增测试覆盖有阈值签名的 TUF 测试仓库、签名不足、root 轮换和 target 撤销，以及合成 Xray 制品的解包拒绝、事务和中断恢复。生产仓库的密钥治理、上游签名事实、真实 Xray 生命周期和 amd64 磁盘/断电故障演练仍待完成。[分阶段开发流程](./phased-development-workflow.md) · [能力矩阵](./core-compatibility.md)
+目录和备用缓存测试覆盖固定源、分页、下载校验和缓存发布。TUF 测试覆盖阈值签名、root 轮换和目标撤销。Debian amd64 已在隔离的 systemd 环境验证官方 Xray 本地生命周期、磁盘写满和事务进程被强制终止后的恢复。该次验证使用测试 TUF 根和本机 TLS 仓库，主机断电、生产 NTS、生产密钥治理和远程端到端下发仍待验证。Linux arm64 仅验证构建。[分阶段开发流程](./phased-development-workflow.md) · [能力矩阵](./core-compatibility.md)
 
 ## 已执行检查
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
+| TUF 发布工具与完整仓库检查 | 通过，提交 `acff3db`（2026-11-18） | `ssh ro` 的 `/root/mcui`。测试覆盖 Core 签名不足、首版组装、撤销和版本复用拒绝。全量 Go vet/build/test、amd64/arm64 交叉构建、Web 生产构建通过 |
+| 真实 Xray amd64 本地生命周期与故障注入 | 通过，提交 `acff3db`（2026-11-18） | `ro` 的 Debian 13.7、systemd `257.13-1~deb13u1`，临时 unit、临时 TLS metadata 和测试签名。官方 `v26.10.31` 和 `v26.11.9` ZIP 经 GitHub API 与附带 `.dgst` 校验，实际运行于隔离低权限服务。验证未批准目标、截断下载、安装、升级、显式降级、启停、卸载、撤销、真实 tmpfs 写满和切指针后 `SIGKILL` 恢复。测试副本使用隔离路径、loopback metadata 与测试时钟，制品从固定官方 URL 下载。临时资源已清理。[v26.10.31](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31) · [v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9) |
 | `bash scripts/check-static.sh` | 通过，提交 `f48ced9`（2026-11-18） | `ssh ro`，`/root/mcui`，Debian 13.7 amd64；Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。Go 格式/vet/build/test、Linux amd64/arm64 交叉构建、协议向量和冻结 Web 生产构建均通过 |
 | `go test -race -count=1 ./internal/artifacttrust ./internal/xrayruntime` | 通过，提交 `f48ced9` | 同一远程环境。阈值不足、轮换保留、目标撤销、归档拒绝和事务恢复测试均通过 |
 | Xray systemd unit 校验及生命周期冒烟测试 | 通过，提交 `f48ced9` | Debian 13.7 amd64、systemd `257.13-1~deb13u1`。临时 unit 和合成可执行制品验证隔离身份、只读运行目录、预检、健康确认、启动失败回滚、启停、卸载和恢复入口。测试后清理临时 unit，未启用系统服务 |

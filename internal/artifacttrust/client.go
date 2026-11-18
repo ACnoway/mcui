@@ -248,7 +248,7 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	if err = updaterConfig.SetDefaultFetcherRetry(250*time.Millisecond, 1); err != nil {
 		return Target{}, fmt.Errorf("%w: configure TUF retry policy", ErrUnavailable)
 	}
-	recorder := newRootRecordingFetcher(ctx, updaterConfig.Fetcher)
+	recorder := newRootRecordingFetcher(ctx, updaterConfig.Fetcher, c.requireCoreRole)
 	updaterConfig.Fetcher = recorder
 	tufClient, err := updater.New(updaterConfig)
 	if err != nil {
@@ -266,7 +266,11 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	}
 	if c.requireCoreRole {
 		trusted := tufClient.GetTrustedMetadataSet()
-		if err := tufrepo.ValidateDelegations(trusted.Root.Signed, trusted.Targets[metadata.TARGETS].Signed); err != nil {
+		top := trusted.Targets[metadata.TARGETS]
+		if top == nil {
+			return Target{}, ErrUntrustedTarget
+		}
+		if err := tufrepo.ValidateDelegations(trusted.Root.Signed, top.Signed); err != nil {
 			return Target{}, fmt.Errorf("%w: %v", ErrUntrustedTarget, err)
 		}
 	}

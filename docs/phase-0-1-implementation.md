@@ -35,4 +35,4 @@
 | `bf49200` / 2026-11-16 | SSH `ro` 的 `/root/mcui`，Linux amd64，Go 1.24.4、Node 26.12.1、pnpm 12.15.0 | `bash scripts/check-static.sh` | 历史记录：完整静态脚本通过，含冻结依赖安装和前端生产构建；未包含 Debian 干净 VM、systemd 行为/arm64 实机、项目内安全检查或灾备演练。 |
 | `9283224` / 2026-11-16 | SSH `ro` 的 `/root/mcui`，Linux 6.12.107 amd64、systemd 257.13-1~deb13u1、Go 1.27.4、Node 26.13.1、npm 11.20.0、pnpm 12.17.0 | `bash scripts/check-static.sh`；`systemd-analyze verify` | 通过：Go 格式/vet/build/test、Linux amd64/arm64 交叉构建、4 正例/9 反例向量、冻结 pnpm 安装、Vue 类型检查和 Vite 构建。两个 unit 使用临时 alternate root 与实际编译的 panel/agent 可执行文件校验通过；未安装或启动服务。 |
 
-远端结果是 Linux amd64 主机上的交叉构建和 unit 语法/装载校验，不等于 Debian 13.7 amd64/arm64 干净 VM 安装、systemd 沙箱行为或 arm64 实机验证。未执行或失败的检查不计为通过。本文记录不构成阶段 0/1 正式签核，也不授权阶段 2 运行时代码。
+历史远端结果涵盖 Linux amd64 主机上的交叉构建和 unit 语法与装载校验。阶段 0/1 的 Debian 13.7 amd64 安装和 systemd 沙箱验收仍待执行。阶段 2 运行时见[阶段 2 进度](./phase-2-progress.md)。
