@@ -1,0 +1,325 @@
+//go:build linux
+
+// Package xrayruntime implements the local, privileged Xray lifecycle.
+package xrayruntime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ACnoway/mcui/internal/artifacttrust"
+)
+
+const StateDir = "/var/lib/mcui-xray"
+
+type Action string
+
+const (
+	Install   Action = "install"
+	Upgrade   Action = "upgrade"
+	Downgrade Action = "downgrade"
+	Start     Action = "start"
+	Stop      Action = "stop"
+	Uninstall Action = "uninstall"
+)
+
+var (
+	stableVersion = regexp.MustCompile(`^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$`)
+	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+type Release struct {
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
+}
+
+type selection struct {
+	Release Release `json:"release"`
+	Running bool    `json:"running"`
+}
+
+type intent struct {
+	Action Action    `json:"action"`
+	Next   selection `json:"next"`
+}
+
+type Status struct {
+	Schema     int       `json:"schema"`
+	Current    selection `json:"current"`
+	Previous   Release   `json:"previous"`
+	Pending    *intent   `json:"pending,omitempty"`
+	LastAction Action    `json:"last_action,omitempty"`
+	LastResult string    `json:"last_result,omitempty"`
+}
+
+type service interface {
+	preflight(context.Context) error
+	start(context.Context) error
+	stop(context.Context) error
+}
+
+// Runtime holds the exclusive local lifecycle lock until Close.
+type Runtime struct {
+	dir     string
+	lock    *os.File
+	service service
+}
+
+func Open(initialize bool) (*Runtime, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("the Xray runtime requires local root")
+	}
+	return openRuntime(StateDir, systemdService{}, initialize)
+}
+
+func (r *Runtime) Close() error { return r.lock.Close() }
+
+func (r *Runtime) Status() (Status, error) { return r.readStatus() }
+
+// Apply fetches only the exact operator-selected, TUF-authorized release.
+func (r *Runtime) Apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client) error {
+	state, err := r.ready()
+	if err != nil {
+		return err
+	}
+	next := selection{Release: release, Running: action == Install || state.Current.Running}
+	if err := validateTransition(state.Current, intent{Action: action, Next: next}); err != nil {
+		return err
+	}
+	if action != Install && action != Upgrade && action != Downgrade {
+		return errors.New("invalid Xray artifact action")
+	}
+	target, err := trust.Lookup(ctx, "xray", release.Version)
+	if err != nil {
+		return err
+	}
+	if target.SHA256 != release.SHA256 || target.ArchiveFormat != "zip" || target.SignatureStatus == "unverified" {
+		return errors.New("Xray artifact does not match the reviewed release")
+	}
+	if err := r.stage(ctx, release, target.Size, func() (string, error) {
+		return trust.Download(ctx, target)
+	}); err != nil {
+		return fmt.Errorf("stage Xray release: %w", err)
+	}
+	if err := r.runPreflight(ctx, release); err != nil {
+		return fmt.Errorf("preflight Xray release: %w", err)
+	}
+	if err := trust.Revalidate(ctx, target); err != nil {
+		return err
+	}
+	return r.change(ctx, state, action, next)
+}
+
+func (r *Runtime) Control(ctx context.Context, action Action, expected Release) error {
+	state, err := r.ready()
+	if err != nil {
+		return err
+	}
+	if !expected.valid() || state.Current.Release != expected {
+		return errors.New("current Xray release does not match the expected release")
+	}
+	next := state.Current
+	switch action {
+	case Start:
+		next.Running = true
+	case Stop:
+		next.Running = false
+	case Uninstall:
+		next = selection{}
+	default:
+		return errors.New("invalid Xray control action")
+	}
+	return r.change(ctx, state, action, next)
+}
+
+// Recover is also called on boot. A pending transaction always rolls back to
+// the still-committed release before any later lifecycle operation may run.
+func (r *Runtime) Recover(ctx context.Context) error {
+	state, err := r.readStatus()
+	if err != nil {
+		return err
+	}
+	if state.Pending != nil {
+		return r.rollback(ctx, state)
+	}
+	if err := r.clearCandidate(); err != nil {
+		return err
+	}
+	if err := r.reconcile(ctx, state.Current); err != nil {
+		return err
+	}
+	return r.prune(state)
+}
+
+func (r *Runtime) ready() (Status, error) {
+	state, err := r.readStatus()
+	if err != nil {
+		return Status{}, err
+	}
+	if state.Pending != nil {
+		return Status{}, errors.New("Xray transaction pending; run recover")
+	}
+	if err := r.clearCandidate(); err != nil {
+		return Status{}, err
+	}
+	if err := r.prune(state); err != nil {
+		return Status{}, err
+	}
+	return state, nil
+}
+
+func (r *Runtime) change(ctx context.Context, state Status, action Action, next selection) error {
+	attempt := intent{Action: action, Next: next}
+	if err := validateTransition(state.Current, attempt); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.verifyBundle(state.Current.Release); err != nil {
+		return fmt.Errorf("verify committed Xray bundle: %w", err)
+	}
+	state.Pending = &attempt
+	if err := r.save(state); err != nil {
+		return fmt.Errorf("persist Xray transaction intent: %w", err)
+	}
+	if err := r.applySelection(ctx, state.Current, next); err != nil {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancel()
+		return errors.Join(fmt.Errorf("apply Xray transaction: %w", err), r.rollback(rollbackCtx, state))
+	}
+	if next.Release != state.Current.Release {
+		state.Previous = state.Current.Release
+	}
+	if action == Uninstall {
+		state.Previous = Release{}
+	}
+	state.Current, state.Pending = next, nil
+	state.LastAction, state.LastResult = action, "committed"
+	if err := r.save(state); err != nil {
+		// A rename may already have completed even when directory fsync fails.
+		return fmt.Errorf("persist Xray commit; run recover before continuing: %w", err)
+	}
+	if err := r.prune(state); err != nil {
+		return fmt.Errorf("Xray transaction committed; bundle cleanup failed: %w", err)
+	}
+	return nil
+}
+
+func (r *Runtime) applySelection(ctx context.Context, current, next selection) error {
+	if current.Release != next.Release && next.Release != (Release{}) && !next.Running {
+		// A paused installation still needs a startup check before replacing
+		// the committed bundle. Leave it stopped after the bounded check.
+		if err := r.reconcile(ctx, selection{Release: next.Release, Running: true}); err != nil {
+			return err
+		}
+	}
+	return r.reconcile(ctx, next)
+}
+
+func (r *Runtime) rollback(ctx context.Context, state Status) error {
+	if err := r.clearCandidate(); err != nil {
+		return fmt.Errorf("ROLLBACK_FAILED: %w", err)
+	}
+	if err := r.service.stop(ctx); err != nil {
+		return fmt.Errorf("ROLLBACK_FAILED: stop Xray: %w", err)
+	}
+	if err := r.reconcile(ctx, state.Current); err != nil {
+		return fmt.Errorf("ROLLBACK_FAILED: restore committed Xray selection: %w", err)
+	}
+	state.LastAction, state.LastResult = state.Pending.Action, "rolled_back"
+	state.Pending = nil
+	if err := r.save(state); err != nil {
+		return fmt.Errorf("ROLLBACK_FAILED: persist Xray recovery: %w", err)
+	}
+	return r.prune(state)
+}
+
+func (r *Runtime) reconcile(ctx context.Context, next selection) error {
+	if err := r.verifyBundle(next.Release); err != nil {
+		return err
+	}
+	current, err := r.readPointer("current")
+	if err != nil {
+		return err
+	}
+	if current != next.Release.link() {
+		if err := r.service.stop(ctx); err != nil {
+			return err
+		}
+		if err := r.point("current", next.Release); err != nil {
+			return err
+		}
+	}
+	if next.Running {
+		return r.service.start(ctx)
+	}
+	return r.service.stop(ctx)
+}
+
+func (r *Runtime) runPreflight(ctx context.Context, release Release) (err error) {
+	if err := r.point("candidate", release); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, r.clearCandidate()) }()
+	return r.service.preflight(ctx)
+}
+
+func (r *Runtime) clearCandidate() error { return r.point("candidate", Release{}) }
+
+func (r Release) valid() bool {
+	return stableVersion.MatchString(r.Version) && digestPattern.MatchString(r.SHA256)
+}
+
+func (r Release) key() string { return r.Version + "-" + r.SHA256 }
+
+func (r Release) link() string {
+	if r == (Release{}) {
+		return ""
+	}
+	return filepath.Join("versions", r.key())
+}
+
+func compareVersions(left, right string) int {
+	first, second := strings.Split(left[1:], "."), strings.Split(right[1:], ".")
+	for i := range first {
+		a, _ := strconv.Atoi(first[i])
+		b, _ := strconv.Atoi(second[i])
+		if a != b {
+			return a - b
+		}
+	}
+	return 0
+}
+
+func validateTransition(current selection, pending intent) error {
+	next := pending.Next
+	if (next.Release != (Release{}) && !next.Release.valid()) || (next.Release == (Release{}) && next.Running) {
+		return errors.New("invalid target Xray selection")
+	}
+	valid := false
+	switch pending.Action {
+	case Install:
+		valid = current == (selection{}) && next.Release.valid() && next.Running
+	case Upgrade, Downgrade:
+		if current.Release.valid() && next.Release.valid() && current.Running == next.Running {
+			order := compareVersions(next.Release.Version, current.Release.Version)
+			valid = (pending.Action == Upgrade && order > 0) || (pending.Action == Downgrade && order < 0)
+		}
+	case Start, Stop:
+		valid = current.Release.valid() && current.Release == next.Release && next.Running == (pending.Action == Start)
+	case Uninstall:
+		valid = current.Release.valid() && next == (selection{})
+	}
+	if !valid {
+		return fmt.Errorf("Xray %s conflicts with the committed release", pending.Action)
+	}
+	return nil
+}
