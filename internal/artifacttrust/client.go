@@ -73,7 +73,9 @@ type Target struct {
 	SHA256          string
 	SourceURL       string
 
-	owner *Client
+	owner                  *Client
+	coreManifestVersion    int64
+	requireManifestVersion bool
 }
 
 type Client struct {
@@ -168,6 +170,23 @@ func (c *Client) Lookup(ctx context.Context, core, version string) (Target, erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lookupLocked(ctx, core, version)
+}
+
+// LookupCoreManifest requires exact authorization from the requested
+// core-targets version. Download and activation must retain that authorization.
+func (c *Client) LookupCoreManifest(ctx context.Context, core, version string, manifestVersion int64) (Target, error) {
+	if c == nil || !c.requireCoreRole || manifestVersion <= 0 {
+		return Target{}, ErrUntrustedTarget
+	}
+	target, err := c.Lookup(ctx, core, version)
+	if err != nil {
+		return Target{}, err
+	}
+	if target.coreManifestVersion != manifestVersion {
+		return Target{}, fmt.Errorf("%w: Core manifest version differs from approval", ErrChangedTarget)
+	}
+	target.requireManifestVersion = true
+	return target, nil
 }
 
 // Download refreshes and rechecks the target authorization immediately before
@@ -281,16 +300,20 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	if err != nil || files == nil {
 		return Target{}, fmt.Errorf("%w: target missing or delegated metadata invalid", ErrUntrustedTarget)
 	}
+	var coreManifestVersion int64
 	if c.requireCoreRole {
 		role := tufClient.GetTrustedMetadataSet().Targets[tufrepo.CoreRole]
 		if role == nil || role.Signed.Delegations != nil || role.Signed.Targets[targetPath] != files {
 			return Target{}, fmt.Errorf("%w: target lacks direct Core role authorization", ErrUntrustedTarget)
 		}
+		coreManifestVersion = role.Signed.Version
 	}
 	if err = ctx.Err(); err != nil {
 		return Target{}, err
 	}
-	return c.targetFromMetadata(files, core, version, runtime.GOARCH, filename)
+	target, err := c.targetFromMetadata(files, core, version, runtime.GOARCH, filename)
+	target.coreManifestVersion = coreManifestVersion
+	return target, err
 }
 
 func (c *Client) targetFromMetadata(files *metadata.TargetFiles, core, version, arch, filename string) (Target, error) {
@@ -363,7 +386,8 @@ func safeHTTPSURL(u *url.URL) bool {
 }
 
 func sameTarget(a, b Target) bool {
-	return a.ArtifactID == b.ArtifactID && a.Core == b.Core && a.Version == b.Version &&
+	return (!a.requireManifestVersion || a.coreManifestVersion == b.coreManifestVersion) &&
+		a.ArtifactID == b.ArtifactID && a.Core == b.Core && a.Version == b.Version &&
 		a.OS == b.OS && a.Architecture == b.Architecture && a.Filename == b.Filename &&
 		a.ArchiveFormat == b.ArchiveFormat && a.BuildOptions == b.BuildOptions &&
 		a.SourceID == b.SourceID && a.ReviewID == b.ReviewID &&

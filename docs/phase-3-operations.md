@@ -25,7 +25,7 @@ systemctl enable mcui-xray-recover.service
 2. 记录仓库 HTTPS metadata 地址、当前有效的 Xray 可审核 target、本机架构、版本和已审核 SHA-256。Xray 本地工具接受 `v主版本.次版本.补丁版本` 格式及有明确上游签名核验事实或无签名记录的已审核目标。面板目录里的 GitHub API digest 只用于发现及缓存校验。
 3. 按[阶段 2 认证时间配置](./phase-2-operations.md#11-配置认证-nts-时间)配置并检查 chrony。本地 root 工具通过 `/run/chrony/chronyd.sock` 读取认证状态。TUF 未授权、时间异常、摘要不符或仓库刷新失败均会中止制品操作。
 
-将环境变量填入已审核的具体值后执行。升级和降级的版本必须分别高于和低于已提交版本。节点原先已停止时仍会短暂检查候选进程，确认后恢复停止状态。
+将环境变量填入已审核的具体值后执行。升级和降级的版本必须分别高于和低于已提交版本。节点原先已停止时仍会短暂检查候选进程，确认后恢复停止状态。若审核锁定了 TUF 清单版本，为安装、升级或降级加上 `-manifest-version "$CORE_TARGETS_VERSION"`。下载前和激活前会重新核对当前 `core-targets` 版本。清单发生变化时，需要重新审核当前版本。
 
 ```sh
 mcui-xray install -metadata-url "$TUF_METADATA_URL" -version "$VERSION" -sha256 "$SHA256"

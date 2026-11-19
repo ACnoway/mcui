@@ -37,10 +37,12 @@ func run() error {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	var release xrayruntime.Release
 	var metadataURL string
+	var manifestVersion int64
 	action := xrayruntime.Action(command)
 	switch action {
 	case xrayruntime.Install, xrayruntime.Upgrade, xrayruntime.Downgrade:
 		flags.StringVar(&metadataURL, "metadata-url", "", "operator-configured TUF HTTPS metadata origin")
+		flags.Int64Var(&manifestVersion, "manifest-version", 0, "require this exact TUF core-targets version")
 		fallthrough
 	case xrayruntime.Start, xrayruntime.Stop, xrayruntime.Uninstall:
 		flags.StringVar(&release.Version, "version", "", "exact Xray release version")
@@ -58,6 +60,11 @@ func run() error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional argument")
 	}
+	manifestRequested := false
+	flags.Visit(func(opt *flag.Flag) { manifestRequested = manifestRequested || opt.Name == "manifest-version" })
+	if manifestRequested && manifestVersion <= 0 {
+		return errors.New("-manifest-version must be positive")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
@@ -74,7 +81,9 @@ func run() error {
 	case xrayruntime.Install, xrayruntime.Upgrade, xrayruntime.Downgrade:
 		var client *artifacttrust.Client
 		client, err = openTrust(metadataURL)
-		if err == nil {
+		if err == nil && manifestRequested {
+			err = runtime.ApplyWithManifest(ctx, action, release, client, manifestVersion)
+		} else if err == nil {
 			err = runtime.Apply(ctx, action, release, client)
 		}
 	default:

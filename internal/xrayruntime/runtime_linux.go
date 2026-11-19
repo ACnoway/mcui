@@ -80,6 +80,19 @@ func (r *Runtime) Status() (Status, error) { return r.readStatus() }
 
 // Apply fetches only the exact operator-selected, TUF-authorized release.
 func (r *Runtime) Apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client) error {
+	return r.apply(ctx, action, release, trust, 0)
+}
+
+// ApplyWithManifest pins the approved version of the Core targets delegation
+// across lookup, download, preflight and activation.
+func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64) error {
+	if manifestVersion <= 0 {
+		return artifacttrust.ErrUntrustedTarget
+	}
+	return r.apply(ctx, action, release, trust, manifestVersion)
+}
+
+func (r *Runtime) apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64) error {
 	state, err := r.ready()
 	if err != nil {
 		return err
@@ -91,7 +104,12 @@ func (r *Runtime) Apply(ctx context.Context, action Action, release Release, tru
 	if action != Install && action != Upgrade && action != Downgrade {
 		return errors.New("invalid Xray artifact action")
 	}
-	target, err := trust.Lookup(ctx, "xray", release.Version)
+	var target artifacttrust.Target
+	if manifestVersion != 0 {
+		target, err = trust.LookupCoreManifest(ctx, "xray", release.Version, manifestVersion)
+	} else {
+		target, err = trust.Lookup(ctx, "xray", release.Version)
+	}
 	if err != nil {
 		return err
 	}

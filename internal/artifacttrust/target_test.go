@@ -18,6 +18,28 @@ import (
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 )
 
+func TestManifestPinRequiresExactDelegationVersion(t *testing.T) {
+	approved := Target{Core: "xray", Version: "v26.10.31", coreManifestVersion: 7, requireManifestVersion: true}
+	for _, version := range []int64{0, 6, 7, 8} {
+		current := approved
+		current.coreManifestVersion = version
+		current.requireManifestVersion = false
+		if sameTarget(approved, current) != (version == 7) {
+			t.Fatalf("approval for version 7 compared incorrectly to version %d", version)
+		}
+	}
+	current := approved
+	approved.requireManifestVersion = false
+	current.coreManifestVersion++
+	if !sameTarget(approved, current) {
+		t.Fatal("a local unpinned operation rejected an unchanged target")
+	}
+	client := &Client{}
+	if _, err := client.LookupCoreManifest(t.Context(), "xray", "v26.10.31", 7); !errors.Is(err, ErrUntrustedTarget) {
+		t.Fatalf("accepted a client without independent Core role trust: %v", err)
+	}
+}
+
 func TestValidateCustomRequiresExactReviewedBinding(t *testing.T) {
 	digest := sha256.Sum256([]byte("artifact"))
 	custom := validCustom("xray", "v26.10.31", "amd64", digest[:])
