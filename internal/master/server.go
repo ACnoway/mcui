@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/store"
 	"golang.org/x/crypto/argon2"
@@ -108,6 +109,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.handleAPI("POST /api/v1/agent/tasks/ack", x.acknowledgeTask)
 	x.handleAPI("POST /api/v1/agent/tasks/renew-install", x.renewXrayInstallLease)
 	x.handleAPI("POST /api/v1/helper/tasks/authorize", x.authorizeHelperTask)
+	x.handleAPI("POST "+artifacttrust.BackupEndpoint, x.serveXrayBackup)
 	if webDir != "" {
 		x.mux.Handle("/", x.staticHandler(webDir))
 	}

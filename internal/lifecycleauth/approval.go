@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	maxSequence   = 9007199254740991
-	maxProofBytes = 16 << 10
-	maxPolicySize = 256 << 10
-	maxUnixTime   = 253402300799
-	proposalTTL   = 30 * time.Minute
-	taskTTL       = 10 * time.Minute
-	requestDomain = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
+	maxSequence                   = 9007199254740991
+	maxProofBytes                 = 16 << 10
+	maxPolicySize                 = 256 << 10
+	maxUnixTime                   = 253402300799
+	proposalTTL                   = 30 * time.Minute
+	taskTTL                       = 10 * time.Minute
+	requestDomain                 = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
+	SignedManifestProposalVersion = 3
 )
 
 var (
@@ -147,14 +148,14 @@ func ParseProposal(raw []byte) (Proposal, error) {
 func ParseRequest(raw []byte) (Request, error) {
 	var request Request
 	if len(raw) > maxProofBytes || jsonv2.Unmarshal(raw, &request, jsonv2.RejectUnknownMembers(true)) != nil ||
-		request.Proposal.SchemaVersion != 2 || !request.Proposal.valid() {
+		!request.Proposal.singleOperator() || !request.Proposal.valid() {
 		return Request{}, ErrDenied
 	}
 	return request, nil
 }
 
 func (p Proposal) valid() bool {
-	validSchema := (p.SchemaVersion == 2 && p.ApproverID == "") ||
+	validSchema := (p.singleOperator() && p.ApproverID == "") ||
 		(p.SchemaVersion == 1 && identifier.MatchString(p.ApproverID) && p.ApproverID != p.RequesterID)
 	return validSchema && p.Operation == "core.install" && p.Core == "xray" &&
 		taskIDPattern.MatchString(p.TaskID) && security.ValidNodeID(p.NodeID) &&
@@ -163,6 +164,10 @@ func (p Proposal) valid() bool {
 		identifier.MatchString(p.RequesterID) &&
 		identifier.MatchString(p.SigningKeyID) && p.CreatedAt > 0 && p.ExpiresAt <= maxUnixTime &&
 		p.CreatedAt < p.ExpiresAt && p.ExpiresAt-p.CreatedAt <= int64(proposalTTL/time.Second)
+}
+
+func (p Proposal) singleOperator() bool {
+	return p.SchemaVersion == 2 || p.SchemaVersion == SignedManifestProposalVersion
 }
 
 func (policy *Policy) requesterKey(p Proposal) ed25519.PublicKey {
@@ -198,7 +203,7 @@ func (policy *Policy) UsesPublicKey(key ed25519.PublicKey) bool {
 
 func (policy *Policy) SignRequest(p Proposal, key ed25519.PrivateKey, now time.Time) (Request, error) {
 	at := now.Unix()
-	if p.SchemaVersion != 2 || !matchesPrivate(key, policy.requesterKey(p)) || at < p.CreatedAt || at >= p.ExpiresAt {
+	if !p.singleOperator() || !matchesPrivate(key, policy.requesterKey(p)) || at < p.CreatedAt || at >= p.ExpiresAt {
 		return Request{}, ErrDenied
 	}
 	message, err := signingBytes(requestDomain, requestContent{Proposal: p, RequestedAt: at})
@@ -212,7 +217,7 @@ func (policy *Policy) SignRequest(p Proposal, key ed25519.PrivateKey, now time.T
 func (policy *Policy) VerifyRequest(r Request, now time.Time) (string, error) {
 	p := r.Proposal
 	operator := policy.requesterKey(p)
-	if p.SchemaVersion != 2 || operator == nil || r.RequestedAt < p.CreatedAt ||
+	if !p.singleOperator() || operator == nil || r.RequestedAt < p.CreatedAt ||
 		r.RequestedAt > now.Unix() || now.Unix() >= r.taskExpiry() {
 		return "", ErrDenied
 	}

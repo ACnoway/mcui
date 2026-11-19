@@ -70,13 +70,14 @@ type Ack struct {
 }
 
 type taskEnvelope struct {
-	SchemaVersion int       `json:"schema_version"`
-	TaskID        string    `json:"task_id"`
-	NodeID        string    `json:"node_id"`
-	Sequence      int64     `json:"sequence"`
-	KeyID         string    `json:"signing_key_id"`
-	Operation     string    `json:"operation"`
-	ExpiresAt     time.Time `json:"expires_at"`
+	SignedManifest bool      `json:"-"`
+	SchemaVersion  int       `json:"schema_version"`
+	TaskID         string    `json:"task_id"`
+	NodeID         string    `json:"node_id"`
+	Sequence       int64     `json:"sequence"`
+	KeyID          string    `json:"signing_key_id"`
+	Operation      string    `json:"operation"`
+	ExpiresAt      time.Time `json:"expires_at"`
 }
 
 type Store struct{ db *sql.DB }
@@ -550,7 +551,7 @@ func (s *Store) provision(body taskEnvelope, raw []byte) error {
 // of the same task again and never creates a replacement task. The key ID and
 // key must be supplied from trusted local configuration for every delivery.
 func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey) (Delivery, error) {
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, false)
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, "")
 }
 
 // LeaseExpected reconciles the Agent's durable next sequence before leasing
@@ -560,17 +561,17 @@ func (s *Store) LeaseExpected(authenticatedNodeID string, now time.Time, configu
 	if expectedSequence < 1 || expectedSequence > MaxSequence || buildSkip == nil {
 		return Delivery{}, fmt.Errorf("%w: invalid expected sequence recovery", ErrInvalid)
 	}
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, false)
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, "")
 }
 
-func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable bool) (Delivery, error) {
+func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string) (Delivery, error) {
 	if expected < 0 || expected > MaxSequence || expected > 0 && buildSkip == nil {
 		return Delivery{}, ErrInvalid
 	}
-	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, installCapable && expected > 0)
+	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, mode)
 }
 
-func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable bool) (Delivery, error) {
+func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string) (Delivery, error) {
 	var zero Delivery
 	if s == nil || s.db == nil || authenticatedNodeID == "" || now.IsZero() || configuredKeyID == "" || len(configuredKey) != ed25519.PublicKeySize {
 		return zero, fmt.Errorf("%w: invalid lease arguments", ErrInvalid)
@@ -592,6 +593,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 		return zero, err
 	}
 	defer tx.Rollback()
+	installCapable := expectedSequence > 0 && (mode == "xray-v1" || mode == "xray-manifest-v1")
 	if expectedSequence > 0 {
 		recovery, isRecovery, recoverErr := s.recoverExpectedSequence(tx, authenticatedNodeID, expectedSequence, now, configuredKeyID, configuredKey, buildSkip, installKey, installCapable)
 		if recoverErr != nil {
@@ -629,6 +631,9 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	body, err := verifyDeliveryTask(d.Raw, storedKey, configuredKeyID, configuredKey, installKey, installCapable)
 	if err != nil {
 		return zero, err
+	}
+	if body.Operation == "core.install" && body.SignedManifest != (mode == "xray-manifest-v1") {
+		return zero, ErrNotFound
 	}
 	if body.NodeID != authenticatedNodeID || body.NodeID != d.NodeID || body.TaskID != d.TaskID || body.Sequence != d.Sequence || body.KeyID != storedKey {
 		return zero, ErrIdentity
@@ -852,7 +857,7 @@ func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed2
 			return body, ErrNotFound
 		}
 		if task, err := installKey.Verify(raw); err == nil {
-			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: "core.install", ExpiresAt: task.ExpiresAt}, nil
+			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: "core.install", ExpiresAt: task.ExpiresAt, SignedManifest: task.SignedManifest}, nil
 		}
 	}
 	return body, ErrIdentity

@@ -28,6 +28,7 @@ type InstallTask struct {
 	Sequence, ManifestVersion         int64
 	Version, Architecture, SHA256     string
 	NotBefore, ExpiresAt              time.Time
+	SignedManifest                    bool
 }
 
 // Verify validates the exact signed V1 Xray install envelope against a
@@ -40,8 +41,12 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 		wire.Payload.Core != "xray" || !digestPattern.MatchString(wire.ApprovalID) || wire.IssuedAt != wire.NotBefore {
 		return InstallTask{}, ErrDenied
 	}
-	architecture, digest, ok := strings.Cut(strings.TrimPrefix(wire.Payload.ArtifactID, "xray-"), "-")
-	if !ok || wire.Payload.ArtifactID != "xray-"+architecture+"-"+digest ||
+	prefix := "xray-"
+	if strings.HasPrefix(wire.Payload.ArtifactID, "xray-manifest-") {
+		prefix = "xray-manifest-"
+	}
+	architecture, digest, ok := strings.Cut(strings.TrimPrefix(wire.Payload.ArtifactID, prefix), "-")
+	if !ok || wire.Payload.ArtifactID != prefix+architecture+"-"+digest ||
 		(architecture != "amd64" && architecture != "arm64") || !corecatalog.ValidXrayRelease(wire.Payload.Version, digest) {
 		return InstallTask{}, ErrDenied
 	}
@@ -56,13 +61,14 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 	return InstallTask{
 		TaskID: wire.TaskID, NodeID: wire.NodeID, KeyID: key.ID, ApprovalID: wire.ApprovalID,
 		Sequence: wire.Sequence, ManifestVersion: wire.Payload.ManifestVersion, Version: wire.Payload.Version,
-		Architecture: architecture, SHA256: digest, NotBefore: before, ExpiresAt: expires,
+		Architecture: architecture, SHA256: digest, NotBefore: before, ExpiresAt: expires, SignedManifest: prefix == "xray-manifest-",
 	}, nil
 }
 
 func (t InstallTask) Matches(p Proposal, id string) bool {
 	return id == t.ApprovalID && p.TaskID == t.TaskID && p.NodeID == t.NodeID && p.SigningKeyID == t.KeyID &&
 		p.Sequence == t.Sequence && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
+		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion) &&
 		p.Architecture == t.Architecture && p.SHA256 == t.SHA256 &&
 		t.NotBefore.Unix() >= p.CreatedAt && t.ExpiresAt.Unix() <= p.ExpiresAt
 }

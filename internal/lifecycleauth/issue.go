@@ -79,12 +79,16 @@ func signInstallTask(request Request, requestID string, key ed25519.PrivateKey, 
 
 func expectedInstallTask(request Request, requestID string) installTask {
 	p := request.Proposal
+	prefix := "xray-"
+	if p.SchemaVersion == SignedManifestProposalVersion {
+		prefix = "xray-manifest-"
+	}
 	issued := time.Unix(request.RequestedAt, 0).UTC().Format(time.RFC3339)
 	return installTask{
 		SchemaVersion: 1, TaskID: p.TaskID, NodeID: p.NodeID, Sequence: p.Sequence, Operation: p.Operation,
 		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(request.taskExpiry(), 0).UTC().Format(time.RFC3339),
 		Payload: installPayload{Core: p.Core, Version: p.Version,
-			ArtifactID: "xray-" + p.Architecture + "-" + p.SHA256, ManifestVersion: p.ManifestVersion},
+			ArtifactID: prefix + p.Architecture + "-" + p.SHA256, ManifestVersion: p.ManifestVersion},
 		ApprovalID: requestID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
 	}
 }

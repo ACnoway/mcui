@@ -23,6 +23,7 @@ import (
 	"github.com/ACnoway/mcui/internal/agenttasks"
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/checkpoint"
+	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/helper"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/store"
@@ -127,7 +128,7 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	proposal, err := lifecycleauth.ParseProposal(record.Proposal)
-	if err != nil || proposal.SchemaVersion != 2 || proposal.Sequence != 1 || record.Status != "AWAITING_SIGNATURE" {
+	if err != nil || proposal.SchemaVersion != lifecycleauth.SignedManifestProposalVersion || proposal.Sequence != 1 || record.Status != "AWAITING_SIGNATURE" {
 		t.Fatalf("proposal = %+v, status = %s, error = %v", proposal, record.Status, err)
 	}
 	retry := request(http.MethodPost, base, "test-session-token", client.csrf, in)
@@ -193,9 +194,10 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	assertStatus(request(http.MethodPost, dispatch, "test-session-token", client.csrf, map[string]any{}), http.StatusCreated)
 	assertStatus(request(http.MethodPost, dispatch, "test-session-token", client.csrf, map[string]any{}), http.StatusOK)
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=1", nil, true), http.StatusNoContent)
+	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-v1&next_sequence=1", nil, true), http.StatusNoContent)
 	download := func(expected string) helperAuthorizationRequest {
 		t.Helper()
-		response := client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-v1&next_sequence="+expected, nil, true)
+		response := client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence="+expected, nil, true)
 		assertStatus(response, http.StatusOK)
 		var check helperAuthorizationRequest
 		if err := json.Unmarshal(response.Body.Bytes(), &check); err != nil || len(check.LeaseID) != 32 || !bytes.Equal(check.Task, task) {
@@ -206,6 +208,26 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	leased := download("1")
 	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", leased, true), http.StatusOK)
 	assertStatus(client.request(http.MethodPost, "/api/v1/agent/tasks/renew-install", leased, true), http.StatusNoContent)
+	backupPath := filepath.Join(t.TempDir(), "test-backup")
+	const backupPayload = "cached fixture"
+	if err := os.WriteFile(backupPath, []byte(backupPayload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client.server.ConfigureCoreBackups(installTestCache(func(core, version, arch, digest string, size int64) (*os.File, error) {
+		if core != "xray" || version != in.Version || arch != in.Architecture || digest != in.SHA256 || size != int64(len(backupPayload)) {
+			return nil, os.ErrNotExist
+		}
+		return os.Open(backupPath)
+	}))
+	backupReq := artifacttrust.BackupRequest{Task: leased.Task, LeaseID: leased.LeaseID, Length: int64(len(backupPayload))}
+	res = client.request(http.MethodPost, artifacttrust.BackupEndpoint, backupReq, true)
+	assertStatus(res, http.StatusOK)
+	if res.Body.String() != backupPayload {
+		t.Fatalf("received wrong cached artifact: %s", res.Body)
+	}
+	wrongSize := backupReq
+	wrongSize.Length++
+	assertStatus(client.request(http.MethodPost, artifacttrust.BackupEndpoint, wrongSize, true), http.StatusNotFound)
 	agentLedgerPath := filepath.Join(privateTestDir(t), "agent.db")
 	nodeLedger, err := taskledger.Initialize(agentLedgerPath)
 	if err != nil {
@@ -263,6 +285,7 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		t.Fatal("expired delivery reused the old lease")
 	}
 	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", leased, true), http.StatusForbidden)
+	assertStatus(client.request(http.MethodPost, artifacttrust.BackupEndpoint, backupReq, true), http.StatusForbidden)
 	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", recovered, true), http.StatusOK)
 	acks, err = runner.ProcessXrayInstall(t.Context(), recovered.Task, recovered.LeaseID, nil, 0, now)
 	if err != nil || calls.Load() != 1 || len(acks) != 4 || acks[3].Status != "SUCCEEDED" {
@@ -275,7 +298,7 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	if err := client.server.ReconcileTaskRuntime(); err != nil {
 		t.Fatalf("reconcile recorded installation: %v", err)
 	}
-	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-v1&next_sequence=2", nil, true), http.StatusNoContent)
+	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=2", nil, true), http.StatusNoContent)
 
 	advance(30 * time.Minute)
 	assertStatus(request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, issueBody), http.StatusConflict)
@@ -285,6 +308,16 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	changed.TaskID = "xray-install-0000000000003"
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, changed), http.StatusConflict)
 	assertStatus(client.request(http.MethodPost, "/api/v1/admin/tasks", status, false), http.StatusCreated)
+}
+
+type installTestCache func(string, string, string, string, int64) (*os.File, error)
+
+func (c installTestCache) OpenExact(core, version, arch, digest string, length int64) (*os.File, error) {
+	return c(core, version, arch, digest, length)
+}
+
+func (installTestCache) Snapshot() (corecatalog.BackupManifest, error) {
+	return corecatalog.BackupManifest{}, nil
 }
 
 func privateTestDir(t *testing.T) string {

@@ -42,6 +42,7 @@ func main() {
 	installKeyPath := flag.String("xray-install-public-key", os.Getenv("MCUI_XRAY_INSTALL_PUBLIC_KEY"), "trusted Xray install signing public key")
 	tufRoot := flag.String("xray-tuf-root", os.Getenv("MCUI_XRAY_TUF_ROOT"), "locally provisioned Xray TUF root")
 	tufOrigin := flag.String("xray-tuf-origin", os.Getenv("MCUI_XRAY_TUF_ORIGIN"), "approved Xray TUF HTTPS metadata origin")
+	releaseKeyPath := flag.String("xray-release-public-key", os.Getenv("MCUI_XRAY_RELEASE_PUBLIC_KEY"), "locally provisioned artifact release public key")
 	stateDir := flag.String("state-dir", "/var/lib/mcui-helper", "root-owned private helper state directory")
 	socketPath := flag.String("socket", "/run/mcui/helper.sock", "Agent-facing Unix socket")
 	agentUser := flag.String("agent-user", "mcui-agent", "unprivileged Agent account")
@@ -91,7 +92,8 @@ func main() {
 		log.Fatalf("configure Master checkpoint: %v", err)
 	}
 	trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
-	installEnabled := *installKeyID != "" || *installKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
+	installEnabled := *installKeyID != "" || *installKeyPath != "" || *releaseKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
+	signedManifest := *releaseKeyPath != ""
 	config := helper.Config{
 		NodeID:             *nodeID,
 		AllowedUID:         uint32(allowedUID),
@@ -107,8 +109,9 @@ func main() {
 		},
 	}
 	if installEnabled {
-		if *installKeyID == "" || *installKeyPath == "" || *tufRoot == "" || *tufOrigin == "" {
-			log.Fatal("Xray installs require all Xray trust options")
+		if *installKeyID == "" || *installKeyPath == "" ||
+			(signedManifest && (*tufRoot != "" || *tufOrigin != "")) || (!signedManifest && (*tufRoot == "" || *tufOrigin == "")) {
+			log.Fatal("Xray installs require task trust and exactly one artifact trust configuration")
 		}
 		raw, err := os.ReadFile(*installKeyPath)
 		if err != nil {
@@ -120,16 +123,27 @@ func main() {
 		}
 		clock := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource)
 		config.TrustedTimeHealthy = clock.Healthy
-		artifacts, err := artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(*stateDir, "xray-tuf"), func() error {
-			_, err := clock.Now()
-			return err
-		})
+		var artifacts *artifacttrust.Client
+		if signedManifest {
+			artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(xrayruntime.StateDir, "control", "xray-manifest"), clock.Now, publicKey, key)
+			if err == nil {
+				err = artifacts.ConfigureMasterBackup(*masterURL, *masterCAPath)
+			}
+		} else {
+			artifacts, err = artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(*stateDir, "xray-tuf"), func() error {
+				_, err := clock.Now()
+				return err
+			})
+		}
 		if err != nil {
 			log.Fatalf("open Helper Xray artifact trust: %v", err)
 		}
 		config.XrayInstall = &helper.XrayInstallConfig{
 			Key: lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key},
 			Apply: func(ctx context.Context, task lifecycleauth.InstallTask, authorize func(context.Context) error) (string, error) {
+				if task.SignedManifest != signedManifest {
+					return "FAILED", nil
+				}
 				runtime, err := xrayruntime.Open(false)
 				if err != nil {
 					return "", err

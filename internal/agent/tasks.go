@@ -31,7 +31,12 @@ type InstallTaskHandler interface {
 	ProcessXrayInstall(context.Context, []byte, string, []byte, int64, time.Time) ([]TaskAck, error)
 }
 
-func (c *Client) EnableXrayInstalls() { c.xrayInstalls = true }
+func (c *Client) EnableXrayInstalls(signedManifest bool) {
+	c.xrayInstallMode = "xray-v1"
+	if signedManifest {
+		c.xrayInstallMode = "xray-manifest-v1"
+	}
+}
 
 type StatusExecutor interface {
 	ExecuteStatus(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error)
@@ -90,8 +95,8 @@ func (c *Client) processStatusTask(state localState) error {
 			return errors.New("Agent task sequence is unavailable")
 		}
 		endpoint += "?next_sequence=" + strconv.FormatInt(next, 10)
-		if c.xrayInstalls {
-			endpoint += "&install=xray-v1"
+		if c.xrayInstallMode != "" {
+			endpoint += "&install=" + c.xrayInstallMode
 		}
 	}
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
@@ -133,7 +138,7 @@ func (c *Client) processStatusTask(state localState) error {
 	install := false
 	if len(delivery.Task) > 0 {
 		if _, err = protocol.CanonicalV2TaskBytes(delivery.Task); err != nil {
-			if _, v1Err := protocol.CanonicalSignedBytes(protocol.Task, delivery.Task); !c.xrayInstalls || v1Err != nil {
+			if _, v1Err := protocol.CanonicalSignedBytes(protocol.Task, delivery.Task); c.xrayInstallMode == "" || v1Err != nil {
 				return fmt.Errorf("invalid signed task envelope: %w", err)
 			}
 			install = true

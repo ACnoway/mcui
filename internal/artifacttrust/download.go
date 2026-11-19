@@ -33,23 +33,18 @@ func (c *Client) downloadLocked(ctx context.Context, target Target) (string, err
 	if target.SourceURL == "" || target.SourceURL != expectedSourceURL(target) {
 		return "", ErrUntrustedTarget
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.SourceURL, nil)
+	source, unavailable, err := c.openOfficial(ctx, target)
 	if err != nil {
-		return "", fmt.Errorf("%w: invalid fixed source", ErrDownload)
+		if !unavailable || c.backup == nil {
+			return "", err
+		}
+		backup, backupErr := c.backup.open(ctx, target)
+		if backupErr != nil {
+			return "", errors.Join(err, backupErr)
+		}
+		source = backup
 	}
-	request.Header.Set("Accept-Encoding", "identity")
-	request.Header.Set("User-Agent", "mcui-artifact-client/1")
-	response, err := c.artifactHTTP.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("%w: request to fixed official source failed", ErrDownload)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.Request == nil || !allowedArtifactHost(response.Request.URL.Hostname()) {
-		return "", fmt.Errorf("%w: source returned an invalid response", ErrDownload)
-	}
-	if response.ContentLength >= 0 && response.ContentLength != target.Size {
-		return "", fmt.Errorf("%w: declared length differs from TUF target", ErrDownload)
-	}
+	defer source.Close()
 	temp, err := os.CreateTemp(c.targetCacheDir, ".download-")
 	if err != nil {
 		return "", fmt.Errorf("%w: create private staging file", ErrDownload)
@@ -61,10 +56,10 @@ func (c *Client) downloadLocked(ctx context.Context, target Target) (string, err
 		return "", fmt.Errorf("%w: secure staging file", ErrDownload)
 	}
 	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temp, hasher), io.LimitReader(response.Body, target.Size+1))
+	written, copyErr := io.Copy(io.MultiWriter(temp, hasher), io.LimitReader(source, target.Size+1))
 	if copyErr != nil || written != target.Size || hex.EncodeToString(hasher.Sum(nil)) != target.SHA256 {
 		_ = temp.Close()
-		return "", fmt.Errorf("%w: downloaded bytes do not match TUF length and SHA-256", ErrDownload)
+		return "", fmt.Errorf("%w: downloaded bytes do not match authorized length and SHA-256", ErrDownload)
 	}
 	if err = temp.Sync(); err == nil {
 		err = temp.Chmod(0400)
@@ -88,6 +83,33 @@ func (c *Client) downloadLocked(ctx context.Context, target Target) (string, err
 		return "", fmt.Errorf("%w: sync artifact cache directory", ErrDownload)
 	}
 	return path, nil
+}
+
+func (c *Client) openOfficial(ctx context.Context, target Target) (io.ReadCloser, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.SourceURL, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: invalid fixed source", ErrDownload)
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", "mcui-artifact-client/1")
+	res, err := c.artifactHTTP.Do(req)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: request to fixed official source failed", ErrDownload)
+	}
+	if res.Request == nil || !allowedArtifactHost(res.Request.URL.Hostname()) {
+		_ = res.Body.Close()
+		return nil, false, fmt.Errorf("%w: source returned an invalid response", ErrDownload)
+	}
+	if res.StatusCode != http.StatusOK {
+		_ = res.Body.Close()
+		retry := res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusTooManyRequests || res.StatusCode >= 500
+		return nil, retry, fmt.Errorf("%w: official source returned HTTP %d", ErrDownload, res.StatusCode)
+	}
+	if res.ContentLength >= 0 && res.ContentLength != target.Size {
+		_ = res.Body.Close()
+		return nil, false, fmt.Errorf("%w: declared length differs from authorized length", ErrDownload)
+	}
+	return res.Body, false, nil
 }
 
 func expectedSourceURL(target Target) string {

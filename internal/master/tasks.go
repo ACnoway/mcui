@@ -787,7 +787,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 			return nil, buildErr
 		}
 		return runtime.Signer.SignControl(protocol.Skip, unsigned)
-	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install") == "xray-v1")
+	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install"))
 	if errors.Is(err, taskdispatch.ErrNotFound) || errors.Is(err, taskdispatch.ErrLeaseActive) {
 		w.WriteHeader(http.StatusNoContent)
 		return

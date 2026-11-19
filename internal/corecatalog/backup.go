@@ -104,6 +104,47 @@ func (b *BackupStore) Snapshot() (BackupManifest, error) {
 	return cloneBackupManifest(manifest), nil
 }
 
+// OpenExact only serves an asset still referenced by the verified cache index.
+// The recipient must independently verify the returned bytes against its release manifest.
+func (b *BackupStore) OpenExact(coreID, version, arch, digest string, length int64) (*os.File, error) {
+	name, nameErr := ExpectedAssetName(coreID, version, arch)
+	source, sourceErr := OfficialAssetURL(coreID, version, arch)
+	if nameErr != nil || sourceErr != nil || !digestPattern.MatchString("sha256:"+digest) ||
+		length <= 0 || length > backupMaxAssetSize {
+		return nil, os.ErrNotExist
+	}
+	manifest, err := b.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	core, ok := findBackupCore(manifest, coreID)
+	if !ok || core.Version != version {
+		return nil, os.ErrNotExist
+	}
+	for _, asset := range core.Assets {
+		if asset.Architecture != arch || asset.Name != name || asset.SourceURL != source ||
+			asset.Size != length || asset.Digest != "sha256:"+digest {
+			continue
+		}
+		path := filepath.Join(b.root, asset.StorageKey)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() != length || info.Mode().Perm()&0077 != 0 {
+			return nil, os.ErrNotExist
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		opened, err := file.Stat()
+		if err != nil || !os.SameFile(info, opened) || opened.Size() != length {
+			_ = file.Close()
+			return nil, os.ErrNotExist
+		}
+		return file, nil
+	}
+	return nil, os.ErrNotExist
+}
+
 func (b *BackupStore) Sync(ctx context.Context) (BackupManifest, error) {
 	if b == nil || b.catalog == nil || b.httpClient == nil || b.now == nil {
 		return BackupManifest{}, errors.New("Core backup store unavailable")
@@ -265,8 +306,7 @@ func ExpectedAssetName(coreID, version, arch string) (string, error) {
 	return expectedAssetName(coreID, version, arch)
 }
 
-// OfficialSourceID returns the stable identifier used in reviewed TUF target
-// metadata. It is deliberately separate from any user-provided URL.
+// OfficialSourceID returns the stable identifier used in release manifests.
 func OfficialSourceID(coreID string) (string, error) {
 	for _, p := range providers {
 		if p.id == coreID {

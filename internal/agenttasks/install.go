@@ -79,7 +79,7 @@ func (r *Runner) ProcessXrayInstall(ctx context.Context, raw []byte, leaseID str
 	}
 	var artifactErr error
 	if install.ActiveAt(now) {
-		artifactErr = r.xrayInstall.prepare(ctx, install)
+		artifactErr = r.xrayInstall.prepare(artifacttrust.WithInstallLease(ctx, raw, leaseID), install)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -124,6 +124,9 @@ func (r *Runner) ProcessXrayInstall(ctx context.Context, raw []byte, leaseID str
 
 func (r *installRuntime) prepare(ctx context.Context, install lifecycleauth.InstallTask) error {
 	if install.Architecture != runtime.GOARCH {
+		return lifecycleauth.ErrDenied
+	}
+	if backend, ok := r.artifacts.(interface{ UsesSignedManifest() bool }); ok && backend.UsesSignedManifest() != install.SignedManifest {
 		return lifecycleauth.ErrDenied
 	}
 	target, err := r.artifacts.LookupCoreManifest(ctx, "xray", install.Version, install.ManifestVersion)

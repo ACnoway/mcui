@@ -100,7 +100,7 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proposal := lifecycleauth.Proposal{
-		SchemaVersion: 2, Core: "xray", Operation: "core.install",
+		SchemaVersion: lifecycleauth.SignedManifestProposalVersion, Core: "xray", Operation: "core.install",
 		TaskID: in.TaskID, NodeID: in.NodeID, RequesterID: ctx.Admin.ID,
 		Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, ManifestVersion: in.ManifestVersion,
 		SigningKeyID: policy.SigningKeyID(), CreatedAt: now.Unix(), ExpiresAt: now.Add(30 * time.Minute).Unix(),
@@ -188,7 +188,7 @@ func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p := request.Proposal
-	if p.TaskID != r.PathValue("id") || p.RequesterID != ctx.Admin.ID {
+	if p.SchemaVersion != lifecycleauth.SignedManifestProposalVersion || p.TaskID != r.PathValue("id") || p.RequesterID != ctx.Admin.ID {
 		http.NotFound(w, r)
 		return
 	}
@@ -282,6 +282,10 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.taskRecordView(existing))
 		return
 	}
+	if !task.SignedManifest {
+		http.Error(w, "rebuild the legacy proposal with the signed release manifest", http.StatusConflict)
+		return
+	}
 	if !task.ActiveAt(now) {
 		http.Error(w, "signed Xray install task expired or not yet valid", http.StatusConflict)
 		return
@@ -314,7 +318,7 @@ func (s *Server) readXrayDispatch(id, requester string, policy *lifecycleauth.Po
 		if err != nil {
 			return err
 		}
-		if p.SchemaVersion != 2 || p.RequesterID != requester || !canPrepareXrayInstall(&st, p) || !policy.AllowsProposal(p) {
+		if p.SchemaVersion < 2 || p.RequesterID != requester || !canPrepareXrayInstall(&st, p) || !policy.AllowsProposal(p) {
 			return errXrayInstallScope
 		}
 		if len(record.SignedTask) == 0 {

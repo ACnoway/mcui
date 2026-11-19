@@ -82,13 +82,13 @@ func (r *Runtime) Close() error { return r.lock.Close() }
 
 func (r *Runtime) Status() (Status, error) { return r.readStatus() }
 
-// Apply fetches only the exact operator-selected, TUF-authorized release.
+// Apply fetches only the exact operator-selected and authorized release.
 func (r *Runtime) Apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client) error {
 	return r.apply(ctx, action, release, trust, 0, nil)
 }
 
-// ApplyWithManifest pins the approved version of the Core targets delegation
-// across lookup, download, preflight and activation.
+// ApplyWithManifest pins the approved manifest version across lookup,
+// download, preflight and activation.
 func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64) error {
 	if manifestVersion <= 0 {
 		return artifacttrust.ErrUntrustedTarget

@@ -1,5 +1,4 @@
-// Package artifacttrust resolves and downloads Core artifacts authorized by a
-// TUF repository. It does not install or execute artifacts.
+// Package artifacttrust resolves and downloads authorized Core artifacts.
 package artifacttrust
 
 import (
@@ -88,6 +87,8 @@ type Client struct {
 	metadataHTTP    *http.Client
 	artifactHTTP    *http.Client
 	requireCoreRole bool
+	signed          *manifestClient
+	backup          *masterBackup
 	mu              sync.Mutex
 }
 
@@ -241,6 +242,9 @@ func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target
 	filename, err := corecatalog.ExpectedAssetName(core, version, runtime.GOARCH)
 	if err != nil {
 		return Target{}, fmt.Errorf("%w: unsupported Core target", ErrUntrustedTarget)
+	}
+	if c.signed != nil {
+		return c.lookupSigned(ctx, core, version, runtime.GOARCH, filename)
 	}
 	targetPath := "cores/" + core + "/" + version + "/linux/" + runtime.GOARCH + "/" + filename
 	trustedRoot, err := c.latestTrustedRoot()

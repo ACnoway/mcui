@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"golang.org/x/sys/unix"
@@ -265,7 +266,7 @@ func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (st
 			return h.executeAuthorized(raw, t, install.NotBefore, install.NotBefore, install.ExpiresAt, serverTime, previousSequence, true, false, func(now time.Time) (string, error) {
 				ctx, cancel := context.WithDeadline(context.Background(), install.ExpiresAt)
 				defer cancel()
-				outcome, err := h.cfg.XrayInstall.Apply(ctx, install, func(ctx context.Context) error {
+				outcome, err := h.cfg.XrayInstall.Apply(artifacttrust.WithInstallLease(ctx, raw, leaseIDs[0]), install, func(ctx context.Context) error {
 					server, previous, err := h.cfg.Checkpoint.AuthorizeStatus(ctx, raw, leaseIDs[0])
 					if err != nil || previous != install.Sequence-1 || !h.cfg.TrustedTimeHealthy() {
 						return ErrDenied
