@@ -29,7 +29,7 @@ func main() {
 
 func run(args []string, output io.Writer, trustedNow func() (time.Time, error)) error {
 	if len(args) == 0 {
-		return errors.New("usage: mcui-lifecycle <request|approve|init-ledger|issue> [flags]")
+		return errors.New("usage: mcui-lifecycle <request|init-ledger|issue> [flags]")
 	}
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -43,17 +43,17 @@ func run(args []string, output io.Writer, trustedNow func() (time.Time, error)) 
 			return errors.New("init-ledger requires -ledger")
 		}
 		return lifecycleauth.InitLedger(*path)
-	case "request", "approve", "issue":
+	case "request", "issue":
 		return signCommand(command, flags, args[1:], output, trustedNow)
 	default:
-		return errors.New("expected request, approve, init-ledger or issue")
+		return errors.New("expected request, init-ledger or issue")
 	}
 }
 
 func signCommand(command string, flags *flag.FlagSet, args []string, output io.Writer, trustedNow func() (time.Time, error)) error {
 	policyPath := flags.String("policy", "", "trusted Xray authorization policy JSON")
 	keyPath := flags.String("key", "", "local Ed25519 PKCS#8 private key PEM")
-	inputPath := flags.String("input", "", "proposal, request or approval JSON")
+	inputPath := flags.String("input", "", "proposal or signed request JSON")
 	var ledgerPath *string
 	if command == "issue" {
 		ledgerPath = flags.String("ledger", "", "existing signing ledger path")
@@ -92,23 +92,13 @@ func signCommand(command string, flags *flag.FlagSet, args []string, output io.W
 			return err
 		}
 		return json.NewEncoder(output).Encode(request)
-	case "approve":
-		request, err := lifecycleauth.ParseRequest(input)
-		if err != nil {
-			return err
-		}
-		approval, err := policy.Approve(request, key, time.Now())
-		if err != nil {
-			return err
-		}
-		return json.NewEncoder(output).Encode(approval)
 	default:
 		return issue(policy, input, key, *ledgerPath, output, trustedNow)
 	}
 }
 
 func issue(policy *lifecycleauth.Policy, input []byte, key ed25519.PrivateKey, path string, output io.Writer, trustedNow func() (time.Time, error)) error {
-	approval, err := lifecycleauth.ParseApproval(input)
+	request, err := lifecycleauth.ParseRequest(input)
 	if err != nil {
 		return err
 	}
@@ -123,7 +113,7 @@ func issue(policy *lifecycleauth.Policy, input []byte, key ed25519.PrivateKey, p
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	task, err := policy.Issue(ctx, ledger, approval, key, now)
+	task, err := policy.Issue(ctx, ledger, request, key, now)
 	if err != nil {
 		return err
 	}

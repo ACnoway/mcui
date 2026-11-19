@@ -9,9 +9,8 @@ type StatusTask = { task_id: string; node_id: string; sequence: number; created_
 type ManagedAdmin = { id: string; username: string; role: string; node_ids: string[]; node_groups: string[]; disabled: boolean }
 type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean }
 type XrayInstall = {
-  proposal: { task_id: string; node_id: string; sequence: number; version: string; architecture: string; sha256: string; manifest_version: number; requester_id: string; approver_id: string; expires_at: number }
-  approval_id?: string
-  status: 'AWAITING_APPROVAL' | 'APPROVAL_RECORDED' | 'SIGNED_TASK_VERIFIED' | 'EXPIRED'
+  proposal: { task_id: string; node_id: string; sequence: number; version: string; architecture: string; sha256: string; manifest_version: number; requester_id: string; expires_at: number }
+  status: 'AWAITING_SIGNATURE' | 'SIGNED_TASK_VERIFIED' | 'EXPIRED' | 'LEGACY'
 }
 type CoreCatalogAsset = { name: string; size: number; download_url: string; digest?: string }
 type CoreCatalogRelease = { version: string; title: string; published_at: string; prerelease: boolean; url: string; assets: CoreCatalogAsset[] }
@@ -29,10 +28,10 @@ const audits = ref<Audit[]>([])
 const tasks = ref<StatusTask[]>([])
 const statusTasks = computed(() => tasks.value.filter(task => task.operation === 'core.status'))
 const xrayInstalls = ref<XrayInstall[]>([])
-const xrayInstallInput = ref({ version: '', architecture: 'amd64', sha256: '', manifest_version: '' as number | '', approver_id: '' })
+const xrayInstallInput = ref({ version: '', architecture: 'amd64', sha256: '', manifest_version: '' as number | '' })
 const xrayInstallBusy = ref(false)
 const xrayInstallError = ref('')
-const xrayInstallStatus = { AWAITING_APPROVAL: '待审批', APPROVAL_RECORDED: '已登记审批', SIGNED_TASK_VERIFIED: '已核验签发任务', EXPIRED: '已过期' }
+const xrayInstallStatus = { AWAITING_SIGNATURE: '待签发', SIGNED_TASK_VERIFIED: '已核验签发任务', EXPIRED: '已过期', LEGACY: '旧版记录' }
 let xrayInstallRetry: { intent: string; id: string } | undefined
 const coreCatalog = ref<CoreCatalog | null>(null)
 const coreCatalogCore = ref('xray')
@@ -254,24 +253,6 @@ function downloadXrayProposal(install: XrayInstall) {
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
-async function uploadXrayApproval(install: XrayInstall, event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file || xrayInstallBusy.value) return
-  xrayInstallError.value = ''
-  xrayInstallBusy.value = true
-  try {
-    const approval = await readXrayJSON(file)
-    const { task_id, node_id } = install.proposal
-    await apiWithStepUp<XrayInstall>(`/api/v1/admin/xray-installs/${encodeURIComponent(task_id)}/approve`, { approval })
-    if (selectedNode.value?.id === node_id) await loadXrayInstalls(node_id)
-  } catch (e) {
-    xrayInstallError.value = e instanceof Error ? e.message : '登记安装审批失败'
-  } finally {
-    xrayInstallBusy.value = false
-  }
-}
 async function readXrayJSON(file: File): Promise<unknown> {
   if (file.size === 0 || file.size > 16 * 1024) throw new Error('JSON 文件应为 1 到 16384 字节')
   return JSON.parse(await file.text())
@@ -281,14 +262,14 @@ async function uploadSignedXrayInstall(install: XrayInstall, event: Event) {
   const form = event.currentTarget as HTMLFormElement
   const fields = new FormData(form)
   const signedTask = fields.get('task')
-  const approvalFile = fields.get('approval')
-  if (!(signedTask instanceof File) || !(approvalFile instanceof File)) return
+  const signedRequest = fields.get('request')
+  if (!(signedTask instanceof File) || !(signedRequest instanceof File)) return
   xrayInstallError.value = ''
   xrayInstallBusy.value = true
   try {
-    const [task, approval] = await Promise.all([readXrayJSON(signedTask), readXrayJSON(approvalFile)])
+    const [task, request] = await Promise.all([readXrayJSON(signedTask), readXrayJSON(signedRequest)])
     const { task_id, node_id } = install.proposal
-    await apiWithStepUp<XrayInstall>(`/api/v1/admin/xray-installs/${encodeURIComponent(task_id)}/signed-task`, { approval, task })
+    await apiWithStepUp<XrayInstall>(`/api/v1/admin/xray-installs/${encodeURIComponent(task_id)}/signed-task`, { request, task })
     form.reset()
     if (selectedNode.value?.id === node_id) await loadXrayInstalls(node_id)
   } catch (e) {
@@ -390,16 +371,15 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
       <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!statusTasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in statusTasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small><small v-if="task.control">控制消息：{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() < Date.parse(task.expires_at) && task.control !== 'cancel'" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button><button v-if="task.active && task.status === 'QUEUED' && !task.lease_deadline && !task.control && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() >= Date.parse(task.expires_at) && task.control !== 'skip'" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
       <section v-if="selectedNode && admin?.can_prepare_xray_installs" class="card">
         <div class="section-head">
-          <h2>Xray 安装审批</h2>
-          <button class="outline" @click="refreshNodeTasks(selectedNode.id)">刷新审批和结果</button>
+          <h2>Xray 远程安装</h2>
+          <button class="outline" @click="refreshNodeTasks(selectedNode.id)">刷新提案和结果</button>
         </div>
         <p>当前账号 ID：{{ admin.id }}。安装提案预留节点的下一个任务序号，有效期 30 分钟。</p>
-        <form v-if="admin.role === 'operator' && !selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="createXrayInstall">
+        <form v-if="!selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="createXrayInstall">
           <label>精确版本<input v-model.trim="xrayInstallInput.version" placeholder="v26.10.31" required /></label>
           <label>架构<select v-model="xrayInstallInput.architecture"><option>amd64</option><option>arm64</option></select></label>
           <label>SHA-256<input v-model.trim="xrayInstallInput.sha256" pattern="[a-f0-9]{64}" maxlength="64" spellcheck="false" required /></label>
           <label>TUF Core 清单版本<input v-model.number="xrayInstallInput.manifest_version" type="number" min="1" max="9007199254740991" required /></label>
-          <label>安全管理员 ID<input v-model.trim="xrayInstallInput.approver_id" maxlength="128" required /></label>
           <button :disabled="xrayInstallBusy">预留序号并创建提案</button>
         </form>
         <p v-if="xrayInstallError" class="error" role="alert">{{ xrayInstallError }}</p>
@@ -410,17 +390,13 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
             <span>{{ xrayInstallStatus[install.status] }} · {{ new Date(install.proposal.expires_at * 1000).toLocaleString() }} 过期</span>
             <small v-if="xrayTask(install.proposal.task_id)" aria-live="polite">任务结果 {{ xrayTask(install.proposal.task_id)?.status }}</small>
           </div>
-          <button class="outline" @click="downloadXrayProposal(install)">下载提案 JSON</button>
-          <label v-if="admin.id === install.proposal.approver_id && install.status === 'AWAITING_APPROVAL'">
-            登记双签审批 JSON
-            <input type="file" accept=".json,application/json" :disabled="xrayInstallBusy" @change="uploadXrayApproval(install, $event)" />
-          </label>
-          <form v-if="admin.id === install.proposal.approver_id && install.status === 'APPROVAL_RECORDED'" class="node-row" @submit.prevent="uploadSignedXrayInstall(install, $event)">
-            <label>原始审批 JSON<input name="approval" type="file" accept=".json,application/json" required /></label>
+          <button v-if="install.status === 'AWAITING_SIGNATURE'" class="outline" @click="downloadXrayProposal(install)">下载提案 JSON</button>
+          <form v-if="install.status === 'AWAITING_SIGNATURE'" class="node-row" @submit.prevent="uploadSignedXrayInstall(install, $event)">
+            <label>运维员签名请求 JSON<input name="request" type="file" accept=".json,application/json" required /></label>
             <label>独立签发任务 JSON<input name="task" type="file" accept=".json,application/json" required /></label>
             <button :disabled="xrayInstallBusy">核验签发任务</button>
           </form>
-          <button v-if="admin.id === install.proposal.approver_id && install.status === 'SIGNED_TASK_VERIFIED' && !xrayTask(install.proposal.task_id)"
+          <button v-if="install.status === 'SIGNED_TASK_VERIFIED' && !xrayTask(install.proposal.task_id)"
             :disabled="xrayInstallBusy" @click="dispatchXrayInstall(install)">投递安装任务</button>
         </div>
       </section>
@@ -430,6 +406,6 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
         <section class="card"><span class="eyebrow">ADMIN ACCOUNTS</span><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
       </section>
     </template>
-    <footer>管理请求需经服务端认证与授权。Core 官方版本目录仅供查看；启用 Xray 的节点可通过独立审批安装 Core。</footer>
+    <footer>管理请求需经服务端认证与授权。启用远程安装的节点可执行独立签发的 Xray 安装任务。</footer>
   </main>
 </template>

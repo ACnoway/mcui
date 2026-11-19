@@ -97,7 +97,6 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.handleAPI("GET /api/v1/admin/tasks/{id}", x.taskDetail)
 	x.handleAPI("GET /api/v1/admin/xray-installs", x.listXrayInstalls)
 	x.handleAPI("POST /api/v1/admin/xray-installs", x.createXrayInstall)
-	x.handleAPI("POST /api/v1/admin/xray-installs/{id}/approve", x.approveXrayInstall)
 	x.handleAPI("POST /api/v1/admin/xray-installs/{id}/signed-task", x.recordSignedXrayInstall)
 	x.handleAPI("POST /api/v1/admin/xray-installs/{id}/dispatch", x.dispatchXrayInstall)
 	x.handleAPI("GET /api/v1/admin/cores/releases", x.coreReleases)
@@ -460,7 +459,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": ctx.Admin.ID, "username": ctx.Admin.Username, "role": ctx.Admin.Role,
-		"can_prepare_xray_installs": r.TLS != nil && s.taskRuntime != nil && s.taskRuntime.XrayInstallPolicy != nil && (ctx.Admin.Role == "operator" || ctx.Admin.Role == "security_admin"),
+		"can_prepare_xray_installs": r.TLS != nil && s.taskRuntime != nil && s.taskRuntime.XrayInstallPolicy != nil && ctx.Admin.Role == "operator",
 		"all_nodes":                 ctx.Admin.AllNodes, "node_ids": ctx.Admin.NodeIDs, "node_groups": ctx.Admin.NodeGroups,
 		"can_create_nodes":   ctx.Admin.Role == "security_admin" && (ctx.Admin.AllNodes || len(ctx.Admin.NodeGroups) > 0),
 		"can_install_agents": r.TLS != nil && s.installer != nil && ctx.Admin.Role == "security_admin",

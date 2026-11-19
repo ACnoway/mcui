@@ -33,30 +33,30 @@ type installTask struct {
 	Signature          string         `json:"signature"`
 }
 
-// Issue consumes this approval in the signer's private ledger. The caller
+// Issue consumes this request in the signer's private ledger. The caller
 // supplies current authority policy and authenticated time. Replaying valid,
 // identical evidence returns the committed, byte-identical task.
-func (policy *Policy) Issue(ctx context.Context, ledger *Ledger, approval Approval, key ed25519.PrivateKey, now time.Time) ([]byte, error) {
+func (policy *Policy) Issue(ctx context.Context, ledger *Ledger, request Request, key ed25519.PrivateKey, now time.Time) ([]byte, error) {
 	if ledger == nil || ledger.db == nil || policy == nil || !matchesPrivate(key, policy.signingKey) {
 		return nil, ErrDenied
 	}
-	id, err := policy.VerifyApproval(approval, now)
+	id, err := policy.VerifyRequest(request, now)
 	if err != nil {
 		return nil, err
 	}
-	evidence, err := json.Marshal(approval)
+	evidence, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
-	task, err := signInstallTask(approval, id, key, policy.signingKey)
+	task, err := signInstallTask(request, id, key, policy.signingKey)
 	if err != nil {
 		return nil, err
 	}
-	return ledger.consume(ctx, approval.Request.Proposal, id, evidence, task)
+	return ledger.consume(ctx, request.Proposal, id, evidence, task)
 }
 
-func signInstallTask(approval Approval, approvalID string, key ed25519.PrivateKey, public ed25519.PublicKey) ([]byte, error) {
-	task := expectedInstallTask(approval, approvalID)
+func signInstallTask(request Request, requestID string, key ed25519.PrivateKey, public ed25519.PublicKey) ([]byte, error) {
+	task := expectedInstallTask(request, requestID)
 	task.Signature = tasksigner.PlaceholderSignature
 	raw, err := json.Marshal(task)
 	if err != nil {
@@ -77,36 +77,35 @@ func signInstallTask(approval Approval, approvalID string, key ed25519.PrivateKe
 	return raw, nil
 }
 
-func expectedInstallTask(approval Approval, approvalID string) installTask {
-	p := approval.Request.Proposal
-	issued := time.Unix(approval.ApprovedAt, 0).UTC().Format(time.RFC3339)
+func expectedInstallTask(request Request, requestID string) installTask {
+	p := request.Proposal
+	issued := time.Unix(request.RequestedAt, 0).UTC().Format(time.RFC3339)
 	return installTask{
 		SchemaVersion: 1, TaskID: p.TaskID, NodeID: p.NodeID, Sequence: p.Sequence, Operation: p.Operation,
-		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(approval.taskExpiry(), 0).UTC().Format(time.RFC3339),
+		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(request.taskExpiry(), 0).UTC().Format(time.RFC3339),
 		Payload: installPayload{Core: p.Core, Version: p.Version,
 			ArtifactID: "xray-" + p.Architecture + "-" + p.SHA256, ManifestVersion: p.ManifestVersion},
-		ApprovalID: approvalID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
+		ApprovalID: requestID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
 	}
 }
 
-// VerifyIssuedTask needs the original, previously recorded approval digest.
-// It verifies the evidence and the signer's signature before comparing every
-// field with the task that the independent signer could issue.
-func (policy *Policy) VerifyIssuedTask(raw []byte, approval Approval, recordedID string, now time.Time) error {
-	if len(raw) == 0 || len(raw) > maxProofBytes || recordedID == "" {
-		return ErrDenied
+// VerifyIssuedTask returns the request digest after verifying both signatures
+// and comparing every field against the task the signer could issue.
+func (policy *Policy) VerifyIssuedTask(raw []byte, request Request, now time.Time) (string, error) {
+	if len(raw) == 0 || len(raw) > maxProofBytes {
+		return "", ErrDenied
 	}
-	id, err := policy.VerifyApproval(approval, now)
-	if err != nil || id != recordedID || protocol.Verify(protocol.Task, raw, policy.signingKey) != nil {
-		return ErrDenied
+	id, err := policy.VerifyRequest(request, now)
+	if err != nil || protocol.Verify(protocol.Task, raw, policy.signingKey) != nil {
+		return "", ErrDenied
 	}
 	var task installTask
 	if err := json.Unmarshal(raw, &task); err != nil {
-		return ErrDenied
+		return "", ErrDenied
 	}
 	task.Signature = ""
-	if task != expectedInstallTask(approval, id) {
-		return ErrDenied
+	if task != expectedInstallTask(request, id) {
+		return "", ErrDenied
 	}
-	return nil
+	return id, nil
 }

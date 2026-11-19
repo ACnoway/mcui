@@ -1,12 +1,10 @@
-# Xray 安装的独立审批与签发
+# Xray 安装的运维授权与独立签发
 
-`mcui-lifecycle` 为精确的 Xray `core.install` 提案提供离线双签和单次签发。配置独立检查点与审批策略后，面板支持 MFA 复验、预留序号、登记审批、核验签发任务并投递到启用了远程安装的节点。
+Xray 远程安装由同一名具备节点范围的运维员发起、上传签发任务并投递。面板对这些写操作要求 MFA 复验和 CSRF 校验。独立签发工具校验运维员对精确参数的签名和节点范围，并在受保护的账本中记录签发。
 
-## 1. 建立独立签发策略
+## 1. 配置授权策略
 
-运维员、安全管理员和 Xray 安装任务签发者各自保管 Ed25519 私钥。签发者使用独立于状态签发和 TUF 发布的专用密钥。由签发管理方通过独立渠道核对身份、公钥指纹和可管理节点，发布策略的受信副本。运维员与审批人需覆盖同一目标节点，且各自使用唯一身份和公钥。
-
-`policy.json` 包含 `schema_version`（固定为 1）、`signing_key_id`、`signing_public_key` 和 `principals`。公钥为标准带填充 Base64 的原始 32 字节 Ed25519 公钥。每个 principal 包含 `id`、`role`、`public_key` 和 `node_ids`，角色分别为 `operator` 与 `security_admin`。节点范围逐个列 ID。下例中的值须替换为受信材料。
+运维员保管自己的 Ed25519 私钥，签发服务保管独立于状态任务签发和 TUF 发布的 Xray 安装任务私钥。通过独立渠道核对公钥指纹、账号 ID 和允许操作的节点。策略可只有一个运维员，各运维员使用不同公钥。示例值需替换为实际信任材料。
 
 ```json
 {
@@ -14,68 +12,42 @@
   "signing_key_id": "xray-install-key-1",
   "signing_public_key": "<专用签发公钥>",
   "principals": [
-    {"id": "operator-1", "role": "operator", "public_key": "<运维公钥>", "node_ids": ["node-example"]},
-    {"id": "approver-1", "role": "security_admin", "public_key": "<审批公钥>", "node_ids": ["node-example"]}
+    {"id": "operator-1", "role": "operator", "public_key": "<运维公钥>", "node_ids": ["node-example"]}
   ]
 }
 ```
 
-签发方在受保护目录以专用账号运行签发命令。私钥文件使用 Ed25519 PKCS#8 PEM 和 `0600` 权限。由签发管理方控制实际策略路径、账本路径和签发配置，面板与提案发起人仅传递审批文件。暂停签发后可原子替换策略以撤销身份、公钥或节点范围。签发时读取当前受信策略，失去范围的旧审批会被拒绝。
+公钥使用标准带填充 Base64 编码的 32 字节 Ed25519 公钥。私钥使用 Ed25519 PKCS#8 PEM 和 `0600` 权限。主控和签发服务各自加载可信策略。需要撤销范围时更新两端的策略副本并重新加载。现有策略里的 `security_admin` 条目可在迁移时删除。
 
-## 2. 提案与独立审核
+主控启用 HTTPS、认证时间和[独立任务检查点](./phase-2-operations.md#8-部署独立检查点)，再通过 `-xray-install-policy /etc/mcui/xray-install-policy.json` 或 `MCUI_XRAY_INSTALL_POLICY` 指定权限受保护的策略文件。策略中的运维员 ID 须匹配面板账号 ID，节点须在策略和面板账号的共同范围内。
 
-在启用 HTTPS 与[独立检查点](./phase-2-operations.md#8-部署独立检查点)的主控上，将受信策略放在主控服务可读、服务账号不可写的目录。用 `-xray-install-policy /etc/mcui/xray-install-policy.json` 或在面板服务环境中设置 `MCUI_XRAY_INSTALL_POLICY` 后重启主控。策略的 principal ID 必须与面板账号 ID 一致。主控和独立签发方各自配置受信策略副本，策略变更后分别加载。
+## 2. 创建并签署请求
 
-1. 运维员在已接入的测试节点详情页输入获审核的版本、架构、SHA-256、当前 `core-targets` 版本和安全管理员 ID。通过 MFA 复验后下载 `proposal.json`。只有节点队列空闲时才能预留序号。
-2. 运维员和指定安全管理员各自使用下面的命令完成独立签署。审批人核对提案参数及制品审核证据，并在面板中上传 `approval.json`。主控重新核对角色、节点范围、签名、有效期和不可变提案，并在检查点确认后返回“已登记审批”。此状态表示主控已登记证明。
-3. 每个预留槽持续至提案到期。到期前该节点无法建立新的只读任务。若提案过期，可在该节点完成一次只读状态查询，再创建新提案。这样可避免独立签发账本已记录同一槽时重复占用序号。
-
-仅测试离线签发时，可以在隔离环境手工构造同样的提案。面板流程应使用下载的原始提案。时间字段用 Unix 秒表示，提案有效期最长 30 分钟。
-
-```sh
-created=$(date -u +%s)
-cat > proposal.json <<EOF
-{
-  "schema_version": 1,
-  "operation": "core.install",
-  "core": "xray",
-  "task_id": "$TASK_ID",
-  "node_id": "$NODE_ID",
-  "sequence": $SEQUENCE,
-  "version": "$VERSION",
-  "architecture": "$ARCH",
-  "sha256": "$SHA256",
-  "manifest_version": $CORE_TARGETS_VERSION,
-  "requester_id": "$OPERATOR_ID",
-  "approver_id": "$APPROVER_ID",
-  "signing_key_id": "$SIGNING_KEY_ID",
-  "created_at": $created,
-  "expires_at": $((created + 1800))
-}
-EOF
-```
-
-`TASK_ID` 使用 22 至 128 字符的随机标识，字符集为英文字母、数字、下划线和连字符。版本使用 `v主版本.次版本.补丁版本`，架构为 `amd64` 或 `arm64`，摘要为小写十六进制 SHA-256。签发时生成与发布目标一致的 `xray-<架构>-<摘要>` 制品 ID，文件、来源 URL 和 Unit 由后续节点执行策略绑定。
-
-分别在密钥持有人自己的环境执行命令。审批人验证请求签名与范围，再签署包含完整请求的审批。两份签名使用独立签名域。
+1. 在已接入的节点详情页填写获审核的版本、架构、SHA-256 和当前 `core-targets` 委派版本。通过 MFA 复验创建并下载 `proposal.json`。节点队列空闲时才可预留序号。提案格式为 V2，有效期 30 分钟。
+2. 运维员核对提案后使用自己的密钥签署。请求签名覆盖完整提案及请求时间。节点 ID、序号、制品和委派版本均由签名绑定。
 
 ```sh
 go build -trimpath -o mcui-lifecycle ./cmd/mcui-lifecycle
 umask 077
 ./mcui-lifecycle request -policy policy.json -key "$OPERATOR_KEY" -input proposal.json > request.json
-./mcui-lifecycle approve -policy policy.json -key "$APPROVER_KEY" -input request.json > approval.json
 ```
 
-## 3. 持久化签发并处理重试
+## 3. 持久化签发并投递
 
-账本由签发方单独保管，置于主控备份回滚域之外。首次初始化只能创建新文件。由获准访问 `/run/chrony/chronyd.sock` 的本地签发方读取 chrony NTS 认证状态，并检查两个角色、当前节点范围、显式任务密钥和提案/审批时限。任务在审批时刻起生效，最迟于审批后 10 分钟或提案到期时失效。
+签发端由获准访问 `/run/chrony/chronyd.sock` 的账号执行。工具检查认证 NTS 时间、当前策略及请求签名。任务从运维员签署请求时起生效，在签署后 10 分钟或提案到期时失效，以较早者为准。
 
 ```sh
 ./mcui-lifecycle init-ledger -ledger "$SIGNER_LEDGER"
 ./mcui-lifecycle issue -policy "$TRUSTED_POLICY" -key "$INSTALL_SIGNING_KEY" \
-  -input approval.json -ledger "$SIGNER_LEDGER" > signed-task.json
+  -input request.json -ledger "$SIGNER_LEDGER" > signed-task.json
 ```
 
-任务 ID、审批 ID 和节点序号各自唯一。签发在 SQLite 事务中持久化完整审批和签名任务，提交成功后才输出。有效期内、当前策略仍批准时，重试同一份审批返回相同字节。改换序号、内容或审批后重试已消费槽会被拒绝。如果账本丢失、回档或提交结果未知，保留证据，按原审批核对并重试。无法证明账本新鲜度时冻结签发，由签发方与主控检查点保管方对账。
+`init-ledger` 只用于首次创建账本。账本保存在主控备份恢复域之外。任务 ID、请求摘要和节点序号各自唯一，SQLite 提交后才输出任务。请求仍有效且当前策略仍允许时，使用同一份 `request.json` 重试会返回字节相同的任务。若账本的新鲜度无法证明，暂停签发并由签发方和主控检查点保管方对账。
 
-签发完成后，由指定审批人在面板上传原始 `approval.json` 与 `signed-task.json`。主控核对受信专用签名、公钥用途、原先登记的审批摘要、序号、节点、完整制品参数和有效期。检查点确认后显示“已核验签发任务”。指定审批人可在任务有效期内点击“投递安装任务”。在此之前按[节点部署步骤](./phase-3-operations.md#5-启用远程-xray-安装)配置目标节点。生产密钥保管及真实节点运行验收待完成。
+原发起运维员在面板上传原始 `request.json` 和 `signed-task.json`。主控核对当前范围、已预留提案、两份签名和全部任务字段，经检查点确认后显示“已核验签发任务”。同一运维员在有效期内点击“投递安装任务”。目标节点须先按[节点部署步骤](./phase-3-operations.md#5-启用远程-xray-安装)配置。
+
+提案占用序号至到期。若到期时该槽仍空闲，在节点完成一次只读状态查询以消费该序号，再创建新提案。这样可以避开签发账本可能已经消费过的槽。
+
+## 4. 从旧流程迁移
+
+升级主控与签发 CLI 后使用新提案。历史 V1 提案及审计保留，已投递任务沿用原签名和结果回报路径，未投递的旧提案到期后按上述步骤重新申请。节点任务信封、专用签发公钥和 SQLite 结构保持兼容。信封保留 `approval_id` 字段，新任务在此字段中携带运维员签名请求的摘要。

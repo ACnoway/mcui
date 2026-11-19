@@ -1,5 +1,5 @@
-// Package lifecycleauth verifies independent, scoped approvals for Xray
-// installation and issues the exact approved task.
+// Package lifecycleauth verifies scoped operator requests and independently
+// signs the requested Xray installation tasks.
 package lifecycleauth
 
 import (
@@ -24,15 +24,14 @@ const (
 	maxProofBytes = 16 << 10
 	maxPolicySize = 256 << 10
 	maxUnixTime   = 253402300799
-	approvalTTL   = 30 * time.Minute
+	proposalTTL   = 30 * time.Minute
 	taskTTL       = 10 * time.Minute
-	requestDomain = "MCUI-XRAY-INSTALL-REQUEST-V1\n"
-	approveDomain = "MCUI-XRAY-INSTALL-APPROVAL-V1\n"
+	requestDomain = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
 )
 
 var (
 	ErrDenied     = errors.New("Xray install authorization denied")
-	ErrConflict   = errors.New("install task ID, approval or node sequence was already used")
+	ErrConflict   = errors.New("install task ID, request or node sequence was already used")
 	identifier    = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{22,128}$`)
 	digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -50,26 +49,21 @@ type Proposal struct {
 	SHA256          string `json:"sha256"`
 	ManifestVersion int64  `json:"manifest_version"`
 	RequesterID     string `json:"requester_id"`
-	ApproverID      string `json:"approver_id"`
+	ApproverID      string `json:"approver_id,omitempty"` // Retained for stored V1 proposals.
 	SigningKeyID    string `json:"signing_key_id"`
 	CreatedAt       int64  `json:"created_at"`
 	ExpiresAt       int64  `json:"expires_at"`
 }
 
 type Request struct {
-	Proposal  Proposal `json:"proposal"`
-	Signature string   `json:"signature"`
+	Proposal    Proposal `json:"proposal"`
+	RequestedAt int64    `json:"requested_at"`
+	Signature   string   `json:"signature"`
 }
 
-type Approval struct {
-	Request    Request `json:"request"`
-	ApprovedAt int64   `json:"approved_at"`
-	Signature  string  `json:"signature"`
-}
-
-type approvalContent struct {
-	Request    Request `json:"request"`
-	ApprovedAt int64   `json:"approved_at"`
+type requestContent struct {
+	Proposal    Proposal `json:"proposal"`
+	RequestedAt int64    `json:"requested_at"`
 }
 
 type Principal struct {
@@ -102,7 +96,7 @@ type Policy struct {
 func ParsePolicy(raw []byte) (*Policy, error) {
 	var doc policyDocument
 	if len(raw) > maxPolicySize || jsonv2.Unmarshal(raw, &doc, jsonv2.RejectUnknownMembers(true)) != nil ||
-		doc.SchemaVersion != 1 || !identifier.MatchString(doc.SigningKeyID) || len(doc.Principals) < 2 {
+		doc.SchemaVersion != 1 || !identifier.MatchString(doc.SigningKeyID) || len(doc.Principals) == 0 {
 		return nil, errors.New("invalid Xray install authorization policy")
 	}
 	signingKey, err := publicKey(doc.SigningPublicKey)
@@ -115,15 +109,15 @@ func ParsePolicy(raw []byte) (*Policy, error) {
 		key, err := publicKey(actor.PublicKey)
 		if err != nil || keys[string(key)] || !identifier.MatchString(actor.ID) ||
 			(actor.Role != "operator" && actor.Role != "security_admin") || len(actor.NodeIDs) == 0 {
-			return nil, errors.New("invalid or reused Xray approval principal or key")
+			return nil, errors.New("invalid or reused Xray authorization principal or key")
 		}
 		if _, exists := policy.principals[actor.ID]; exists {
-			return nil, errors.New("duplicate Xray approval principal")
+			return nil, errors.New("duplicate Xray authorization principal")
 		}
 		nodes := make(map[string]bool, len(actor.NodeIDs))
 		for _, nodeID := range actor.NodeIDs {
 			if !security.ValidNodeID(nodeID) || nodes[nodeID] {
-				return nil, errors.New("invalid or duplicate approval node scope")
+				return nil, errors.New("invalid or duplicate authorization node scope")
 			}
 			nodes[nodeID] = true
 		}
@@ -137,7 +131,7 @@ func publicKey(value string) (ed25519.PublicKey, error) {
 	raw, err := base64.StdEncoding.Strict().DecodeString(value)
 	if err != nil || len(raw) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(raw) != value ||
 		bytes.Equal(raw, make([]byte, ed25519.PublicKeySize)) {
-		return nil, errors.New("approval policy needs canonical Base64 Ed25519 public keys")
+		return nil, errors.New("authorization policy needs canonical Base64 Ed25519 public keys")
 	}
 	return ed25519.PublicKey(raw), nil
 }
@@ -152,46 +146,39 @@ func ParseProposal(raw []byte) (Proposal, error) {
 
 func ParseRequest(raw []byte) (Request, error) {
 	var request Request
-	if len(raw) > maxProofBytes || jsonv2.Unmarshal(raw, &request, jsonv2.RejectUnknownMembers(true)) != nil || !request.Proposal.valid() {
+	if len(raw) > maxProofBytes || jsonv2.Unmarshal(raw, &request, jsonv2.RejectUnknownMembers(true)) != nil ||
+		request.Proposal.SchemaVersion != 2 || !request.Proposal.valid() {
 		return Request{}, ErrDenied
 	}
 	return request, nil
 }
 
-func ParseApproval(raw []byte) (Approval, error) {
-	var approval Approval
-	if len(raw) > maxProofBytes || jsonv2.Unmarshal(raw, &approval, jsonv2.RejectUnknownMembers(true)) != nil || !approval.Request.Proposal.valid() {
-		return Approval{}, ErrDenied
-	}
-	return approval, nil
-}
-
 func (p Proposal) valid() bool {
-	return p.SchemaVersion == 1 && p.Operation == "core.install" && p.Core == "xray" &&
+	validSchema := (p.SchemaVersion == 2 && p.ApproverID == "") ||
+		(p.SchemaVersion == 1 && identifier.MatchString(p.ApproverID) && p.ApproverID != p.RequesterID)
+	return validSchema && p.Operation == "core.install" && p.Core == "xray" &&
 		taskIDPattern.MatchString(p.TaskID) && security.ValidNodeID(p.NodeID) &&
 		p.Sequence >= 1 && p.Sequence <= maxSequence && p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence &&
 		corecatalog.ValidXrayRelease(p.Version, p.SHA256) && (p.Architecture == "amd64" || p.Architecture == "arm64") &&
-		identifier.MatchString(p.RequesterID) && identifier.MatchString(p.ApproverID) && p.RequesterID != p.ApproverID &&
+		identifier.MatchString(p.RequesterID) &&
 		identifier.MatchString(p.SigningKeyID) && p.CreatedAt > 0 && p.ExpiresAt <= maxUnixTime &&
-		p.CreatedAt < p.ExpiresAt && p.ExpiresAt-p.CreatedAt <= int64(approvalTTL/time.Second)
+		p.CreatedAt < p.ExpiresAt && p.ExpiresAt-p.CreatedAt <= int64(proposalTTL/time.Second)
 }
 
-func (policy *Policy) reviewers(p Proposal) (ed25519.PublicKey, ed25519.PublicKey, error) {
+func (policy *Policy) requesterKey(p Proposal) ed25519.PublicKey {
 	if policy == nil || !p.valid() || p.SigningKeyID != policy.keyID {
-		return nil, nil, ErrDenied
+		return nil
 	}
-	operator, approver := policy.principals[p.RequesterID], policy.principals[p.ApproverID]
-	if operator.policy.Role != "operator" || approver.policy.Role != "security_admin" ||
-		!slices.Contains(operator.policy.NodeIDs, p.NodeID) || !slices.Contains(approver.policy.NodeIDs, p.NodeID) {
-		return nil, nil, ErrDenied
+	operator := policy.principals[p.RequesterID]
+	if operator.policy.Role != "operator" || !slices.Contains(operator.policy.NodeIDs, p.NodeID) {
+		return nil
 	}
-	return operator.key, approver.key, nil
+	return operator.key
 }
 
-// AllowsProposal checks the immutable proposal and the independent actor scopes.
+// AllowsProposal checks the immutable proposal and current operator scope.
 func (policy *Policy) AllowsProposal(p Proposal) bool {
-	_, _, err := policy.reviewers(p)
-	return err == nil
+	return policy.requesterKey(p) != nil
 }
 
 func (policy *Policy) SigningKeyID() string { return policy.keyID }
@@ -210,67 +197,30 @@ func (policy *Policy) UsesPublicKey(key ed25519.PublicKey) bool {
 }
 
 func (policy *Policy) SignRequest(p Proposal, key ed25519.PrivateKey, now time.Time) (Request, error) {
-	operator, _, err := policy.reviewers(p)
-	if err != nil || !matchesPrivate(key, operator) || now.IsZero() || now.Unix() < p.CreatedAt || now.Unix() >= p.ExpiresAt {
+	at := now.Unix()
+	if p.SchemaVersion != 2 || !matchesPrivate(key, policy.requesterKey(p)) || at < p.CreatedAt || at >= p.ExpiresAt {
 		return Request{}, ErrDenied
 	}
-	message, err := signingBytes(requestDomain, p)
+	message, err := signingBytes(requestDomain, requestContent{Proposal: p, RequestedAt: at})
 	if err != nil {
 		return Request{}, err
 	}
-	return Request{Proposal: p, Signature: sign(key, message)}, nil
+	return Request{Proposal: p, RequestedAt: at, Signature: sign(key, message)}, nil
 }
 
-func (policy *Policy) VerifyRequest(r Request, now time.Time) error {
+// VerifyRequest returns the digest of the exact request eligible for issuance.
+func (policy *Policy) VerifyRequest(r Request, now time.Time) (string, error) {
 	p := r.Proposal
-	operator, _, err := policy.reviewers(p)
-	if err != nil || now.IsZero() || now.Unix() < p.CreatedAt || now.Unix() >= p.ExpiresAt {
-		return ErrDenied
+	operator := policy.requesterKey(p)
+	if p.SchemaVersion != 2 || operator == nil || r.RequestedAt < p.CreatedAt ||
+		r.RequestedAt > now.Unix() || now.Unix() >= r.taskExpiry() {
+		return "", ErrDenied
 	}
-	message, err := signingBytes(requestDomain, p)
+	message, err := signingBytes(requestDomain, requestContent{Proposal: p, RequestedAt: r.RequestedAt})
 	if err != nil || !verify(operator, message, r.Signature) {
-		return ErrDenied
+		return "", ErrDenied
 	}
-	return nil
-}
-
-func (policy *Policy) Approve(r Request, key ed25519.PrivateKey, now time.Time) (Approval, error) {
-	if err := policy.VerifyRequest(r, now); err != nil {
-		return Approval{}, err
-	}
-	approver := policy.principals[r.Proposal.ApproverID].key
-	if !matchesPrivate(key, approver) {
-		return Approval{}, ErrDenied
-	}
-	message, err := signingBytes(approveDomain, approvalContent{Request: r, ApprovedAt: now.Unix()})
-	if err != nil {
-		return Approval{}, err
-	}
-	return Approval{Request: r, ApprovedAt: now.Unix(), Signature: sign(key, message)}, nil
-}
-
-func (policy *Policy) verifyApproval(a Approval, now time.Time) error {
-	if err := policy.VerifyRequest(a.Request, now); err != nil {
-		return err
-	}
-	if a.ApprovedAt < a.Request.Proposal.CreatedAt || a.ApprovedAt > now.Unix() || now.Unix() >= a.taskExpiry() {
-		return ErrDenied
-	}
-	message, err := signingBytes(approveDomain, approvalContent{Request: a.Request, ApprovedAt: a.ApprovedAt})
-	approver := policy.principals[a.Request.Proposal.ApproverID].key
-	if err != nil || !verify(approver, message, a.Signature) {
-		return ErrDenied
-	}
-	return nil
-}
-
-// VerifyApproval identifies the exact approval that an independent signer
-// can consume while the policy and validity window still allow it.
-func (policy *Policy) VerifyApproval(a Approval, now time.Time) (string, error) {
-	if err := policy.verifyApproval(a, now); err != nil {
-		return "", err
-	}
-	evidence, err := json.Marshal(a)
+	evidence, err := json.Marshal(r)
 	if err != nil {
 		return "", err
 	}
@@ -278,8 +228,8 @@ func (policy *Policy) VerifyApproval(a Approval, now time.Time) (string, error) 
 	return hex.EncodeToString(hash[:]), nil
 }
 
-func (a Approval) taskExpiry() int64 {
-	return min(a.Request.Proposal.ExpiresAt, a.ApprovedAt+int64(taskTTL/time.Second))
+func (r Request) taskExpiry() int64 {
+	return min(r.Proposal.ExpiresAt, r.RequestedAt+int64(taskTTL/time.Second))
 }
 
 func signingBytes(domain string, value any) ([]byte, error) {

@@ -49,22 +49,20 @@ func TestLifecycleCLI(t *testing.T) {
 		return write(name, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded})), pub
 	}
 	operatorPath, operatorKey := key("operator.pem")
-	adminPath, adminKey := key("admin.pem")
 	signerPath, signerKey := key("signer.pem")
 	policy := writeJSON("policy.json", map[string]any{
 		"schema_version": 1, "signing_key_id": "test-install-key",
 		"signing_public_key": base64.StdEncoding.EncodeToString(signerKey),
 		"principals": []lifecycleauth.Principal{
 			{ID: "op", Role: "operator", PublicKey: base64.StdEncoding.EncodeToString(operatorKey), NodeIDs: []string{"test-node"}},
-			{ID: "admin", Role: "security_admin", PublicKey: base64.StdEncoding.EncodeToString(adminKey), NodeIDs: []string{"test-node"}},
 		},
 	})
 	now := time.Now().UTC()
 	proposal := writeJSON("proposal.json", lifecycleauth.Proposal{
-		SchemaVersion: 1, Operation: "core.install", Core: "xray", TaskID: "cli-test-install-000001",
+		SchemaVersion: 2, Operation: "core.install", Core: "xray", TaskID: "cli-test-install-000001",
 		NodeID: "test-node", Sequence: 1, Version: "v26.10.31", Architecture: "arm64",
 		SHA256: strings.Repeat("73", 32), ManifestVersion: 6, RequesterID: "op",
-		ApproverID: "admin", SigningKeyID: "test-install-key", CreatedAt: now.Add(-time.Minute).Unix(),
+		SigningKeyID: "test-install-key", CreatedAt: now.Add(-time.Minute).Unix(),
 		ExpiresAt: now.Add(time.Minute).Unix(),
 	})
 	var output bytes.Buffer
@@ -73,16 +71,11 @@ func TestLifecycleCLI(t *testing.T) {
 	}
 	request := write("request.json", output.Bytes())
 	output.Reset()
-	if err := run([]string{"approve", "-policy", policy, "-key", adminPath, "-input", request}, &output, nil); err != nil {
-		t.Fatal(err)
-	}
-	approval := write("approval.json", output.Bytes())
 	ledger := filepath.Join(dir, "issues.db")
-	output.Reset()
 	if err := run([]string{"init-ledger", "-ledger", ledger}, &output, nil); err != nil {
 		t.Fatal(err)
 	}
-	issueFlags := []string{"issue", "-policy", policy, "-key", signerPath, "-input", approval, "-ledger", ledger}
+	issueFlags := []string{"issue", "-policy", policy, "-key", signerPath, "-input", request, "-ledger", ledger}
 	untrusted := errors.New("test clock unavailable")
 	if err := run(issueFlags, &output, func() (time.Time, error) { return time.Time{}, untrusted }); !errors.Is(err, untrusted) || output.Len() != 0 {
 		t.Fatalf("untrusted clock output=%d bytes, err=%v", output.Len(), err)

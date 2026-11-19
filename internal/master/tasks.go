@@ -724,9 +724,7 @@ func (s *Server) taskRecordView(record taskdispatch.Record) taskView {
 	envelope.Payload.Core = "xray"
 	envelope.IssuedAt = task.NotBefore.UTC().Format(time.RFC3339)
 	envelope.ExpiresAt = task.ExpiresAt.UTC().Format(time.RFC3339)
-	out := formatTaskView(record, envelope)
-	out.Approval = "dual-signed"
-	return out
+	return formatTaskView(record, envelope)
 }
 
 func formatTaskView(record taskdispatch.Record, envelope statusTaskEnvelope) taskView {

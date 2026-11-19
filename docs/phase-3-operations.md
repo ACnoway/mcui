@@ -1,6 +1,6 @@
 # 阶段 3 Xray 本地生命周期
 
-远程安装签发基础的独立试验步骤见 [Xray 安装的独立审批与签发](./phase-3-approval.md)。
+远程安装的授权、签发及旧流程迁移见 [Xray 安装的运维授权与独立签发](./phase-3-approval.md)。
 
 `mcui-xray` 在 Linux amd64/arm64 节点上由本地 root 管理独立的 `mcui-xray.service`。服务使用固定空 JSON 引导配置和独立的低权限 systemd 沙箱。远程安装通过显式配置接入同一套事务。指定版本和架构的产品状态见[能力矩阵](./core-compatibility.md)。
 
@@ -66,7 +66,7 @@ mcui-xray recover
 
 ## 5. 启用远程 Xray 安装
 
-在已接入阶段 2 任务运行时的隔离节点上，先按第 1 节安装并初始化 Xray 单元和状态目录。主控启用 HTTPS、独立检查点、认证时间及安装审批策略。Agent 和 Helper 分别持有安装任务公钥及独立引导的 TUF root。两个服务各自保留元数据和制品缓存，并从固定官方路径独立下载及复验。当前备用缓存回退仍待接入。
+在已接入阶段 2 任务运行时的隔离节点上，先按第 1 节安装并初始化 Xray 单元和状态目录。主控启用 HTTPS、独立检查点、认证时间及运维授权策略。Agent 和 Helper 分别持有安装任务公钥及独立引导的 TUF root。两个服务各自保留元数据和制品缓存，并从固定官方路径独立下载及复验。当前备用缓存回退仍待接入。
 
 将以下配置作为 root 管理的 `/etc/mcui-agent/xray-install.env`，按可信发布材料替换实际值：
 
@@ -79,4 +79,4 @@ MCUI_XRAY_TUF_ORIGIN=https://releases.example.org/metadata
 
 使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 仅为 Helper 开放固定的 Xray 运行目录。Helper 从本地 chrony Unix 套接字读取认证时间。Master 和 Agent 仍须通过阶段 2 文档所述的受控认证时间查询。
 
-指定审批人在核验独立签发的任务后进行投递，并通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 表示结果无法证明。该状态会拦住后续序号。按第 3 节检查节点本地状态并保留 Master、Agent 和 Helper 账本；自动解除这一栅栏仍待实现。
+原发起运维员上传签名请求和独立签发任务，经面板核验及 MFA 复验后投递，并通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 表示结果无法证明。该状态会拦住后续序号。按第 3 节检查节点本地状态并保留 Master、Agent 和 Helper 账本。自动对账仍待实现。

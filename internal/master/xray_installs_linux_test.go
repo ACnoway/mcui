@@ -30,7 +30,7 @@ import (
 	"github.com/ACnoway/mcui/internal/taskledger"
 )
 
-func TestXrayInstallReservationAndApproval(t *testing.T) {
+func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	client := newTaskTestClient(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	var clockValue atomic.Int64
@@ -48,8 +48,8 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 		session := st.Sessions[hash("test-session-token")]
 		session.MFAAt = now.Add(-11 * time.Minute).Unix()
 		st.Sessions[session.ID] = session
-		st.Admins["approver-1"] = store.Admin{ID: "approver-1", Role: "security_admin", NodeIDs: []string{client.nodeID}}
-		st.Sessions[hash("approval-session")] = store.Session{ID: hash("approval-session"), AdminID: "approver-1", CreatedAt: now.Unix(), LastSeen: now.Unix(), MFAAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(), CSRFToken: "approver-csrf"}
+		st.Admins["other-operator"] = store.Admin{ID: "other-operator", Role: "operator", NodeIDs: []string{client.nodeID}}
+		st.Sessions[hash("other-session")] = store.Session{ID: hash("other-session"), AdminID: "other-operator", CreatedAt: now.Unix(), LastSeen: now.Unix(), MFAAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(), CSRFToken: "other-csrf"}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -63,14 +63,12 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 		return base64.StdEncoding.EncodeToString(public), private
 	}
 	operatorKey, operatorPrivate := makeKey()
-	approverKey, approverPrivate := makeKey()
 	signerKey, signerPrivate := makeKey()
 	nodeIDs := []string{client.nodeID}
 	rawPolicy, err := json.Marshal(map[string]any{
 		"schema_version": 1, "signing_key_id": "xray-install-key", "signing_public_key": signerKey,
 		"principals": []map[string]any{
 			{"id": "operator-1", "role": "operator", "node_ids": nodeIDs, "public_key": operatorKey},
-			{"id": "approver-1", "role": "security_admin", "node_ids": nodeIDs, "public_key": approverKey},
 		},
 	})
 	if err != nil {
@@ -110,9 +108,8 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 	}
 
 	const base = "/api/v1/admin/xray-installs"
-	in := xrayInstallRequest{TaskID: "xray-install-0000000000001", NodeID: client.nodeID, ApproverID: "approver-1", Version: "v26.10.31", Architecture: goruntime.GOARCH, SHA256: strings.Repeat("a", 64), ManifestVersion: 2}
+	in := xrayInstallRequest{TaskID: "xray-install-0000000000001", NodeID: client.nodeID, Version: "v26.10.31", Architecture: goruntime.GOARCH, SHA256: strings.Repeat("a", 64), ManifestVersion: 2}
 	assertStatus(request(http.MethodPost, base, "test-session-token", "bad-csrf", in), http.StatusForbidden)
-	assertStatus(request(http.MethodPost, base, "approval-session", "approver-csrf", in), http.StatusNotFound)
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, in), http.StatusPreconditionRequired)
 	totpKey, err := base32Decode(totpSecret)
 	if err != nil {
@@ -130,7 +127,7 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	proposal, err := lifecycleauth.ParseProposal(record.Proposal)
-	if err != nil || proposal.Sequence != 1 || record.Status != "AWAITING_APPROVAL" {
+	if err != nil || proposal.SchemaVersion != 2 || proposal.Sequence != 1 || record.Status != "AWAITING_SIGNATURE" {
 		t.Fatalf("proposal = %+v, status = %s, error = %v", proposal, record.Status, err)
 	}
 	retry := request(http.MethodPost, base, "test-session-token", client.csrf, in)
@@ -149,11 +146,6 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	evidence, err := policy.Approve(requestProof, approverPrivate, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	approve := base + "/" + in.TaskID + "/approve"
 	acceptSigned := base + "/" + in.TaskID + "/signed-task"
 	ledgerPath := filepath.Join(t.TempDir(), "signer.db")
 	if err := lifecycleauth.InitLedger(ledgerPath); err != nil {
@@ -164,39 +156,42 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ledger.Close()
-	task, err := policy.Issue(t.Context(), ledger, evidence, signerPrivate, now)
+	task, err := policy.Issue(t.Context(), ledger, requestProof, signerPrivate, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	issueBody := map[string]any{"approval": evidence, "task": json.RawMessage(task)}
-	assertStatus(request(http.MethodPost, acceptSigned, "approval-session", "approver-csrf", issueBody), http.StatusConflict)
-	assertStatus(request(http.MethodPost, approve, "test-session-token", client.csrf, map[string]any{"approval": evidence}), http.StatusNotFound)
-	res = request(http.MethodPost, approve, "approval-session", "approver-csrf", map[string]any{"approval": evidence})
-	assertStatus(res, http.StatusOK)
-	if err := json.Unmarshal(res.Body.Bytes(), &record); err != nil || record.Status != "APPROVAL_RECORDED" || len(record.ApprovalID) != 64 {
-		t.Fatalf("approval result = %+v, error = %v", record, err)
-	}
-	res = request(http.MethodPost, acceptSigned, "approval-session", "approver-csrf", issueBody)
+	issueBody := map[string]any{"request": requestProof, "task": json.RawMessage(task)}
+	assertStatus(request(http.MethodPost, base+"/"+in.TaskID+"/approve", "test-session-token", client.csrf, issueBody), http.StatusNotFound)
+	assertStatus(request(http.MethodPost, acceptSigned, "other-session", "other-csrf", issueBody), http.StatusNotFound)
+	tampered := requestProof
+	tampered.Proposal.ManifestVersion++
+	assertStatus(request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, map[string]any{"request": tampered, "task": json.RawMessage(task)}), http.StatusConflict)
+	res = request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, issueBody)
 	assertStatus(res, http.StatusOK)
 	if err := json.Unmarshal(res.Body.Bytes(), &record); err != nil || record.Status != "SIGNED_TASK_VERIFIED" {
 		t.Fatalf("signed task result = %+v, error = %v", record, err)
 	}
-	assertStatus(request(http.MethodPost, acceptSigned, "approval-session", "approver-csrf", issueBody), http.StatusOK)
+	assertStatus(request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, issueBody), http.StatusOK)
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=1", nil, true), http.StatusNoContent)
-	res = request(http.MethodGet, base+"?node_id="+client.nodeID, "approval-session", "", nil)
+	res = request(http.MethodGet, base+"?node_id="+client.nodeID, "other-session", "", nil)
 	assertStatus(res, http.StatusOK)
-	if !strings.Contains(res.Body.String(), record.ApprovalID) {
-		t.Fatalf("approval missing from list: %s", res.Body)
+	if strings.Contains(res.Body.String(), in.TaskID) {
+		t.Fatalf("another operator's proposal appeared in the list: %s", res.Body)
+	}
+	res = request(http.MethodGet, base+"?node_id="+client.nodeID, "test-session-token", "", nil)
+	assertStatus(res, http.StatusOK)
+	if !strings.Contains(res.Body.String(), in.TaskID) {
+		t.Fatalf("operator proposal missing from list: %s", res.Body)
 	}
 	anchored, err := authority.Read(t.Context(), initial.Node, initial.Epoch, checkpoint.Challenge{1})
-	if err != nil || anchored.Record.Revision < initial.Revision+3 {
-		t.Fatalf("reservation, approval and signed task were not independently anchored: %+v, %v", anchored, err)
+	if err != nil || anchored.Record.Revision < initial.Revision+2 {
+		t.Fatalf("reservation and signed task were not independently anchored: %+v, %v", anchored, err)
 	}
 
 	dispatch := base + "/" + in.TaskID + "/dispatch"
-	assertStatus(request(http.MethodPost, dispatch, "test-session-token", client.csrf, map[string]any{}), http.StatusNotFound)
-	assertStatus(request(http.MethodPost, dispatch, "approval-session", "approver-csrf", map[string]any{}), http.StatusCreated)
-	assertStatus(request(http.MethodPost, dispatch, "approval-session", "approver-csrf", map[string]any{}), http.StatusOK)
+	assertStatus(request(http.MethodPost, dispatch, "other-session", "other-csrf", map[string]any{}), http.StatusNotFound)
+	assertStatus(request(http.MethodPost, dispatch, "test-session-token", client.csrf, map[string]any{}), http.StatusCreated)
+	assertStatus(request(http.MethodPost, dispatch, "test-session-token", client.csrf, map[string]any{}), http.StatusOK)
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=1", nil, true), http.StatusNoContent)
 	download := func(expected string) helperAuthorizationRequest {
 		t.Helper()
@@ -268,7 +263,7 @@ func TestXrayInstallReservationAndApproval(t *testing.T) {
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-v1&next_sequence=2", nil, true), http.StatusNoContent)
 
 	advance(30 * time.Minute)
-	assertStatus(request(http.MethodPost, approve, "approval-session", "approver-csrf", map[string]any{"approval": evidence}), http.StatusConflict)
+	assertStatus(request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, issueBody), http.StatusConflict)
 	changed.TaskID = "xray-install-0000000000002"
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, changed), http.StatusCreated)
 	advance(30 * time.Minute)

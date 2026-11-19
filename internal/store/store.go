@@ -51,11 +51,11 @@ type State struct {
 	XrayInstalls map[string]XrayInstall `json:"xray_installs,omitempty"`
 }
 
-// XrayInstall retains the proposal and approval identity independently of the
+// XrayInstall retains the proposal and authorization digest independently of the
 // bounded audit log. The proposal is preserved as the exact exported JSON.
 type XrayInstall struct {
 	Proposal   json.RawMessage `json:"proposal"`
-	ApprovalID string          `json:"approval_id,omitempty"`
+	ApprovalID string          `json:"approval_id,omitempty"` // Existing storage key for the authorization digest.
 	SignedTask json.RawMessage `json:"signed_task,omitempty"`
 }
 

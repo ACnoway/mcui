@@ -1,6 +1,6 @@
 # 阶段 2 进度与未完成项
 
-**状态：阶段 2 代码范围及远程自动构建验证已通过；正式阶段验收未完成。** 远程 `scripts/check-static.sh` 在 `be46e50` 通过。当前唯一可执行任务是签名的 V2 `core.status` 只读查询。所有任务时限和审计判断都要求认证 NTS 时间；Core 安装、启停、配置和任意命令仍未开放。V2 协议见[协议草案](./phase-2-protocol-draft.md)，部署与恢复步骤见[操作说明](./phase-2-operations.md)。
+**阶段 2 代码范围及远程自动构建验证已通过，正式阶段验收未完成。** 远程 `scripts/check-static.sh` 在 `be46e50` 通过。阶段 2 授权链支持签名的 V2 `core.status` 只读查询，任务时限和审计判断要求认证 NTS 时间。阶段 3 另行开放可选的 Xray 安装。[协议草案](./phase-2-protocol-draft.md) · [部署和恢复](./phase-2-operations.md) · [Xray 安装授权](./phase-3-approval.md)
 
 ## 已接通的运行路径
 

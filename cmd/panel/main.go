@@ -40,7 +40,7 @@ func main() {
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
 	taskSignerURL := flag.String("task-signer-url", "", "loopback URL of the isolated task signer")
 	taskSignerTokenPath := flag.String("task-signer-token-file", "", "shared token file for the isolated task signer")
-	xrayInstallPolicyPath := flag.String("xray-install-policy", os.Getenv("MCUI_XRAY_INSTALL_POLICY"), "independently provisioned Xray install approval policy JSON")
+	xrayInstallPolicyPath := flag.String("xray-install-policy", os.Getenv("MCUI_XRAY_INSTALL_POLICY"), "independently provisioned Xray install authorization policy JSON")
 	checkpointConfig := registerTaskCheckpointFlags()
 	flag.Parse()
 	usingTLS := *tlsCertPath != "" || *tlsKeyPath != ""
@@ -90,11 +90,11 @@ func main() {
 	var xrayInstallPolicy *lifecycleauth.Policy
 	if *xrayInstallPolicyPath != "" {
 		if machine == nil {
-			log.Fatal("Xray install approval requires the independent task checkpoint")
+			log.Fatal("Xray install requires the independent task checkpoint")
 		}
 		xrayInstallPolicy, err = readXrayInstallPolicy(*xrayInstallPolicyPath)
 		if err != nil {
-			log.Fatalf("read Xray install approval policy: %v", err)
+			log.Fatalf("read Xray install authorization policy: %v", err)
 		}
 	}
 	if err != nil {
@@ -172,7 +172,7 @@ func readXrayInstallPolicy(path string) (*lifecycleauth.Policy, error) {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0022 != 0) {
-		return nil, fmt.Errorf("approval policy must be a regular file without group or other write access")
+		return nil, fmt.Errorf("authorization policy must be a regular file without group or other write access")
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -184,7 +184,7 @@ func readXrayInstallPolicy(path string) (*lifecycleauth.Policy, error) {
 		return nil, err
 	}
 	if !os.SameFile(info, opened) {
-		return nil, fmt.Errorf("approval policy changed while opening")
+		return nil, fmt.Errorf("authorization policy changed while opening")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxPolicyBytes+1))
 	if err != nil {
