@@ -206,25 +206,13 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	leased := download("1")
 	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", leased, true), http.StatusOK)
 	assertStatus(client.request(http.MethodPost, "/api/v1/agent/tasks/renew-install", leased, true), http.StatusNoContent)
-	nodeLedger, err := taskledger.Initialize(filepath.Join(privateTestDir(t), "agent.db"))
+	agentLedgerPath := filepath.Join(privateTestDir(t), "agent.db")
+	nodeLedger, err := taskledger.Initialize(agentLedgerPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer nodeLedger.Close()
+	defer func() { _ = nodeLedger.Close() }()
 	trustedClock := func() (time.Time, error) { return clock(), nil }
-	proc, err := agenttasks.New(agenttasks.Config{NodeID: client.nodeID, Now: clock, Ledger: nodeLedger, Keys: map[string]taskauth.Key{
-		runtime.KeyID: {PublicKey: runtime.PublicKey, Active: true, Purpose: taskauth.PurposeTask},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner, err := agenttasks.NewRunner(proc, nodeLedger, testInstallExecutor{}, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.SetTrustedClock(trustedClock); err != nil {
-		t.Fatal(err)
-	}
 	var calls atomic.Int32
 	var executor agenttasks.InstallExecutor = testInstallExecutor{install: func(raw []byte, lease string) (json.RawMessage, error) {
 		calls.Add(1)
@@ -235,13 +223,40 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		executor = rootInstallTestExecutor(t, client.server, client.nodeID, policy.InstallKey(), clock, &calls)
 	}
 	artifacts := testInstallArtifacts{target: artifacttrust.Target{Core: "xray", Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, SignatureStatus: "not-provided"}}
-	if err := runner.ConfigureXrayInstall(policy.InstallKey(), artifacts, executor); err != nil {
-		t.Fatal(err)
+	newRunner := func(ledger *taskledger.Ledger) *agenttasks.Runner {
+		t.Helper()
+		proc, err := agenttasks.New(agenttasks.Config{NodeID: client.nodeID, Now: clock, Ledger: ledger, Keys: map[string]taskauth.Key{
+			runtime.KeyID: {PublicKey: runtime.PublicKey, Active: true, Purpose: taskauth.PurposeTask},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner, err := agenttasks.NewRunner(proc, ledger, testInstallExecutor{}, clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.SetTrustedClock(trustedClock); err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.ConfigureXrayInstall(policy.InstallKey(), artifacts, executor); err != nil {
+			t.Fatal(err)
+		}
+		return runner
 	}
+	runner := newRunner(nodeLedger)
 	acks, err := runner.ProcessXrayInstall(t.Context(), leased.Task, leased.LeaseID, nil, 0, now)
 	if err != nil || len(acks) != 4 || acks[3].Status != "SUCCEEDED" {
 		t.Fatalf("Agent installation result = %+v, %v", acks, err)
 	}
+	if err := nodeLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := taskledger.Open(agentLedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeLedger = reopened
+	runner = newRunner(nodeLedger)
 	advance(61 * time.Second)
 	recovered := download("2")
 	if recovered.LeaseID == leased.LeaseID {
