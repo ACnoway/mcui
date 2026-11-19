@@ -5,7 +5,9 @@ package lifecycleauth
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
 	"errors"
@@ -185,6 +187,27 @@ func (policy *Policy) reviewers(p Proposal) (ed25519.PublicKey, ed25519.PublicKe
 	return operator.key, approver.key, nil
 }
 
+// AllowsProposal checks the immutable proposal and the independent actor scopes.
+func (policy *Policy) AllowsProposal(p Proposal) bool {
+	_, _, err := policy.reviewers(p)
+	return err == nil
+}
+
+func (policy *Policy) SigningKeyID() string { return policy.keyID }
+
+// UsesPublicKey checks separation from other trusted signing purposes.
+func (policy *Policy) UsesPublicKey(key ed25519.PublicKey) bool {
+	if bytes.Equal(policy.signingKey, key) {
+		return true
+	}
+	for _, actor := range policy.principals {
+		if bytes.Equal(actor.key, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (policy *Policy) SignRequest(p Proposal, key ed25519.PrivateKey, now time.Time) (Request, error) {
 	operator, _, err := policy.reviewers(p)
 	if err != nil || !matchesPrivate(key, operator) || now.IsZero() || now.Unix() < p.CreatedAt || now.Unix() >= p.ExpiresAt {
@@ -238,6 +261,20 @@ func (policy *Policy) verifyApproval(a Approval, now time.Time) error {
 		return ErrDenied
 	}
 	return nil
+}
+
+// VerifyApproval identifies the exact approval that an independent signer
+// can consume while the policy and validity window still allow it.
+func (policy *Policy) VerifyApproval(a Approval, now time.Time) (string, error) {
+	if err := policy.verifyApproval(a, now); err != nil {
+		return "", err
+	}
+	evidence, err := json.Marshal(a)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(evidence)
+	return hex.EncodeToString(hash[:]), nil
 }
 
 func (a Approval) taskExpiry() int64 {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ACnoway/mcui/internal/checkpoint"
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
@@ -32,11 +33,12 @@ type TaskRuntime struct {
 		tasksigner.SignStatus
 		tasksigner.ControlSigner
 	}
-	KeyID      string
-	PublicKey  ed25519.PublicKey
-	Now        func() time.Time
-	TrustedNow func() (time.Time, error)
-	Checkpoint *checkpoint.Machine
+	KeyID             string
+	PublicKey         ed25519.PublicKey
+	Now               func() time.Time
+	TrustedNow        func() (time.Time, error)
+	Checkpoint        *checkpoint.Machine
+	XrayInstallPolicy *lifecycleauth.Policy
 }
 
 func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
@@ -47,6 +49,10 @@ func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
 	copy.PublicKey = append(ed25519.PublicKey(nil), runtime.PublicKey...)
 	if runtime.Checkpoint != nil && (runtime.Checkpoint.Journal == nil || runtime.Checkpoint.Authority == nil) {
 		return errors.New("incomplete task checkpoint configuration")
+	}
+	if policy := runtime.XrayInstallPolicy; policy != nil &&
+		(runtime.Checkpoint == nil || runtime.TrustedNow == nil || policy.SigningKeyID() == runtime.KeyID || policy.UsesPublicKey(runtime.PublicKey)) {
+		return errors.New("Xray install proposals require a checkpoint, trusted time and separate signing keys")
 	}
 	if s.taskCheckpoint != nil && runtime.Checkpoint == nil {
 		return errors.New("cannot remove the configured task checkpoint")
@@ -224,6 +230,9 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 		if !adminExists || current.Disabled || (current.Role != "security_admin" && current.Role != "operator") || !nodeExists || currentNode.Disabled || !canQueryCoreStatus(current, currentNode) {
 			return errors.New("task authorization changed")
 		}
+		if err := checkXrayInstallReservation(st, in.RequestID, node.ID, now.Unix()); err != nil {
+			return err
+		}
 		authorized := false
 		for _, event := range st.Audits {
 			if event.ResourceType != "task" || event.Resource != in.RequestID {
@@ -249,6 +258,10 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: current.ID, Action: "task.status.authorize", ResourceType: "task", Resource: in.RequestID, NodeID: node.ID, Detail: in.Core, Outcome: "authorized"})
 		return nil
 	}); err != nil {
+		if errors.Is(err, errXrayInstallReserved) {
+			http.Error(w, "an Xray install proposal reserves this node sequence or task ID", http.StatusConflict)
+			return
+		}
 		http.Error(w, "task authorization changed or request ID already used", http.StatusConflict)
 		return
 	}

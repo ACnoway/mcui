@@ -19,7 +19,7 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const driverName = "mcui-master-sqlite"
 
@@ -47,7 +47,16 @@ type State struct {
 	Nodes    map[string]Node    `json:"nodes"`
 	Sessions map[string]Session `json:"sessions"`
 
-	Audits []Audit `json:"audits"`
+	Audits       []Audit                `json:"audits"`
+	XrayInstalls map[string]XrayInstall `json:"xray_installs,omitempty"`
+}
+
+// XrayInstall retains the proposal and approval identity independently of the
+// bounded audit log. The proposal is preserved as the exact exported JSON.
+type XrayInstall struct {
+	Proposal   json.RawMessage `json:"proposal"`
+	ApprovalID string          `json:"approval_id,omitempty"`
+	SignedTask json.RawMessage `json:"signed_task,omitempty"`
 }
 
 type Admin struct {
@@ -163,6 +172,9 @@ func migrate(db *sql.DB) error {
 				return err
 			}
 		}
+		if _, err := tx.Exec(createXrayInstalls); err != nil {
+			return err
+		}
 		state := emptyState()
 		var legacyExists int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='app_state'`).Scan(&legacyExists); err != nil {
@@ -197,12 +209,19 @@ func migrate(db *sql.DB) error {
 				return err
 			}
 		}
+	}
+	if current == 1 || current == 2 {
+		if _, err := tx.Exec(createXrayInstalls); err != nil {
+			return err
+		}
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version) VALUES(?)", schemaVersion); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
+
+const createXrayInstalls = `CREATE TABLE xray_installs (id TEXT PRIMARY KEY, payload BLOB NOT NULL)`
 
 var upgradeV1 = []string{
 	"DROP TABLE enrollments",
@@ -221,7 +240,7 @@ var schemaV2 = []string{
 }
 
 func emptyState() State {
-	return State{Admins: map[string]Admin{}, Nodes: map[string]Node{}, Sessions: map[string]Session{}, Audits: []Audit{}}
+	return State{Admins: map[string]Admin{}, Nodes: map[string]Node{}, Sessions: map[string]Session{}, Audits: []Audit{}, XrayInstalls: map[string]XrayInstall{}}
 }
 
 func decode(payload []byte) (State, error) {
@@ -261,6 +280,9 @@ func loadState(q executor) (State, error) {
 		return State{}, err
 	}
 	if err := loadMap(q, `SELECT id_hash, payload FROM sessions ORDER BY id_hash`, state.Sessions); err != nil {
+		return State{}, err
+	}
+	if err := loadMap(q, `SELECT id, payload FROM xray_installs ORDER BY id`, state.XrayInstalls); err != nil {
 		return State{}, err
 	}
 	rows, err := q.Query(`SELECT payload FROM audit_logs ORDER BY event_seq`)
@@ -304,7 +326,7 @@ func loadMap[T any](q executor, query string, destination map[string]T) error {
 }
 
 func persistState(tx *sql.Tx, state State) error {
-	for _, table := range []string{"sessions", "nodes", "admins", "audit_logs"} {
+	for _, table := range []string{"sessions", "nodes", "admins", "audit_logs", "xray_installs"} {
 		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
 			return err
 		}
@@ -345,6 +367,15 @@ func persistState(tx *sql.Tx, state State) error {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO audit_logs(at, actor, resource_type, resource, action, outcome, payload) VALUES(?, ?, ?, ?, ?, ?, ?)`, value.At, value.Actor, value.ResourceType, value.Resource, value.Action, value.Outcome, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.XrayInstalls) {
+		payload, err := json.Marshal(state.XrayInstalls[id])
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO xray_installs(id, payload) VALUES(?, ?)`, id, payload); err != nil {
 			return err
 		}
 	}

@@ -114,6 +114,25 @@ func TestIssueExactInstallAndReplayAfterReopen(t *testing.T) {
 	if err := protocol.Verify(protocol.Task, raw, a.taskKey.Public().(ed25519.PublicKey)); err != nil {
 		t.Fatal(err)
 	}
+	id, err := a.policy.VerifyApproval(approval, a.now)
+	if err != nil || a.policy.VerifyIssuedTask(raw, approval, id, a.now) != nil {
+		t.Fatalf("independently issued task did not match its approval: %v", err)
+	}
+	changedApproval := approval
+	changedApproval.Request.Proposal.Version = "v26.11.9"
+	if err := a.policy.VerifyIssuedTask(raw, changedApproval, id, a.now); !errors.Is(err, ErrDenied) {
+		t.Fatalf("accepted changed approval: %v", err)
+	}
+	mismatched, err := signInstallTask(changedApproval, id, a.taskKey, a.policy.signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.policy.VerifyIssuedTask(mismatched, approval, id, a.now); !errors.Is(err, ErrDenied) {
+		t.Fatalf("accepted a valid signer signature over mismatched parameters: %v", err)
+	}
+	if err := a.policy.VerifyIssuedTask(raw, approval, id, a.now.Add(10*time.Minute)); !errors.Is(err, ErrDenied) {
+		t.Fatalf("accepted expired task: %v", err)
+	}
 	if _, err := protocol.CanonicalV2TaskBytes(raw); err == nil {
 		t.Fatal("install approval crossed into the status-task protocol")
 	}

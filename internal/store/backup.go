@@ -138,6 +138,9 @@ func validateSchema(db *sql.DB, version int) error {
 		expectedTables["enrollments"] = []string{"request_id", "node_id", "created_at", "payload"}
 		expectedIndexes["invites_expiry_idx"] = struct{}{}
 	}
+	if version >= 3 {
+		expectedTables["xray_installs"] = []string{"id", "payload"}
+	}
 	for table, expected := range expectedTables {
 		rows, err := db.Query("PRAGMA table_info(" + table + ")")
 		if err != nil {

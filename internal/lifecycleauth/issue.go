@@ -3,8 +3,6 @@ package lifecycleauth
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -42,15 +40,14 @@ func (policy *Policy) Issue(ctx context.Context, ledger *Ledger, approval Approv
 	if ledger == nil || ledger.db == nil || policy == nil || !matchesPrivate(key, policy.signingKey) {
 		return nil, ErrDenied
 	}
-	if err := policy.verifyApproval(approval, now); err != nil {
+	id, err := policy.VerifyApproval(approval, now)
+	if err != nil {
 		return nil, err
 	}
 	evidence, err := json.Marshal(approval)
 	if err != nil {
 		return nil, err
 	}
-	hash := sha256.Sum256(evidence)
-	id := hex.EncodeToString(hash[:])
 	task, err := signInstallTask(approval, id, key, policy.signingKey)
 	if err != nil {
 		return nil, err
@@ -59,15 +56,8 @@ func (policy *Policy) Issue(ctx context.Context, ledger *Ledger, approval Approv
 }
 
 func signInstallTask(approval Approval, approvalID string, key ed25519.PrivateKey, public ed25519.PublicKey) ([]byte, error) {
-	p := approval.Request.Proposal
-	issued := time.Unix(approval.ApprovedAt, 0).UTC().Format(time.RFC3339)
-	task := installTask{
-		SchemaVersion: 1, TaskID: p.TaskID, NodeID: p.NodeID, Sequence: p.Sequence, Operation: p.Operation,
-		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(approval.taskExpiry(), 0).UTC().Format(time.RFC3339),
-		Payload: installPayload{Core: p.Core, Version: p.Version,
-			ArtifactID: "xray-" + p.Architecture + "-" + p.SHA256, ManifestVersion: p.ManifestVersion},
-		ApprovalID: approvalID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519", Signature: tasksigner.PlaceholderSignature,
-	}
+	task := expectedInstallTask(approval, approvalID)
+	task.Signature = tasksigner.PlaceholderSignature
 	raw, err := json.Marshal(task)
 	if err != nil {
 		return nil, err
@@ -85,4 +75,38 @@ func signInstallTask(approval Approval, approvalID string, key ed25519.PrivateKe
 		return nil, err
 	}
 	return raw, nil
+}
+
+func expectedInstallTask(approval Approval, approvalID string) installTask {
+	p := approval.Request.Proposal
+	issued := time.Unix(approval.ApprovedAt, 0).UTC().Format(time.RFC3339)
+	return installTask{
+		SchemaVersion: 1, TaskID: p.TaskID, NodeID: p.NodeID, Sequence: p.Sequence, Operation: p.Operation,
+		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(approval.taskExpiry(), 0).UTC().Format(time.RFC3339),
+		Payload: installPayload{Core: p.Core, Version: p.Version,
+			ArtifactID: "xray-" + p.Architecture + "-" + p.SHA256, ManifestVersion: p.ManifestVersion},
+		ApprovalID: approvalID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
+	}
+}
+
+// VerifyIssuedTask needs the original, previously recorded approval digest.
+// It verifies the evidence and the signer's signature before comparing every
+// field with the task that the independent signer could issue.
+func (policy *Policy) VerifyIssuedTask(raw []byte, approval Approval, recordedID string, now time.Time) error {
+	if len(raw) == 0 || len(raw) > maxProofBytes || recordedID == "" {
+		return ErrDenied
+	}
+	id, err := policy.VerifyApproval(approval, now)
+	if err != nil || id != recordedID || protocol.Verify(protocol.Task, raw, policy.signingKey) != nil {
+		return ErrDenied
+	}
+	var task installTask
+	if err := json.Unmarshal(raw, &task); err != nil {
+		return ErrDenied
+	}
+	task.Signature = ""
+	if task != expectedInstallTask(approval, id) {
+		return ErrDenied
+	}
+	return nil
 }

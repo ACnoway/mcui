@@ -1,0 +1,384 @@
+package master
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sort"
+	"time"
+
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
+	"github.com/ACnoway/mcui/internal/store"
+	"github.com/ACnoway/mcui/internal/taskdispatch"
+)
+
+var errXrayInstallReserved = errors.New("Xray install sequence or task ID is reserved")
+var errXrayInstallScope = errors.New("Xray install outside current scope")
+
+type xrayInstallRequest struct {
+	TaskID          string `json:"task_id"`
+	NodeID          string `json:"node_id"`
+	ApproverID      string `json:"approver_id"`
+	Version         string `json:"version"`
+	Architecture    string `json:"architecture"`
+	SHA256          string `json:"sha256"`
+	ManifestVersion int64  `json:"manifest_version"`
+	MFACode         string `json:"mfa_code"`
+}
+
+type xrayInstallView struct {
+	Proposal   json.RawMessage `json:"proposal"`
+	ApprovalID string          `json:"approval_id,omitempty"`
+	Status     string          `json:"status"`
+}
+
+func xrayInstallState(record store.XrayInstall, p lifecycleauth.Proposal, now time.Time) xrayInstallView {
+	view := xrayInstallView{Proposal: record.Proposal, ApprovalID: record.ApprovalID, Status: "AWAITING_APPROVAL"}
+	if now.Unix() >= p.ExpiresAt {
+		view.Status = "EXPIRED"
+	} else if len(record.SignedTask) > 0 {
+		view.Status = "SIGNED_TASK_VERIFIED"
+	} else if record.ApprovalID != "" {
+		view.Status = "APPROVAL_RECORDED"
+	}
+	return view
+}
+
+func (s *Server) xrayInstallAccess(w http.ResponseWriter, r *http.Request, role string) (adminContext, *lifecycleauth.Policy, bool) {
+	var ctx adminContext
+	var ok bool
+	if r.Method == http.MethodGet {
+		ctx, ok = s.adminAuth(r)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return ctx, nil, false
+		}
+	} else {
+		ctx, ok = s.requireCSRF(w, r)
+		if !ok {
+			return ctx, nil, false
+		}
+	}
+	if (role != "" && ctx.Admin.Role != role) ||
+		(ctx.Admin.Role != "operator" && ctx.Admin.Role != "security_admin") {
+		http.NotFound(w, r)
+		return ctx, nil, false
+	}
+	if r.TLS == nil || s.taskCheckpoint == nil || s.taskRuntime.XrayInstallPolicy == nil {
+		http.Error(w, "Xray install approval requires HTTPS and a configured task checkpoint and approval policy", http.StatusServiceUnavailable)
+		return ctx, nil, false
+	}
+	return ctx, s.taskRuntime.XrayInstallPolicy, true
+}
+
+func canPrepareXrayInstall(st *store.State, p lifecycleauth.Proposal) bool {
+	node, ok := st.Nodes[p.NodeID]
+	if !ok || node.Disabled || !node.Enrolled || node.TokenHash == "" {
+		return false
+	}
+	operator, approver := st.Admins[p.RequesterID], st.Admins[p.ApproverID]
+	return operator.Role == "operator" && approver.Role == "security_admin" &&
+		canReadNode(operator, node) && canReadNode(approver, node)
+}
+
+func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	ctx, policy, ok := s.xrayInstallAccess(w, r, "operator")
+	if !ok {
+		return
+	}
+	var in xrayInstallRequest
+	if readJSON(r, &in) != nil || !validRequestID(in.TaskID) {
+		http.Error(w, "invalid Xray install proposal", http.StatusBadRequest)
+		return
+	}
+	if !s.stepUp(ctx, in.MFACode) {
+		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
+		return
+	}
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	proposal := lifecycleauth.Proposal{
+		SchemaVersion: 1, Core: "xray", Operation: "core.install",
+		TaskID: in.TaskID, NodeID: in.NodeID, RequesterID: ctx.Admin.ID, ApproverID: in.ApproverID,
+		Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, ManifestVersion: in.ManifestVersion,
+		SigningKeyID: policy.SigningKeyID(), CreatedAt: now.Unix(), ExpiresAt: now.Add(30 * time.Minute).Unix(),
+	}
+	var record store.XrayInstall
+	err = s.store.Update(func(st *store.State) error {
+		if !canPrepareXrayInstall(st, proposal) {
+			return errXrayInstallScope
+		}
+		if prior, exists := st.XrayInstalls[in.TaskID]; exists {
+			old, err := lifecycleauth.ParseProposal(prior.Proposal)
+			if err != nil {
+				return err
+			}
+			proposal.Sequence, proposal.CreatedAt, proposal.ExpiresAt = old.Sequence, old.CreatedAt, old.ExpiresAt
+			if proposal != old || !policy.AllowsProposal(old) {
+				return errXrayInstallReserved
+			}
+			record = prior
+			return nil
+		}
+		if _, err := s.taskRuntime.Store.GetRecord(in.TaskID); err == nil {
+			return errXrayInstallReserved
+		} else if !errors.Is(err, taskdispatch.ErrNotFound) {
+			return err
+		}
+		for _, event := range st.Audits {
+			if event.ResourceType == "task" && event.Resource == in.TaskID {
+				return errXrayInstallReserved
+			}
+		}
+		sequence, err := s.taskRuntime.Store.NextIdleSequence(in.NodeID)
+		if err != nil {
+			return err
+		}
+		proposal.Sequence = sequence
+		if !policy.AllowsProposal(proposal) {
+			return lifecycleauth.ErrDenied
+		}
+		for _, existing := range st.XrayInstalls {
+			old, err := lifecycleauth.ParseProposal(existing.Proposal)
+			if err != nil {
+				return err
+			}
+			// An independent signer may have consumed an expired reservation.
+			// A normal status task must take that slot before proposing again.
+			if old.NodeID == proposal.NodeID && old.Sequence == sequence {
+				return errXrayInstallReserved
+			}
+		}
+		record.Proposal, err = json.Marshal(proposal)
+		if err != nil {
+			return err
+		}
+		st.XrayInstalls[proposal.TaskID] = record
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: "task.xray.install.reserve", ResourceType: "task", Resource: proposal.TaskID, NodeID: proposal.NodeID, Outcome: "reserved"})
+		return nil
+	})
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, xrayInstallState(record, proposal, now))
+}
+
+func (s *Server) approveXrayInstall(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	ctx, policy, ok := s.xrayInstallAccess(w, r, "security_admin")
+	if !ok {
+		return
+	}
+	var in struct {
+		Evidence json.RawMessage `json:"approval"`
+		MFACode  string          `json:"mfa_code"`
+	}
+	if readJSON(r, &in) != nil {
+		http.Error(w, "invalid Xray approval", http.StatusBadRequest)
+		return
+	}
+	approval, err := lifecycleauth.ParseApproval(in.Evidence)
+	if err != nil {
+		http.Error(w, "invalid Xray approval", http.StatusBadRequest)
+		return
+	}
+	p := approval.Request.Proposal
+	if p.TaskID != r.PathValue("id") || p.ApproverID != ctx.Admin.ID {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.stepUp(ctx, in.MFACode) {
+		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
+		return
+	}
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	id, err := policy.VerifyApproval(approval, now)
+	if err != nil {
+		http.Error(w, "Xray approval is invalid or expired", http.StatusConflict)
+		return
+	}
+	var record store.XrayInstall
+	err = s.store.Update(func(st *store.State) error {
+		var exists bool
+		record, exists = st.XrayInstalls[p.TaskID]
+		if !exists || !canPrepareXrayInstall(st, p) {
+			return errXrayInstallScope
+		}
+		saved, err := lifecycleauth.ParseProposal(record.Proposal)
+		if err != nil {
+			return err
+		}
+		if saved != p || (record.ApprovalID != "" && record.ApprovalID != id) {
+			return errXrayInstallReserved
+		}
+		if record.ApprovalID == id {
+			return nil
+		}
+		record.ApprovalID = id
+		st.XrayInstalls[p.TaskID] = record
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: "task.xray.install.approve", ResourceType: "task", Resource: p.TaskID, NodeID: p.NodeID, Detail: id, Outcome: "approved"})
+		return nil
+	})
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, xrayInstallState(record, p, now))
+}
+
+func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	ctx, policy, ok := s.xrayInstallAccess(w, r, "security_admin")
+	if !ok {
+		return
+	}
+	var in struct {
+		Evidence json.RawMessage `json:"approval"`
+		Task     json.RawMessage `json:"task"`
+		MFACode  string          `json:"mfa_code"`
+	}
+	if readJSON(r, &in) != nil || len(in.Task) == 0 || len(in.Task) > 16<<10 {
+		http.Error(w, "invalid signed Xray install", http.StatusBadRequest)
+		return
+	}
+	approval, err := lifecycleauth.ParseApproval(in.Evidence)
+	if err != nil {
+		http.Error(w, "invalid Xray approval", http.StatusBadRequest)
+		return
+	}
+	p := approval.Request.Proposal
+	if p.TaskID != r.PathValue("id") || p.ApproverID != ctx.Admin.ID {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.stepUp(ctx, in.MFACode) {
+		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
+		return
+	}
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, in.Task); err != nil {
+		http.Error(w, "invalid signed Xray install", http.StatusBadRequest)
+		return
+	}
+	var record store.XrayInstall
+	err = s.store.Update(func(st *store.State) error {
+		var exists bool
+		record, exists = st.XrayInstalls[p.TaskID]
+		if !exists || !canPrepareXrayInstall(st, p) {
+			return errXrayInstallScope
+		}
+		saved, err := lifecycleauth.ParseProposal(record.Proposal)
+		if err != nil {
+			return err
+		}
+		if saved != p || policy.VerifyIssuedTask(in.Task, approval, record.ApprovalID, now) != nil {
+			return errXrayInstallReserved
+		}
+		if len(record.SignedTask) > 0 {
+			if !bytes.Equal(record.SignedTask, compact.Bytes()) {
+				return errXrayInstallReserved
+			}
+			return nil
+		}
+		record.SignedTask = compact.Bytes()
+		st.XrayInstalls[p.TaskID] = record
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: "task.xray.install.verify", ResourceType: "task", Resource: p.TaskID, NodeID: p.NodeID, Detail: record.ApprovalID, Outcome: "signature-verified"})
+		return nil
+	})
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, xrayInstallState(record, p, now))
+}
+
+func (s *Server) listXrayInstalls(w http.ResponseWriter, r *http.Request) {
+	ctx, _, ok := s.xrayInstallAccess(w, r, "")
+	if !ok {
+		return
+	}
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	nodeID := r.URL.Query().Get("node_id")
+	type listed struct {
+		view xrayInstallView
+		p    lifecycleauth.Proposal
+	}
+	var matches []listed
+	err = s.store.View(func(st store.State) error {
+		node, exists := st.Nodes[nodeID]
+		if !exists || !canReadNode(st.Admins[ctx.Admin.ID], node) {
+			return errXrayInstallScope
+		}
+		for _, record := range st.XrayInstalls {
+			p, err := lifecycleauth.ParseProposal(record.Proposal)
+			if err != nil {
+				return err
+			}
+			if p.NodeID == nodeID && (p.RequesterID == ctx.Admin.ID || p.ApproverID == ctx.Admin.ID) {
+				matches = append(matches, listed{xrayInstallState(record, p, now), p})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].p.Sequence > matches[j].p.Sequence })
+	out := make([]xrayInstallView, 0, min(100, len(matches)))
+	for _, match := range matches[:min(100, len(matches))] {
+		out = append(out, match.view)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func checkXrayInstallReservation(st *store.State, taskID, nodeID string, now int64) error {
+	if _, exists := st.XrayInstalls[taskID]; exists {
+		return errXrayInstallReserved
+	}
+	for _, record := range st.XrayInstalls {
+		p, err := lifecycleauth.ParseProposal(record.Proposal)
+		if err != nil {
+			return err
+		}
+		if p.NodeID == nodeID && now < p.ExpiresAt {
+			return errXrayInstallReserved
+		}
+	}
+	return nil
+}
+
+func writeXrayInstallError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, errXrayInstallScope):
+		http.NotFound(w, r)
+	case errors.Is(err, lifecycleauth.ErrDenied):
+		http.Error(w, "proposal parameters or approval policy rejected", http.StatusBadRequest)
+	case errors.Is(err, errXrayInstallReserved), errors.Is(err, taskdispatch.ErrConflict), errors.Is(err, taskdispatch.ErrSequence):
+		http.Error(w, "task ID or node sequence is unavailable", http.StatusConflict)
+	default:
+		http.Error(w, "Xray install proposal store unavailable", http.StatusInternalServerError)
+	}
+}

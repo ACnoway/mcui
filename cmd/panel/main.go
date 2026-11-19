@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/checkpoint"
 	"github.com/ACnoway/mcui/internal/corecatalog"
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/master"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/store"
@@ -38,6 +40,7 @@ func main() {
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
 	taskSignerURL := flag.String("task-signer-url", "", "loopback URL of the isolated task signer")
 	taskSignerTokenPath := flag.String("task-signer-token-file", "", "shared token file for the isolated task signer")
+	xrayInstallPolicyPath := flag.String("xray-install-policy", os.Getenv("MCUI_XRAY_INSTALL_POLICY"), "independently provisioned Xray install approval policy JSON")
 	checkpointConfig := registerTaskCheckpointFlags()
 	flag.Parse()
 	usingTLS := *tlsCertPath != "" || *tlsKeyPath != ""
@@ -83,6 +86,16 @@ func main() {
 	} else {
 		_ = os.MkdirAll(filepath.Dir(*dbPath), 0700)
 		s, err = store.Open(*dbPath)
+	}
+	var xrayInstallPolicy *lifecycleauth.Policy
+	if *xrayInstallPolicyPath != "" {
+		if machine == nil {
+			log.Fatal("Xray install approval requires the independent task checkpoint")
+		}
+		xrayInstallPolicy, err = readXrayInstallPolicy(*xrayInstallPolicyPath)
+		if err != nil {
+			log.Fatalf("read Xray install approval policy: %v", err)
+		}
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -135,7 +148,7 @@ func main() {
 		}
 		defer tasks.Close()
 		trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
-		if err = srv.ConfigureTaskRuntime(master.TaskRuntime{Store: tasks, Signer: signer, KeyID: *taskKeyID, PublicKey: publicKey, TrustedNow: trustedClock.Now, Checkpoint: machine}); err != nil {
+		if err = srv.ConfigureTaskRuntime(master.TaskRuntime{Store: tasks, Signer: signer, KeyID: *taskKeyID, PublicKey: publicKey, TrustedNow: trustedClock.Now, Checkpoint: machine, XrayInstallPolicy: xrayInstallPolicy}); err != nil {
 			log.Fatalf("configure task runtime: %v", err)
 		}
 		if err = srv.ReconcileTaskRuntime(); err != nil {
@@ -150,6 +163,34 @@ func main() {
 	}
 	log.Printf("mcui development Master listening on loopback HTTP %s; Agent enrollment is unavailable", *addr)
 	log.Fatal(httpServer.ListenAndServe())
+}
+
+func readXrayInstallPolicy(path string) (*lifecycleauth.Policy, error) {
+	const maxPolicyBytes = 256 << 10
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0022 != 0) {
+		return nil, fmt.Errorf("approval policy must be a regular file without group or other write access")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("approval policy changed while opening")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxPolicyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	return lifecycleauth.ParsePolicy(raw)
 }
 
 func syncCoreBackups(backups *corecatalog.BackupStore) {

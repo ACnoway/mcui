@@ -39,6 +39,23 @@ type TaskReference struct {
 	LastStatus  string
 }
 
+// NextIdleSequence reports the next slot while no task is active. Callers
+// coordinating an external reservation must serialize the result with Issue.
+func (s *Store) NextIdleSequence(nodeID string) (int64, error) {
+	var last, active int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(sequence),0),COALESCE(SUM(active),0) FROM tasks WHERE node_id=?`, nodeID).Scan(&last, &active)
+	if err != nil {
+		return 0, err
+	}
+	if active != 0 {
+		return 0, ErrConflict
+	}
+	if last >= MaxSequence {
+		return 0, ErrSequence
+	}
+	return last + 1, nil
+}
+
 type taskEnvelopeV2 struct {
 	TaskID    string `json:"task_id"`
 	NodeID    string `json:"node_id"`
