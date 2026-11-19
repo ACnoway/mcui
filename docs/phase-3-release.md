@@ -4,19 +4,28 @@
 
 ## 1. 分配签名角色
 
-每位保管人在自己控制的环境生成并保存一把 Ed25519 PKCS#8 PEM 私钥，仅交换公钥及其指纹。所有角色的公钥互不复用。
+TUF 使用 Ed25519 密钥签署发布清单。私钥以 PKCS#8 PEM 保存，由保管人本地签名。公钥及指纹用于生成离线信任根和委派。节点以离线分发的 `offline-root.json` 验证发布清单。部署 SSH、GitHub 上传权限和远程任务签发各使用独立凭据。
 
-| 角色 | 密钥分配 |
-|---|---|
-| `root`、`targets` | 各 3 把，阈值均为 2 |
-| `snapshot`、`timestamp` | 各 1 把单用途在线密钥 |
-| `core-targets`、`runtime-targets` | 各 3 把，阈值均为 2 |
+| 角色 | 签署内容 | 当前密钥分配 |
+|---|---|---|
+| `root` | 顶层角色的公钥与阈值 | 3 把，至少 2 个签名 |
+| `targets` | Core 和 Agent/Helper 两个发布委派 | 3 把，至少 2 个签名 |
+| `core-targets` | 允许安装的 Core 版本、架构、大小和摘要 | 3 把，至少 2 个签名 |
+| `runtime-targets` | 允许更新的 Agent/Helper 制品 | 3 把，至少 2 个签名 |
+| `snapshot` | 各版本清单的版本、长度和摘要 | 1 把单用途在线密钥 |
+| `timestamp` | 当前快照的版本和摘要、时间戳有效期 | 1 把单用途在线密钥 |
+
+当前发布工具和客户端共要求 14 把互不复用的密钥。角色阈值用于发布制品清单。运维员在面板发起单次安装走[运维授权与独立签发](./phase-3-approval.md)。
 
 `root-keys.json` 是含 `root`、`targets`、`snapshot`、`timestamp` 的对象，值分别为包含规定数量公钥文件路径的数组。`delegation-keys.json` 使用同一格式，键为 `core-targets`、`runtime-targets`。相对路径以各自清单所在目录为基准。集成测试临时产生的密钥只用于该次测试。
 
 ## 2. 审核制品、准备并逐人签名
 
-每个审核条目记录 `core`、`version`、`architecture`、`length`、`sha256`、`review_id` 和 `upstream_signature_status`。核对固定官方来源和原始制品字节，留存签名事实、许可证及独立审核记录。上游存在可验证签名时记录 `verified`，有证据表明未发布签名时记录 `not-provided`。将获审核的条目写成 `core-reviews.json` 数组。撤销时在新版本中移除对应条目。
+每个准备发布的版本和架构做一次取件核验，可以用一条记录保存结果。
+
+1. 从固定上游 GitHub Releases 下载精确版本、架构对应的原始资产。记录官方链接、文件名、字节长度和 `sha256sum` 的结果，并与上游公布的摘要核对，例如 Release API 的 `digest` 或附件 `.dgst`。
+2. 核对归档内容、可执行文件架构和许可证，关联该制品对应的构建或运行验证。上游有可验证签名时用其公钥验签，成功后记为 `verified`。确认上游未提供签名时记为 `not-provided`。未核实的制品暂缓发布。
+3. 为核验记录分配 `review_id`，将其与 `core`、`version`、`architecture`、`length`、`sha256` 和 `upstream_signature_status` 写入 `core-reviews.json` 数组，用 `mcui-tuf` 生成并签署清单。撤销时在新版本的清单移除该条目。
 
 ```sh
 go build -trimpath -o mcui-tuf ./cmd/mcui-tuf
@@ -68,3 +77,9 @@ mkdir signed
 发布前工具验证阈值、委派、有效期、逐版本 root 轮换、snapshot/timestamp 摘要绑定及版本单调性。生成的目录只含公开 metadata。HTTPS 仓库可在一次原子切换中发布目录，或先上传全部版本化文件，再最后发布 `timestamp.json`。对于逐文件发布，保留现在线上仍有效的版本化 metadata，避免正在刷新中的客户端取件失败。
 
 更新时递增变更角色的版本。相同版本的签署文件保留原始字节。轮换 root 时把完整的 `2.root.json`、`3.root.json` 等连续历史放入 `signed/`，每版均收齐旧 root 和新 root 的阈值签名。撤销 Core 目标时重新签署 Core metadata、snapshot 和 timestamp。旧阈值不可用时按带外恢复流程重新建立信任。[制品信任方案](./artifact-trust.md)
+
+## 4. 在 GitHub 托管
+
+可将 `assemble` 生成的公开 JSON 原样部署到 GitHub Pages 的固定路径，例如 `https://OWNER.github.io/REPO/tuf/`。每次部署携带当前 `timestamp.json`、它引用的版本化文件、完整的 root 轮换历史，以及旧 timestamp 仍可能引用的版本化文件。节点配置该 HTTPS 地址并通过独立渠道获取信任根。GitHub Releases 可用于分发 ZIP 或存档一代签署后的公开 JSON。私钥继续保存在签发环境。[GitHub Pages 发布配置](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)
+
+当前 TUF 客户端只允许同域 HTTPS 元数据跳转。GitHub Releases 的附件链接会重定向到资产 CDN。若将 Releases 直接作为 TUF 元数据源，需要增加对固定仓库路径及 GitHub 资产 CDN 的支持，并确保每代发布自带可继续使用的版本化文件。[GitHub Releases 附件链接](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
