@@ -2,6 +2,8 @@
 
 远程安装的授权、签发及旧流程迁移见 [Xray 安装的运维授权与独立签发](./phase-3-approval.md)。
 
+当前命令和环境变量适用于迁移前的 TUF 实现。生产版采用 [GitHub Releases 与单签名制品清单](./phase-3-release.md)，相应工具和节点配置待实现。
+
 `mcui-xray` 在 Linux amd64/arm64 节点上由本地 root 管理独立的 `mcui-xray.service`。服务使用固定空 JSON 引导配置和独立的低权限 systemd 沙箱。远程安装通过显式配置接入同一套事务。指定版本和架构的产品状态见[能力矩阵](./core-compatibility.md)。
 
 ## 1. 准备验证节点
@@ -21,7 +23,7 @@ systemctl enable mcui-xray-recover.service
 
 ## 2. 配置信任并安装
 
-1. 通过独立渠道核对离线 TUF root 和指纹，将 root 以 `root:root`、`0444` 装入 root 管理的 `/etc/mcui-xray/root.json`。仓库角色分离、保管人和制品审核要求见[制品信任](./artifact-trust.md)。
+1. 通过独立渠道核对离线 TUF root 和指纹，将 root 以 `root:root`、`0444` 装入 root 管理的 `/etc/mcui-xray/root.json`。仓库角色、保管人和制品审核步骤见[旧版 TUF 手册](./phase-3-release.md#4-迁移前的-tuf-调试手册)。
 2. 记录仓库 HTTPS metadata 地址、当前有效的 Xray 可审核 target、本机架构、版本和已审核 SHA-256。Xray 本地工具接受 `v主版本.次版本.补丁版本` 格式及有明确上游签名核验事实或无签名记录的已审核目标。面板目录里的 GitHub API digest 只用于发现及缓存校验。
 3. 按[阶段 2 认证时间配置](./phase-2-operations.md#11-配置认证-nts-时间)配置并检查 chrony。本地 root 工具通过 `/run/chrony/chronyd.sock` 读取认证状态。TUF 未授权、时间异常、摘要不符或仓库刷新失败均会中止制品操作。
 

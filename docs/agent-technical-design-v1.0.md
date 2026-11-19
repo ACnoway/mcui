@@ -393,34 +393,36 @@ STATE_RECONCILIATION_REQUIRED
 
 不能因为从 HTTPS 下载成功、或下载的文件与**同一未经信任来源提供**的 SHA-256 一致，就认为安装包可信。
 
-建议发布系统逐步采用 [The Update Framework (TUF)](https://theupdateframework.github.io/specification/latest/) 思路（根信任、目标文件、版本/时间戳、防回滚/冻结）。V1 即使暂时实现简化签名清单，也应包含签名、公钥轮换、版本递增和过期控制，避免以后推翻制品模型。
-
-**发布前必须二选一并冻结协议：**采用经过验证的 TUF 客户端/仓库实现；或记录简化方案相对 TUF 缺失的保证，并明确多签阈值、清单单调版本、过期/离线时禁止新安装、根密钥轮换、旧版本降级的独立授权及从旧备份恢复的处理。过期清单不能因 Master 暂时离线而被默许为新安装依据。发布根私钥独立于在线任务签发服务保管。
+阶段 3 生产发布采用 GitHub Releases 中的单签名制品清单。单个维护者用离线 Ed25519 发布私钥签名，节点预置公钥，保存已接受的最高清单版本和该版摘要，按有效期约束新安装。密钥轮换和恢复使用本地带外配置。清单撤销、显式降级及旧备份恢复见[制品信任方案](./artifact-trust.md)。发布私钥与在线任务签发服务分开保管。
 
 ### 6.2 制品清单最小字段
 
 ```json
 {
+  "schema_version": 1,
   "manifest_version": 17,
   "expires_at": "2026-12-01T00:00:00Z",
   "artifacts": [
     {
-      "id": "artifact-xray-linux-amd64-example",
-      "core": "xray",
-      "version": "<approved-semver>",
+      "artifact_id": "<artifact-id>",
+      "component": "xray",
+      "version": "<approved-version>",
       "os": "linux",
-      "arch": "amd64",
+      "architecture": "amd64",
+      "filename": "Xray-linux-64.zip",
       "sha256": "<64-hex-digest>",
-      "size": 12345678,
-      "source_id": "trusted-mirror-1",
-      "archive_format": "zip"
+      "length": 12345678,
+      "source_id": "<fixed-source-id>",
+      "archive_format": "zip",
+      "build_options": "upstream-prebuilt",
+      "review_id": "<review-id>",
+      "upstream_signature_status": "not-provided"
     }
-  ],
-  "signatures": ["<signed-metadata-signatures>"]
+  ]
 }
 ```
 
-示例字段并非最终的 TUF 规范实现，正式实现必须选定明确的签名封装格式，**不能将 `signatures` 当作待签名原文的一部分形成循环定义**。发布清单应固定 Core 类型与平台元数据、构建来源及审核记录。
+以上是计划格式。签名覆盖 `manifest.json` 的原始字节，分离签名写入同一 Release 的 `manifest.json.sig`。节点使用本地公钥验证签名，再根据固定来源映射下载并复验制品。[发布手册](./phase-3-release.md)
 
 ### 6.3 Core 安装事务
 
@@ -820,7 +822,7 @@ security_events           最小必要安全事件
 这些是**编码前应形成决议**的少量问题，不应在开发中随意漂移：
 
 1. **签名信任部署**：确定任务与配置验证公钥的可信分发和轮换流程。
-2. **任务和制品签名体系**：正式采用 JCS + Ed25519，还是 TUF 元数据体系；钥匙由谁保管。
+2. **制品发布落地**：确定单签名清单验证和节点公钥配置的迁移步骤，安排离线发布密钥保管与首次生产签发。
 3. **高危操作审批**：卸载、降级、Agent/Helper 更新、信任根变更是否必须双人审批（推荐至少更新信任根需要独立授权）。
 4. **本机权限管理**：Helper 使用独立 root 守护进程还是严格限定的 systemd 激活服务；V1 建议后者可按需启动，但仍要实现完整授权。
 5. **mita 配置持久化**：指定支持版本的配置存储、replace/reload 与回滚边界如何验证。

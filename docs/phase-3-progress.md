@@ -1,6 +1,6 @@
 # 阶段 3 进度与未完成项
 
-**状态：阶段 3 工程进行中，已实现 Xray 的节点本地生命周期。** 阶段 2 的正式退出门槛仍未完成。[阶段 2 进度](./phase-2-progress.md)
+**阶段 3 工程进行中。** Xray 本地生命周期和远程安装已使用测试 TUF 仓库完成验证。生产发布采用 GitHub Releases 和单签名制品清单，代码迁移待实现。阶段 2 的正式退出门槛仍未完成。[制品发布](./phase-3-release.md) · [阶段 2 进度](./phase-2-progress.md)
 
 ## Xray 节点本地生命周期
 
@@ -25,30 +25,30 @@
 - 下载固定 GitHub release URL，最多允许 5 次 HTTPS 跳转至 GitHub 官方资产 CDN；下载流限制为目录公布大小，并校验完整字节数及 API digest。制品按摘要放入 `blobs/`，manifest 原子替换并记录 Core、仓库、精确版本、架构、文件名、源 URL、长度、摘要、存储键和缓存时间。
 - 每种 Core 单独发布：该 Core 的两个架构均下载并验证成功后才替换其 manifest 记录；失败时保留该 Core 原有版本。成功替换后清理不再被 manifest 引用的旧 blob，因此每个 Core 只保留一版；不同 Core 可分别成功或失败。
 - 已登录管理员可通过 `GET /api/v1/admin/cores/backups` 查看 manifest，面板显示版本、架构、文件大小、digest 和更新时间。目录权限收紧为仅服务账号可访问，manifest 不可被非普通文件或未知字段绕过。
-- GitHub API digest 是主控缓存校验依据。该缓存的制品仍需独立 TUF 授权。精确版本、架构、文件和摘要全部匹配的备用下载路径待接入。
+- GitHub API digest 是主控缓存校验依据。安装授权来自节点验证的发布清单，当前实现使用 TUF。精确版本、架构、文件、长度和摘要全部匹配的备用下载路径待接入。
 
-## 已实现的 TUF 客户端基础
+## 迁移前使用的 TUF 客户端
 
 - `internal/artifacttrust` 固定使用官方 `github.com/theupdateframework/go-tuf/v2 v2.4.2`。每次查找以离线配置的 root 为信任起点，刷新 root/timestamp/snapshot/targets 与按需委派 targets；缓存目录分离、校验 `0700` 且拒绝符号链接。初始 root 不从网络下载。
 - 客户端记录已通过旧根和新根阈值验证的 root，即使后续元数据刷新失败也保留。后续从离线引导 root 起逐个验证以 `0400` 原子追加保存的轮换链。独立于节点本地状态的单调检查点仍待实现。
 - target 路径固定为 `cores/{core}/{version}/linux/{本机架构}/{官方文件名}`；只接受 Xray、sing-box、mita 的固定资产映射。自定义元数据严格绑定由 SHA-256 派生的制品 ID、Core、版本、OS/架构、`upstream-prebuilt`、固定归档格式、source ID、审核记录 ID 和明确的上游签名状态。拒绝重复或未知字段、错误绑定、缺少 SHA-256 和超过 512 MiB 的 target。
 - 下载仅访问固定 GitHub Release asset URL，最多 5 次跳转到允许的 GitHub 官方资产/CDN 主机，禁用代理并拒绝非公网 DNS 地址。下载字节按 TUF length 与 SHA-256 重新校验，成功后才以摘要名、`0400` 权限原子发布到私有缓存；错误字节和中断下载不会留下可用缓存文件。
-- 本地工具、远程 Agent 和 Helper 依赖 TUF 审核记录所提供的 `review_id` 和上游签名事实状态，并拒绝 `unverified`。生产审核记录保管、上游签名独立核验、发布仓库和生产密钥仍待验收。
+- 本地工具、远程 Agent 和 Helper 检查 TUF 条目中的 `review_id` 和上游签名状态，并拒绝 `unverified`。这套客户端与发布工具供现有部署和历史测试过渡使用。[旧版 TUF 手册](./phase-3-release.md#4-迁移前的-tuf-调试手册)
 
 ## 后续工作
 
 主控可启用独立检查点 `mcui-checkpointd`，核对两库摘要和独立端 revision，覆盖任务、审计、凭据撤销、Xray 安装序号预留、签发任务核验、投递和结果。生产检查点需由独立保管方部署。[检查点部署与恢复](./phase-2-operations.md#8-部署独立检查点)
 
-1. 已实现 `mcui-tuf` 准备、逐人签署、核验和组装发布目录，Xray 工具要求独立的 Core 委派。待任命实际保管人、核对离线信任根指纹、完成上游制品审核并部署 HTTPS 仓库。[发布手册](./phase-3-release.md)
+1. 实现单签名制品清单和分离签名，接入 GitHub Releases 与本地公钥配置。改造 Xray 本地工具、任务清单版本绑定、Agent 和 Helper 的验签路径，完成首批制品核验及发布。[发布手册](./phase-3-release.md)
 2. Agent 与 Helper 已独立下载和复验 Xray 安装制品，固定官方源和目标版本。待接入精确匹配的备用缓存回退并验证故障。
 3. Xray 安装已在隔离环境通过真实制品安装和结果回放。生产 NTS 和独立信任材料下的部署验收、未决任务对账、远程启停、升级、显式降级和卸载仍待完成。[运维授权与独立签发](./phase-3-approval.md)
 4. Xray 本地事务已验证切指针后用 `SIGKILL` 终止更新进程，再启动恢复流程并恢复已提交版本和运行状态。后续远程生命周期操作继续使用该事务，需要验证中断后主控任务与节点状态能完成对账。
-5. Agent/Helper 同源双架构制品已可打包，TUF 发布端可使用独立的 `runtime-targets` 审核和签署候选包。本地人工修复已有手册。待实现独立更新任务授权、启动监督，并验证更新进程中断后重新启动能恢复旧版。
+5. Agent/Helper 同源双架构制品已可打包，本地人工修复已有手册。待将成对制品登记到单签名清单，实现更新任务授权和启动监督，并验证更新进程中断后重新启动能恢复旧版。
 6. 在 `ro` 的隔离 Debian amd64 环境验证制品拒绝、官方制品运行和事务进程重启恢复。Linux arm64 验证构建，按证据更新能力矩阵。
 
 ## 当前验证边界
 
-目录和备用缓存测试覆盖固定源、分页、下载校验和缓存发布。TUF 测试覆盖阈值签名、root 轮换和目标撤销。Debian amd64 已在隔离的 systemd 环境验证官方 Xray 本地生命周期、磁盘写满和事务进程被强制终止后的恢复。远程路径使用测试信任材料通过了官方制品端到端安装冒烟测试。阶段 3 的恢复验收采用进程中断和重新启动。生产 NTS 和生产密钥治理仍待验证。Linux arm64 仅验证构建。[分阶段开发流程](./phased-development-workflow.md) · [能力矩阵](./core-compatibility.md)
+目录和备用缓存测试覆盖固定源、分页、下载校验和缓存发布。迁移前的 TUF 测试覆盖阈值签名、root 轮换和目标撤销。Debian amd64 已在隔离的 systemd 环境验证官方 Xray 本地生命周期、磁盘写满和事务进程被强制终止后的恢复。远程路径使用测试信任材料通过了官方制品端到端安装冒烟测试。阶段 3 的恢复验收采用进程中断和重新启动。生产单签名发布和生产 NTS 待验证。Linux arm64 仅验证构建。[分阶段开发流程](./phased-development-workflow.md) · [能力矩阵](./core-compatibility.md)
 
 ## 已执行检查
 
