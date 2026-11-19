@@ -32,7 +32,7 @@
 
 - 工具链基线更新为 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0`（按 2026-11-16 官方最新补丁锁定）。Go 1.27.4 的发布记录包含 TLS/HTTP 等安全修复；Go 项目仅支持最近两个主要版本，故 1.24 已不适合作为当前基线。Node 26.13.1 是 LTS 安全更新；pnpm 12.16.0 修复了 zstd 处理与签名相关安全问题，基线锁到后续的 12.17.0。参见 [Go Release History](https://go.dev/doc/devel/release)、[Node.js 26.13.1](https://nodejs.org/en/blog/release/v26.13.1)、[pnpm 12.16.0 security fixes](https://pnpm.io/blog/releases/12.16.0) 和 [pnpm 12.17.0](https://pnpm.io/blog/releases/12.17.0)。`scripts/check-static.sh` 强制精确值，`.nvmrc` 与 `web/package.json` 记录 Node/pnpm 版本。维护者仍须设定更新负责人和生命周期更新节奏，不能因版本固定而长期停更。
 - Go 工程提交 `go.mod` 和 `go.sum`；CI 的 Go 版本精确固定，构建/测试后核验依赖文件未被改写。模块更新须单独评审。
-- 当前 TUF 客户端依赖固定为 `github.com/theupdateframework/go-tuf/v2 v2.4.2`。阶段 3 生产方案改为单签名清单和 GitHub Releases，待实现迁移和发布验证。[发布手册](./phase-3-release.md)
+- 阶段 3 的新制品清单用 Go 标准库验证 Ed25519 签名。旧 TUF 客户端保留锁定的 `github.com/theupdateframework/go-tuf/v2 v2.4.2`，用于旧任务收尾和复现历史验证。[发布手册](./phase-3-release.md)
 - 前端只使用 `pnpm-lock.yaml`；CI 运行冻结锁文件安装并核验未改写。禁止浮动版本、未审查的远程脚本；安装脚本权限、网络和机密隔离须评估。
 - 第三方 CI action、构建镜像和工具按不可变完整提交 SHA 或镜像摘要固定；记录来源、许可证、完整性和变更原因。依赖升级通过专门变更展示锁文件差异、漏洞和兼容性测试；漏洞扫描发现阻断问题时修复或停止交付，不以静默忽略代替决议。
 - Core 制品固定来源、版本、架构、摘要、构建选项及受信签名清单。发布和降级按[制品信任方案](./artifact-trust.md)执行。任务签名与制品发布密钥分开保管。

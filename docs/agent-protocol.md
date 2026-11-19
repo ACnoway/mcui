@@ -1,6 +1,6 @@
 # Agent 身份、任务与配置协议（阶段 0 冻结基线）
 
-> 状态：阶段 0 已冻结 V1 签名编码与一般任务/序号/恢复语义基线，等待项目负责人确认及项目内安全检查。V1 schema 和共享向量由 `internal/protocol` 实现；阶段 2 另以 V2 接通只读 `core.status` 状态查询，并复用 V1 独立域实现 pending cancel / expired skip 的受限子集。本文一般控制语义仍宽于当前运行时，当前不开放任何会改变系统的操作。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)；旧示例 JSON 仅作示意。阶段状态见[阶段 2 进度](./phase-2-progress.md)。
+> 状态：阶段 0 已冻结 V1 签名编码与一般任务、序号和恢复语义基线，等待项目内安全检查。阶段 2 以 V2 接通只读状态查询，并复用 V1 独立域实现受限取消与跳过。阶段 3 显式启用的节点可执行远程 Xray 安装，其他远程变更仍在规划中。本文细化[分阶段流程](./phased-development-workflow.md)与[Agent 技术设计](./agent-technical-design-v1.0.md)。
 > 节点接入部署与旧节点迁移见[阶段 1 运维手册](./phase-1-operations.md)。
 
 ## 1. 信任边界与基本约束
@@ -67,7 +67,7 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 
 ### 阶段 2 已接通的 V2 状态查询子集
 
-状态查询使用 `schema_version: 2`、`operation: core.status`。V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。显式启用安装的 Agent 通过 `install=xray-v1` 请求接收独立签发的 V1 `core.install`，共享同一节点序号。安装租约为 60 秒，同一节点凭据可为未过期的同一信封续租。租约到期只重投相同签名消息。Agent 账本先写入再处理；重复 ACK 可重放，执行中状态重启后进入 `NEEDS_RECONCILIATION`。[Xray 安装操作说明](./phase-3-operations.md#5-启用远程-xray-安装)
+状态查询使用 `schema_version: 2`、`operation: core.status`。V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。显式启用单签名清单的 Agent 通过 `install=xray-manifest-v1` 接收独立签发的 V1 `core.install`，共享同一节点序号。旧 TUF 节点使用 `install=xray-v1` 处理已投递任务。安装租约为 60 秒，同一节点凭据可为未过期的同一信封续租。租约到期只重投相同签名消息。Agent 账本先写入再处理；重复 ACK 可重放，执行中状态重启后进入 `NEEDS_RECONCILIATION`。[Xray 安装操作说明](./phase-3-operations.md#5-启用远程-xray-安装)
 
 Helper 要求当前 Master 签发租约、提交完整原始签名消息并从 TLS 验证的 Master 获取当前时间和前序终态位置。检查点返回的前序序号只允许将已终结缺口写入 Helper 本地 ledger；未知缺口不跳过。状态读取仅执行固定 `systemctl show` 属性查询。Agent 过期收到的签名任务只持久化 `EXPIRED` 并 ACK，不执行 Helper。执行结果不确定时两端保持 reconciliation 栅栏，不能删除账本恢复。
 
@@ -115,4 +115,5 @@ Go 测试通过 `internal/protocol` 校验 schema、拒绝负例并比对规范�
 2. 当前 V2 状态签发服务、V1 控制签发、持久化任务存储、受限序号恢复、chrony NTS 检查和独立进程隔离已有代码；节点 Token 鉴权和可选的独立回滚检查点已接入主控。独立审批存储、独立 `CANCELED` skip 和完整带外恢复仍待实现。禁止将状态查询 signer 用于其他操作。
 3. V1 任务 parser/向量与 V2 状态查询格式不同。[阶段 2 状态任务 V2 协议](./phase-2-protocol-draft.md)加入只读步骤字段与共享向量，用户于 2026-11-17 批准其作为阶段 2 开发基线；制品和架构的 `not-applicable` 仅适用于只读状态查询。批准不构成生产授权。
 4. Helper 当前实现固定状态查询；Core 逐版本配置允许字段为空、默认拒绝。候选 Core 版本需按 [兼容矩阵](./core-compatibility.md) 实测后再拟定字段表。自更新、安装、配置、统计、真实恢复、通用 skip/序号恢复和制品信任运行时仍禁用。
-5. 当前 Xray 安装中的 `manifest_version` 指 TUF 的 `core-targets` 委派版本。发布方案迁移后，新任务使用单签名清单的 `manifest_version`，现有在途任务按原清单处理。[迁移步骤](./phase-3-release.md#3-从当前-tuf-实现迁移)
+5. 新 Xray 任务的 `artifact_id` 固定为 `xray-manifest-<架构>-<SHA256>`，并签入单签名清单的 `manifest_version`。旧 ID `xray-<架构>-<SHA256>` 仅绑定 TUF 的 `core-targets` 委派版本。[迁移步骤](./phase-3-release.md#3-从当前-tuf-实现迁移)
+6. Agent 和 Helper 用固定的 `POST /api/v1/helper/artifacts/xray` 请求主控备用制品，发送当前安装签名信封 `task`、`lease_id` 和期望 `length`。Master 核对已投递任务、节点范围和当前租约，再按精确版本、架构、摘要及长度匹配缓存。客户端只使用已验签清单授权的字节。

@@ -404,7 +404,7 @@ STATE_RECONCILIATION_REQUIRED
   "expires_at": "2026-12-01T00:00:00Z",
   "artifacts": [
     {
-      "artifact_id": "<artifact-id>",
+      "artifact_id": "xray-manifest-amd64-<64-hex-digest>",
       "component": "xray",
       "version": "<approved-version>",
       "os": "linux",
@@ -412,7 +412,7 @@ STATE_RECONCILIATION_REQUIRED
       "filename": "Xray-linux-64.zip",
       "sha256": "<64-hex-digest>",
       "length": 12345678,
-      "source_id": "<fixed-source-id>",
+      "source_id": "github:XTLS/Xray-core",
       "archive_format": "zip",
       "build_options": "upstream-prebuilt",
       "review_id": "<review-id>",
@@ -422,7 +422,7 @@ STATE_RECONCILIATION_REQUIRED
 }
 ```
 
-以上是计划格式。签名覆盖 `manifest.json` 的原始字节，分离签名写入同一 Release 的 `manifest.json.sig`。节点使用本地公钥验证签名，再根据固定来源映射下载并复验制品。[发布手册](./phase-3-release.md)
+签名覆盖 `manifest.json` 的原始字节，分离签名写入同一 Release 的 `manifest.json.sig`。节点使用本地公钥验证签名，再根据固定来源映射下载并复验制品。[发布手册](./phase-3-release.md)
 
 ### 6.3 Core 安装事务
 

@@ -2,7 +2,7 @@
 
 远程安装的授权、签发及旧流程迁移见 [Xray 安装的运维授权与独立签发](./phase-3-approval.md)。
 
-当前命令和环境变量适用于迁移前的 TUF 实现。生产版采用 [GitHub Releases 与单签名制品清单](./phase-3-release.md)，相应工具和节点配置待实现。
+以下步骤使用 [GitHub Releases 与单签名制品清单](./phase-3-release.md)。旧 TUF 节点按发布手册协调迁移。
 
 `mcui-xray` 在 Linux amd64/arm64 节点上由本地 root 管理独立的 `mcui-xray.service`。服务使用固定空 JSON 引导配置和独立的低权限 systemd 沙箱。远程安装通过显式配置接入同一套事务。指定版本和架构的产品状态见[能力矩阵](./core-compatibility.md)。
 
@@ -12,7 +12,9 @@
 
 ```sh
 go build -trimpath -o mcui-xray ./cmd/mcui-xray
+go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
 install -o root -g root -m 0755 mcui-xray /usr/local/bin/mcui-xray
+install -o root -g root -m 0755 mcui-manifest /usr/local/bin/mcui-manifest
 install -o root -g root -m 0644 deploy/systemd/mcui-xray*.service /etc/systemd/system/
 systemctl daemon-reload
 mcui-xray initialize
@@ -23,22 +25,24 @@ systemctl enable mcui-xray-recover.service
 
 ## 2. 配置信任并安装
 
-1. 通过独立渠道核对离线 TUF root 和指纹，将 root 以 `root:root`、`0444` 装入 root 管理的 `/etc/mcui-xray/root.json`。仓库角色、保管人和制品审核步骤见[旧版 TUF 手册](./phase-3-release.md#4-迁移前的-tuf-调试手册)。
-2. 记录仓库 HTTPS metadata 地址、当前有效的 Xray 可审核 target、本机架构、版本和已审核 SHA-256。Xray 本地工具接受 `v主版本.次版本.补丁版本` 格式及有明确上游签名核验事实或无签名记录的已审核目标。面板目录里的 GitHub API digest 只用于发现及缓存校验。
-3. 按[阶段 2 认证时间配置](./phase-2-operations.md#11-配置认证-nts-时间)配置并检查 chrony。本地 root 工具通过 `/run/chrony/chronyd.sock` 读取认证状态。TUF 未授权、时间异常、摘要不符或仓库刷新失败均会中止制品操作。
+1. 通过独立渠道核对发布公钥指纹、当前清单版本和原始字节摘要。将发布公钥以 `root:root`、`0444` 安装到 root 管理的 `/etc/mcui-xray/release.pub`。提供已核对的 `manifest.json` 和原始 64 字节签名，先检查本机时间，再以 root 初始化特权安装端的清单状态。
+2. 从有效清单选取本机架构的精确 Xray 版本和 SHA-256。Xray 工具接受 `v主版本.次版本.补丁版本`。面板版本目录里的 GitHub API digest 用于发现及缓存核验。
+3. 按[阶段 2 认证时间配置](./phase-2-operations.md#11-配置认证-nts-时间)配置并检查 chrony。本地 root 工具通过 `/run/chrony/chronyd.sock` 读取认证状态。清单无授权、时间异常、摘要不符或刷新失败均会中止制品操作。
 
-将环境变量填入已审核的具体值后执行。升级和降级的版本必须分别高于和低于已提交版本。节点原先已停止时仍会短暂检查候选进程，确认后恢复停止状态。若审核锁定了 TUF 清单版本，为安装、升级或降级加上 `-manifest-version "$CORE_TARGETS_VERSION"`。下载前和激活前会重新核对当前 `core-targets` 版本。清单发生变化时，需要重新审核当前版本。
+将环境变量填入已审核的具体值后执行。升级和降级的版本必须分别高于和低于已提交版本。节点原先已停止时仍会短暂检查候选进程，确认后恢复停止状态。可用 `-manifest-version "$MANIFEST_VERSION"` 明确指定审核使用的版本。安装事务始终锁定查到的清单版本，下载前和激活前都重新核验。
 
 ```sh
-mcui-xray install -metadata-url "$TUF_METADATA_URL" -version "$VERSION" -sha256 "$SHA256"
+mcui-manifest init-state -state /var/lib/mcui-xray/control/xray-manifest \
+  -public-key /etc/mcui-xray/release.pub -manifest "$MANIFEST" -signature "$SIGNATURE"
+mcui-xray install -version "$VERSION" -sha256 "$SHA256"
 mcui-xray status
 systemctl show mcui-xray.service --property=ActiveState,SubState,MainPID
 
-mcui-xray upgrade -metadata-url "$TUF_METADATA_URL" -version "$NEW_VERSION" -sha256 "$NEW_SHA256"
-mcui-xray downgrade -metadata-url "$TUF_METADATA_URL" -version "$OLD_VERSION" -sha256 "$OLD_SHA256"
+mcui-xray upgrade -version "$NEW_VERSION" -sha256 "$NEW_SHA256"
+mcui-xray downgrade -version "$OLD_VERSION" -sha256 "$OLD_SHA256"
 ```
 
-用 `status` 中已提交的版本和摘要填写以下命令。卸载停止服务并清理管理的已解包版本，保留事务状态、TUF 历史和压缩制品缓存。需要释放压缩缓存空间时，在确认没有本地事务运行后只清理 `/var/lib/mcui-xray/control/artifact-cache` 中的摘要文件。
+用 `status` 中已提交的版本和摘要填写以下命令。卸载停止服务并清理管理的已解包版本，保留事务、清单防回退状态和压缩制品缓存。需要释放空间时，在确认没有安装事务运行后只清理 `/var/lib/mcui-xray/control/xray-manifest/artifacts` 中的摘要文件。
 
 ```sh
 mcui-xray stop -version "$CURRENT_VERSION" -sha256 "$CURRENT_SHA256"
@@ -58,6 +62,8 @@ mcui-xray recover
 
 已提交目录或账本损坏时，停止 `mcui-xray.service`，保存 `/var/lib/mcui-xray` 和日志用于带外核验。恢复一致且可证明新鲜的状态前保持停止，避免重建空账本或手工改写版本指针。
 
+恢复旧备份时，先挂起新制品操作。恢复状态目录后且在重启安装端前，对每个清单状态目录以其所有者身份执行 `mcui-manifest suspend -state DIRECTORY`。清单状态缺失或损坏时，安装端也会拒绝新操作。对照独立记录核实此前已接受的最高版本和经带外确认的当前版本、摘要，再以当前签名清单运行 `init-state` 解除挂起。损坏的状态需先留存并由本地管理员处理。带外更换公钥时保留清单序列与状态，部署新公钥并重启 Agent 和 Helper，使用更高版本的清单继续发布。
+
 ### 进程中断恢复验收
 
 1. 在隔离节点运行一个已提交版本，记录摘要、运行意图及 systemd 状态。
@@ -76,16 +82,24 @@ mcui-xray recover
 
 ## 5. 启用远程 Xray 安装
 
-在已接入阶段 2 任务运行时的隔离节点上，先按第 1 节安装并初始化 Xray 单元和状态目录。主控启用 HTTPS、独立检查点、认证时间及运维授权策略。Agent 和 Helper 分别持有安装任务公钥及独立引导的 TUF root。两个服务各自保留元数据和制品缓存，并从固定官方路径独立下载及复验。当前备用缓存回退仍待接入。
+在已接入阶段 2 任务运行时的隔离节点上，先按第 1、2 节安装并初始化 Xray 单元和特权清单状态。主控启用 HTTPS、独立检查点、认证时间及运维授权策略。Agent 和 Helper 均读取 root 管理的安装任务公钥与独立发布公钥，分别验签和复验制品。Helper 与本地 root 工具共用特权清单状态，Agent 以自身账号维护独立状态。直连官方源不可用时，两个服务可凭当前签名任务和有效租约向 Master 请求精确匹配的缓存。
 
 将以下配置作为 root 管理的 `/etc/mcui-agent/xray-install.env`，按可信发布材料替换实际值：
 
 ```ini
 MCUI_XRAY_INSTALL_KEY_ID=xray-install-key-1
 MCUI_XRAY_INSTALL_PUBLIC_KEY=/etc/mcui-agent/xray-install.pub
-MCUI_XRAY_TUF_ROOT=/etc/mcui-agent/xray-root.json
-MCUI_XRAY_TUF_ORIGIN=https://releases.example.org/metadata
+MCUI_XRAY_RELEASE_PUBLIC_KEY=/etc/mcui-agent/release.pub
 ```
+
+将同一把发布公钥复制到上述路径，供 Agent 读取。清单和签名可放在 Agent 可读的 root 管理路径。切换前以 Agent 账号初始化其状态，按实际部署调整路径。
+
+```sh
+runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xray-manifest \
+  -public-key /etc/mcui-agent/release.pub -manifest "$MANIFEST" -signature "$SIGNATURE"
+```
+
+旧任务收尾期间使用原有的 `MCUI_XRAY_TUF_ROOT` 和 `MCUI_XRAY_TUF_ORIGIN`。切换到单签名清单时删除这两个配置项，同时更新两个服务并核对本地 CLI 与 Agent/Helper 使用的发布公钥指纹一致。
 
 使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 仅为 Helper 开放固定的 Xray 运行目录。Helper 从本地 chrony Unix 套接字读取认证时间。Master 和 Agent 仍须通过阶段 2 文档所述的受控认证时间查询。
 

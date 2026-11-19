@@ -1,6 +1,6 @@
 # Core 与平台兼容矩阵（V1 唯一能力状态源）
 
-阶段 0 已冻结首批互操作测试目标。Xray 已在 Debian amd64 使用测试 TUF 仓库验证本地生命周期和远程安装。生产制品审核与节点部署验收待完成。[阶段 3 检查记录](./phase-3-progress.md#已执行检查) · [工作流](./phased-development-workflow.md)
+阶段 0 已冻结首批互操作测试目标。Xray 已接入单签名制品清单，历史本地与远程安装证据来自 Debian amd64 的隔离 TUF 验证。生产制品审核与节点部署验收待完成。[阶段 3 检查记录](./phase-3-progress.md#已执行检查) · [工作流](./phased-development-workflow.md)
 
 ## 1. 支持目标与平台状态
 

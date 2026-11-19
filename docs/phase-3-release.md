@@ -1,25 +1,35 @@
 # 阶段 3 制品发布
 
-生产发布采用 **GitHub Releases 和单个 Ed25519 签名的制品清单**，由一位维护者管理发布密钥。方案已确定，客户端、签名工具和生产发布尚待实现。当前代码仍通过本页后半部分的 TUF 流程运行。
+生产发布采用 **GitHub Releases 和单个 Ed25519 签名的制品清单**，由一位维护者管理发布密钥。签发工具和 Xray 安装客户端已接入此格式，首份生产清单仍待审核和发布。TUF 流程用于旧任务收尾和历史验证。
 
 ## 1. 发布位置和密钥
 
 - Xray、sing-box 和 mita 继续从各自的官方 GitHub Releases 下载。MCUI 自建的 Agent/Helper 双架构 ZIP 放在 `ACnoway/mcui` 的 GitHub Releases。
-- 将 `manifest.json` 和 `manifest.json.sig` 一起上传到同一个 MCUI Release。客户端从固定仓库取得当前稳定 Release 的标签，再从该标签取两个文件。每次变更发布新一代清单，保留清单引用的制品版本。可以单独发布清单更新，复用已发布的 ZIP。
+- 先以草稿上传 `manifest.json` 和 `manifest.json.sig`，再将包含两个附件的 Release 发布为 Latest。客户端通过固定仓库的 `releases/latest` 取得标签，再从该标签取两个文件。给已发布的 Latest Release 更换附件会导致同版本内容冲突。每次变更发新标签和更高版本，保留清单引用的制品版本。可以单独发布清单更新，复用已发布的 ZIP。每个设为 Latest 的 Release 都需带这两个文件。
 - 维护者在离线签发环境保管一把 Ed25519 发布私钥。通过可信安装包或带外配置为节点预置对应公钥并核对指纹。发布私钥与任务签发、SSH 和 GitHub 上传凭据分开。更换或撤销公钥通过节点本地管理完成。
 
 ## 2. 取件核验和发布
 
 1. 每个版本和架构核对一次。记录官方地址、文件名、长度和 SHA-256，与上游公布的摘要比对（如有）。检查归档成员、可执行文件架构和许可证，关联相应的构建或运行结果。上游有可验证签名时核验并记录结果。
 2. 构建 MCUI 自身更新包可使用现有 `bash scripts/build-runtime-release.sh NEW_DIRECTORY`。同一架构的 Agent 和 Helper 作为一个 ZIP 发布，取件记录关联源码提交和构建结果。
-3. 将通过核验的条目填入清单。每项固定组件、精确版本、平台、架构、文件名、来源标识、归档格式、长度和 SHA-256，并关联核验记录。发布时递增 `manifest_version`，设置 `expires_at`。
-4. 用发布私钥对 `manifest.json` 的原始字节签名，将 64 字节 Ed25519 分离签名写入 `manifest.json.sig`。使用节点预置公钥复验后发布这两个文件。撤销制品时在下一版清单移除相应条目。
+3. 将通过核验的条目填入[清单格式](./agent-technical-design-v1.0.md#62-制品清单最小字段)。发布时递增 `manifest_version`（正整数，最大值为 9007199254740991），设置 RFC 3339 `expires_at`。组件为 `xray`、`sing-box`、`mita` 或 `mcui-runtime`，操作系统为 `linux`，架构为 `amd64` 或 `arm64`。源标识分别为 `github:XTLS/Xray-core`、`github:SagerNet/sing-box`、`github:enfein/mieru` 和 `github:ACnoway/mcui`。ID 为 `<组件>-<架构>-<小写SHA256>`，其中 Xray 使用前缀 `xray-manifest-`。上游制品的 `build_options` 为 `upstream-prebuilt`，已核验签名记为 `verified`，确认未提供签名记为 `not-provided`。MCUI ZIP 使用 `mcui-build:<40位源码提交SHA>` 与 `not-applicable`，文件名为 `mcui-runtime-linux-<架构>.zip`。
+4. 用发布私钥对 `manifest.json` 的原始字节签名，将 64 字节 Ed25519 分离签名写入 `manifest.json.sig`。使用节点预置公钥复验后发布这两个文件。撤销制品时在下一版清单移除相应条目，`artifacts: []` 可一次撤销所有制品。
+
+```sh
+go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
+./mcui-manifest sign -private-key "$RELEASE_PRIVATE_KEY" -manifest manifest.json -signature manifest.json.sig
+./mcui-manifest verify -public-key "$RELEASE_PUBLIC_KEY" -manifest manifest.json -signature manifest.json.sig
+```
+
+私钥使用 Ed25519 PKCS#8 PEM，Unix 上仅所有者可访问。公钥支持 PKIX PEM 或标准 Base64 编码的 32 字节原始公钥。核对 `verify` 输出中的原始公钥 SHA-256 指纹、清单版本及原始字节摘要。签发命令拒绝覆盖已有签名文件。
 
 任务仍绑定节点、动作和清单中的精确制品。Agent 与 Helper 分别核验清单签名和版本，再按相同长度和 SHA-256 校验官方源或主控缓存的字节。对账和启动恢复按照[节点操作手册](./phase-3-operations.md#进程中断恢复验收)。清单字段和防回退规则见[制品信任方案](./artifact-trust.md)。
 
 ## 3. 从当前 TUF 实现迁移
 
-先为节点配发发布公钥，再协调切换 Master、Agent、Helper 和本地工具。迁移前处理已投递的旧任务，未投递的旧提案按新清单重建。现有任务的 `manifest_version` 指 TUF 的 `core-targets` 委派版本。新提案使用单签清单的独立版本序列。迁移保留原身份、任务账本、已部署版本及本地恢复状态。
+1. 先为节点配发发布公钥和经带外核对的当前清单，按[节点手册](./phase-3-operations.md)初始化 Agent 状态及本地工具和 Helper 共用的特权清单状态。
+2. 更新 Master 和独立签发工具。已投递的 TUF 任务仍可由旧模式节点领取和回报，切换节点前先收尾或对账。旧的未投递提案不再投递，按原任务序号规则处理保留槽后，用当前单签清单重建提案。
+3. 协调切换节点的 Agent、Helper 和本地工具。新提案使用格式版本 3，签名信封中的 Xray 制品 ID 带 `xray-manifest-` 前缀，Master 仅向声明 `install=xray-manifest-v1` 的节点租出新任务。旧任务的 `manifest_version` 仍指 TUF 的 `core-targets` 委派版本。保留原身份、任务账本、已部署版本和恢复状态。
 
 ## 4. 迁移前的 TUF 调试手册
 
