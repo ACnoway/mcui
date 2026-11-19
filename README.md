@@ -6,9 +6,11 @@ MCUI is a multi-Core control plane in staged development. The repository contain
 
 Phase 0/1 engineering work is complete and formal exit evidence remains outstanding. Phase 2 connects scoped status-task creation, external signing, Token-authenticated pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The remotely executable action is a fixed read-only service status query. [Phase 0/1 status](docs/phase-0-1-implementation.md) · [Phase 2 progress](docs/phase-2-progress.md) · [Phase 2 operations](docs/phase-2-operations.md)
 
-Phase 3 includes the official Core release catalog, Master backup cache and local `mcui-xray` lifecycle. A scoped operator can reserve a sequence after MFA, submit an independently signed Xray installation task and dispatch it through the checkpoint. Xray installation verifies a single Ed25519-signed manifest from GitHub Releases. Remote installs can use an exact matching Master backup when the official source is unavailable. The first production manifest, further remote lifecycle operations and the Agent/Helper update supervisor are pending. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Phase 3 progress](docs/phase-3-progress.md) · [Install authorization](docs/phase-3-approval.md) · [Operations](docs/phase-3-operations.md) · [Artifact releases](docs/phase-3-release.md)
+Phase 3 has the Core release catalog, Master backup cache, local `mcui-xray` lifecycle and opt-in remote Xray installation using a signed release manifest. The next batch recovers interrupted remote installations and reports their outcomes to Master. Remote start and stop follow. Xray demo work can begin on an isolated node with the existing installation path. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Next batches](docs/phase-3-progress.md#后续工作) · [Operations](docs/phase-3-operations.md) · [Production release](docs/phase-3-release.md#生产发布验收)
 
 ## Development checks
+
+For documentation changes, review the diff and check links. For feature changes, run the checks relevant to the change. Use `scripts/check-static.sh` for the full Linux checks.
 
 The baseline pins Go 1.27.4, Node.js 26.13.1, and pnpm 12.17.0; see [development baseline](docs/development-baseline.md). From the repository root:
 

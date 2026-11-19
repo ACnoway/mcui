@@ -1,6 +1,6 @@
 # 轻量化多 Core 主控面板——项目大纲与基础开发流程
 
-> 当前阶段 0/1 实施及验证记录见[阶段状态文档](./phase-0-1-implementation.md)。阶段 2 已接通只读状态任务、pending cancel 和 expired skip；通用序号缺口、外部可信时间、恢复和正式验收仍未完成；详情见[阶段 2 进度](./phase-2-progress.md)。
+> 当前优先处理 Xray 远程安装任务恢复，见[阶段 3 进度](./phase-3-progress.md#后续工作)。身份与任务链的历史记录见[阶段 0/1 实施状态](./phase-0-1-implementation.md)和[阶段 2 进度](./phase-2-progress.md)。
 > 节点 Token 接入和旧节点迁移见[阶段 1 运维手册](./phase-1-operations.md)。
 
 > 版本：V1.2（实施草案）
@@ -399,7 +399,7 @@ lightpanel/
 
 ## 10. 基础开发流程（分阶段）
 
-阶段编号、依赖和退出条件以[分阶段开发流程](./phased-development-workflow.md)为唯一来源：
+阶段依赖和发布条件见[分阶段开发流程](./phased-development-workflow.md)。当前批次及完成条件见[阶段 3 后续工作](./phase-3-progress.md#后续工作)。
 
 0. 设计基线：协议、威胁模型、权限、制品信任及支持目标。
 1. Master 与空 Agent：身份、会话、主控添加节点并生成安装命令、Token 鉴权与撤销、只读节点信息。
@@ -414,7 +414,9 @@ Xray 演示不等于完整 V1 或生产发布；各 Core 的能力以实测矩�
 
 ---
 
-## 11. 建议的首批开发任务（可直接建 Issue）
+## 11. 初始任务清单（历史）
+
+本节记录项目启动时的任务拆分。当前任务及结果以各阶段进度记录为准。
 
 - [ ] 建立仓库、Go module、Vue 工程、CI 检查。
 - [ ] 明确任务 JSON Schema、签名算法与序列化规范。
