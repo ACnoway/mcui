@@ -310,6 +310,144 @@ func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, xrayInstallState(record, p, now))
 }
 
+func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	ctx, policy, ok := s.xrayInstallAccess(w, r, "security_admin")
+	if !ok {
+		return
+	}
+	var in struct {
+		MFACode string `json:"mfa_code"`
+	}
+	if readJSON(r, &in) != nil {
+		http.Error(w, "invalid Xray dispatch request", http.StatusBadRequest)
+		return
+	}
+	if !s.stepUp(ctx, in.MFACode) {
+		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
+		return
+	}
+	id := r.PathValue("id")
+	record, err := s.readXrayDispatch(id, ctx.Admin.ID, policy)
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	task, err := s.verifyStoredXrayTask(record.SignedTask, true)
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	if existing, err := s.taskRuntime.Store.GetRecord(id); err == nil && bytes.Equal(existing.Raw, record.SignedTask) {
+		writeJSON(w, http.StatusOK, s.taskRecordView(existing))
+		return
+	}
+	if !task.ActiveAt(now) {
+		http.Error(w, "signed Xray install task expired or not yet valid", http.StatusConflict)
+		return
+	}
+	if err := s.taskRuntime.Store.ProvisionInstall(record.SignedTask, policy.InstallKey(), now); err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	if err := s.recordTaskAudit(ctx.Admin.ID, "task.xray.install.dispatch", task.TaskID, task.NodeID, "queued"); err != nil {
+		http.Error(w, "Xray task audit unavailable", http.StatusInternalServerError)
+		return
+	}
+	dispatched, err := s.taskRuntime.Store.GetRecord(id)
+	if err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.taskRecordView(dispatched))
+}
+
+func (s *Server) readXrayDispatch(id, approver string, policy *lifecycleauth.Policy) (store.XrayInstall, error) {
+	var record store.XrayInstall
+	err := s.store.View(func(st store.State) error {
+		var ok bool
+		record, ok = st.XrayInstalls[id]
+		if !ok {
+			return errXrayInstallScope
+		}
+		p, err := lifecycleauth.ParseProposal(record.Proposal)
+		if err != nil {
+			return err
+		}
+		if p.ApproverID != approver || !canPrepareXrayInstall(&st, p) || !policy.AllowsProposal(p) {
+			return errXrayInstallScope
+		}
+		if len(record.SignedTask) == 0 {
+			return errXrayInstallReserved
+		}
+		return nil
+	})
+	return record, err
+}
+
+func (s *Server) verifyStoredXrayTask(raw []byte, requireCurrentScope bool) (lifecycleauth.InstallTask, error) {
+	policy := s.taskRuntime.XrayInstallPolicy
+	task, err := policy.InstallKey().Verify(raw)
+	if err != nil {
+		return lifecycleauth.InstallTask{}, err
+	}
+	err = s.store.View(func(st store.State) error {
+		record, ok := st.XrayInstalls[task.TaskID]
+		if !ok || !bytes.Equal(raw, record.SignedTask) {
+			return errXrayInstallReserved
+		}
+		p, err := lifecycleauth.ParseProposal(record.Proposal)
+		if err != nil || !task.Matches(p, record.ApprovalID) {
+			return errXrayInstallReserved
+		}
+		if requireCurrentScope && (!policy.AllowsProposal(p) || !canPrepareXrayInstall(&st, p)) {
+			return errXrayInstallScope
+		}
+		return nil
+	})
+	return task, err
+}
+
+func (s *Server) renewXrayInstallLease(w http.ResponseWriter, r *http.Request) {
+	s.nodeAccess.RLock()
+	defer s.nodeAccess.RUnlock()
+	node, ok := s.authenticateNode(r)
+	if !ok {
+		http.Error(w, "node credential rejected", http.StatusUnauthorized)
+		return
+	}
+	if s.taskRuntime == nil || s.taskCheckpoint == nil {
+		http.Error(w, "task runtime unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var in helperAuthorizationRequest
+	if readJSON(r, &in) != nil || len(in.LeaseID) != 32 {
+		http.Error(w, "invalid Xray install lease", http.StatusBadRequest)
+		return
+	}
+	task, err := s.verifyStoredXrayTask(in.Task, true)
+	if err != nil || task.NodeID != node.ID {
+		http.Error(w, "Xray install lease rejected", http.StatusForbidden)
+		return
+	}
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.taskRuntime.Store.RenewInstallLease(task, in.LeaseID, in.Task, now); err != nil {
+		http.Error(w, "Xray install lease no longer active", http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) listXrayInstalls(w http.ResponseWriter, r *http.Request) {
 	ctx, _, ok := s.xrayInstallAccess(w, r, "")
 	if !ok {

@@ -16,6 +16,8 @@ import (
 
 	"github.com/ACnoway/mcui/internal/agent"
 	"github.com/ACnoway/mcui/internal/agenttasks"
+	"github.com/ACnoway/mcui/internal/artifacttrust"
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/taskauth"
 	"github.com/ACnoway/mcui/internal/taskledger"
@@ -31,6 +33,10 @@ func main() {
 	allowNewLedger := flag.Bool("allow-new-ledger", false, "initialize a missing ledger for a newly created node during enrollment preparation")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
+	installKeyID := flag.String("xray-install-key-id", os.Getenv("MCUI_XRAY_INSTALL_KEY_ID"), "trusted Xray install signing key ID")
+	installKeyPath := flag.String("xray-install-public-key", os.Getenv("MCUI_XRAY_INSTALL_PUBLIC_KEY"), "trusted Xray install signing public key")
+	tufRoot := flag.String("xray-tuf-root", os.Getenv("MCUI_XRAY_TUF_ROOT"), "locally provisioned Xray TUF root")
+	tufOrigin := flag.String("xray-tuf-origin", os.Getenv("MCUI_XRAY_TUF_ORIGIN"), "approved Xray TUF HTTPS metadata origin")
 	taskLedgerPath := flag.String("task-ledger", "/var/lib/mcui-agent/tasks.db", "private durable status-task ledger")
 	helperSocket := flag.String("helper-socket", "/run/mcui/helper.sock", "local privileged Helper Unix socket")
 	initializeTaskLedger := flag.Bool("initialize-task-ledger", false, "explicitly initialize a missing ledger for a previously registered node and exit")
@@ -95,6 +101,10 @@ func main() {
 	if nodeID == "" {
 		log.Fatal("no node identity; run the installation command first")
 	}
+	installEnabled := *installKeyID != "" || *installKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
+	if installEnabled && (*installKeyID == "" || *installKeyPath == "" || *tufRoot == "" || *tufOrigin == "" || *taskKeyID == "") {
+		log.Fatal("Xray installs require all Xray trust options and the status task runtime")
+	}
 	if *taskKeyID != "" || *taskPublicKeyPath != "" {
 		if *taskKeyID == "" || *taskPublicKeyPath == "" {
 			log.Fatal("status-task runtime requires both -task-key-id and -task-public-key")
@@ -119,6 +129,34 @@ func main() {
 		if err != nil {
 			log.Fatalf("configure Helper client: %v", err)
 		}
+		trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+		var installKey lifecycleauth.InstallKey
+		var artifacts *artifacttrust.Client
+		var installer agenttasks.InstallExecutor
+		if installEnabled {
+			var ok bool
+			installer, ok = executor.(agenttasks.InstallExecutor)
+			if !ok {
+				log.Fatal("Xray installer requires the Linux Helper socket")
+			}
+			raw, err := os.ReadFile(*installKeyPath)
+			if err != nil {
+				log.Fatalf("read Xray install public key: %v", err)
+			}
+			key, err := security.ParseEd25519PublicKey(raw)
+			if err != nil {
+				log.Fatalf("parse Xray install public key: %v", err)
+			}
+			installKey = lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key}
+			artifacts, err = artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(filepath.Dir(*taskLedgerPath), "xray-tuf"), func() error {
+				_, err := trustedClock.Now()
+				return err
+			})
+			if err != nil {
+				log.Fatalf("open Agent Xray artifact trust: %v", err)
+			}
+			client.EnableXrayInstalls()
+		}
 		if err = client.SetTaskHandlerFactory(func(node string) (agent.TaskHandler, error) {
 			processor, e := agenttasks.New(agenttasks.Config{
 				NodeID: node,
@@ -133,9 +171,13 @@ func main() {
 			if e != nil {
 				return nil, e
 			}
-			trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
 			if e = runner.SetTrustedClock(trustedClock.Now); e != nil {
 				return nil, e
+			}
+			if installEnabled {
+				if e = runner.ConfigureXrayInstall(installKey, artifacts, installer); e != nil {
+					return nil, e
+				}
 			}
 			return agentTaskHandler{runner: runner}, nil
 		}); err != nil {
@@ -151,6 +193,10 @@ func main() {
 }
 
 type agentTaskHandler struct{ runner *agenttasks.Runner }
+
+func (h agentTaskHandler) ProcessXrayInstall(ctx context.Context, raw []byte, leaseID string, skip []byte, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
+	return convertTaskAcks(h.runner.ProcessXrayInstall(ctx, raw, leaseID, skip, lastStatusVersion, serverNow))
+}
 
 func (h agentTaskHandler) ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
 	acks, err := h.runner.ProcessStatusTaskAt(ctx, raw, leaseID, lastStatusVersion, serverNow)

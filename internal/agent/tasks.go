@@ -27,6 +27,12 @@ type TaskHandler interface {
 	ProcessSequenceSkip(ctx context.Context, controlRaw []byte, sequence int64, lastStatusVersion int64, serverNow time.Time) ([]TaskAck, error)
 }
 
+type InstallTaskHandler interface {
+	ProcessXrayInstall(context.Context, []byte, string, []byte, int64, time.Time) ([]TaskAck, error)
+}
+
+func (c *Client) EnableXrayInstalls() { c.xrayInstalls = true }
+
 type StatusExecutor interface {
 	ExecuteStatus(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error)
 }
@@ -84,6 +90,9 @@ func (c *Client) processStatusTask(state localState) error {
 			return errors.New("Agent task sequence is unavailable")
 		}
 		endpoint += "?next_sequence=" + strconv.FormatInt(next, 10)
+		if c.xrayInstalls {
+			endpoint += "&install=xray-v1"
+		}
 	}
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -121,9 +130,13 @@ func (c *Client) processStatusTask(state localState) error {
 	if err != nil || serverNow.IsZero() {
 		return errors.New("invalid task delivery server time")
 	}
+	install := false
 	if len(delivery.Task) > 0 {
 		if _, err = protocol.CanonicalV2TaskBytes(delivery.Task); err != nil {
-			return fmt.Errorf("invalid signed task envelope: %w", err)
+			if _, v1Err := protocol.CanonicalSignedBytes(protocol.Task, delivery.Task); !c.xrayInstalls || v1Err != nil {
+				return fmt.Errorf("invalid signed task envelope: %w", err)
+			}
+			install = true
 		}
 		var identity taskDeliveryIdentity
 		if err = json.Unmarshal(delivery.Task, &identity); err != nil || identity.TaskID != delivery.TaskID || identity.NodeID != state.NodeID || identity.Sequence != delivery.Sequence {
@@ -142,10 +155,29 @@ func (c *Client) processStatusTask(state localState) error {
 			return fmt.Errorf("invalid signed task control: %w", err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	timeout := 30 * time.Second
+	if install {
+		timeout = 9 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	var acks []TaskAck
 	if delivery.SequenceSkip {
 		acks, err = c.taskHandler.ProcessSequenceSkip(ctx, append([]byte(nil), delivery.Control...), delivery.Sequence, delivery.LastStatusVersion, serverNow)
+	} else if install {
+		handler, ok := c.taskHandler.(InstallTaskHandler)
+		if !ok || (delivery.ControlKind != "" && !delivery.SequenceRecovery) {
+			return errors.New("unsupported Xray install delivery")
+		}
+		done := make(chan struct{})
+		if !delivery.SequenceRecovery {
+			go c.renewXrayInstall(ctx, state, delivery, done)
+		} else {
+			close(done)
+		}
+		acks, err = handler.ProcessXrayInstall(ctx, delivery.Task, delivery.LeaseID, delivery.Control, delivery.LastStatusVersion, serverNow)
+		cancel()
+		<-done
 	} else if delivery.ControlKind == "" {
 		acks, err = c.taskHandler.ProcessStatusTask(ctx, append([]byte(nil), delivery.Task...), delivery.LeaseID, delivery.LastStatusVersion, serverNow)
 	} else {
@@ -187,4 +219,38 @@ func (c *Client) processStatusTask(state localState) error {
 		}
 	}
 	return nil
+}
+
+func (c *Client) renewXrayInstall(ctx context.Context, state localState, delivery taskDelivery, done chan<- struct{}) {
+	defer close(done)
+	body, err := json.Marshal(struct {
+		Task    json.RawMessage `json:"task"`
+		LeaseID string          `json:"lease_id"`
+	}{delivery.Task, delivery.LeaseID})
+	if err != nil {
+		return
+	}
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.masterURL+"/api/v1/agent/tasks/renew-install", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+state.NodeToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.http.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusConflict {
+				return
+			}
+		}
+	}
 }

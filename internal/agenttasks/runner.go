@@ -27,11 +27,12 @@ type Ack struct {
 }
 
 type Runner struct {
-	processor  *Processor
-	ledger     *taskledger.Ledger
-	executor   StatusExecutor
-	now        func() time.Time
-	trustedNow func() (time.Time, error)
+	processor   *Processor
+	ledger      *taskledger.Ledger
+	executor    StatusExecutor
+	now         func() time.Time
+	trustedNow  func() (time.Time, error)
+	xrayInstall *installRuntime
 }
 
 // SetTrustedClock installs the independent NTS-validated wall-clock check used

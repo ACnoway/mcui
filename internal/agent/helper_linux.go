@@ -42,6 +42,14 @@ func NewUnixStatusExecutor(socketPath string) (StatusExecutor, error) {
 }
 
 func (e *unixStatusExecutor) ExecuteStatus(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error) {
+	return e.execute(ctx, raw, leaseID, 15*time.Second)
+}
+
+func (e *unixStatusExecutor) ExecuteInstall(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error) {
+	return e.execute(ctx, raw, leaseID, 8*time.Minute)
+}
+
+func (e *unixStatusExecutor) execute(ctx context.Context, raw []byte, leaseID string, timeout time.Duration) (json.RawMessage, error) {
 	if e == nil || ctx == nil || len(raw) == 0 || len(raw) > maxHelperFrame || leaseID == "" {
 		return nil, errors.New("invalid Helper request")
 	}
@@ -49,11 +57,11 @@ func (e *unixStatusExecutor) ExecuteStatus(ctx context.Context, raw []byte, leas
 	if err != nil || len(body) > maxHelperFrame {
 		return nil, errors.New("Helper request too large")
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(timeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
-	dialer := net.Dialer{Timeout: time.Until(deadline)}
+	dialer := net.Dialer{Timeout: min(5*time.Second, time.Until(deadline))}
 	connection, err := dialer.DialContext(ctx, "unix", e.socketPath)
 	if err != nil {
 		return nil, err

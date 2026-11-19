@@ -35,6 +35,7 @@ var (
 	ErrConflict   = errors.New("install task ID, approval or node sequence was already used")
 	identifier    = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{22,128}$`)
+	digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 type Proposal struct {

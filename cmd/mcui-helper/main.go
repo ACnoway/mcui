@@ -20,9 +20,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/helper"
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/trustedtime"
+	"github.com/ACnoway/mcui/internal/xrayruntime"
 )
 
 const maxSystemctlOutput = 2048
@@ -35,6 +38,10 @@ func main() {
 	masterCAPath := flag.String("master-ca", "", "optional locally trusted Master CA certificate PEM")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key")
+	installKeyID := flag.String("xray-install-key-id", os.Getenv("MCUI_XRAY_INSTALL_KEY_ID"), "trusted Xray install signing key ID")
+	installKeyPath := flag.String("xray-install-public-key", os.Getenv("MCUI_XRAY_INSTALL_PUBLIC_KEY"), "trusted Xray install signing public key")
+	tufRoot := flag.String("xray-tuf-root", os.Getenv("MCUI_XRAY_TUF_ROOT"), "locally provisioned Xray TUF root")
+	tufOrigin := flag.String("xray-tuf-origin", os.Getenv("MCUI_XRAY_TUF_ORIGIN"), "approved Xray TUF HTTPS metadata origin")
 	stateDir := flag.String("state-dir", "/var/lib/mcui-helper", "root-owned private helper state directory")
 	socketPath := flag.String("socket", "/run/mcui/helper.sock", "Agent-facing Unix socket")
 	agentUser := flag.String("agent-user", "mcui-agent", "unprivileged Agent account")
@@ -84,6 +91,7 @@ func main() {
 		log.Fatalf("configure Master checkpoint: %v", err)
 	}
 	trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+	installEnabled := *installKeyID != "" || *installKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
 	config := helper.Config{
 		NodeID:             *nodeID,
 		AllowedUID:         uint32(allowedUID),
@@ -92,8 +100,44 @@ func main() {
 		TrustedTimeHealthy: trustedClock.Healthy,
 		Checkpoint:         checkpoint,
 		ReadStatusAt: func(unit string, observedAt time.Time) (string, error) {
+			if installEnabled && unit == "xray.service" {
+				unit = "mcui-xray.service"
+			}
 			return readFixedStatus(unit, observedAt)
 		},
+	}
+	if installEnabled {
+		if *installKeyID == "" || *installKeyPath == "" || *tufRoot == "" || *tufOrigin == "" {
+			log.Fatal("Xray installs require all Xray trust options")
+		}
+		raw, err := os.ReadFile(*installKeyPath)
+		if err != nil {
+			log.Fatalf("read Xray install public key: %v", err)
+		}
+		key, err := security.ParseEd25519PublicKey(raw)
+		if err != nil {
+			log.Fatalf("parse Xray install public key: %v", err)
+		}
+		clock := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource)
+		config.TrustedTimeHealthy = clock.Healthy
+		artifacts, err := artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(*stateDir, "xray-tuf"), func() error {
+			_, err := clock.Now()
+			return err
+		})
+		if err != nil {
+			log.Fatalf("open Helper Xray artifact trust: %v", err)
+		}
+		config.XrayInstall = &helper.XrayInstallConfig{
+			Key: lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key},
+			Apply: func(ctx context.Context, task lifecycleauth.InstallTask, authorize func(context.Context) error) (string, error) {
+				runtime, err := xrayruntime.Open(false)
+				if err != nil {
+					return "", err
+				}
+				defer runtime.Close()
+				return runtime.InstallAuthorized(ctx, xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}, artifacts, task.ManifestVersion, authorize)
+			},
+		}
 	}
 	if *initialize {
 		if err = ensureStateDirectory(*stateDir); err != nil {
@@ -118,7 +162,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("mcui status-only Helper listening on %s for node %s", *socketPath, *nodeID)
+	log.Printf("mcui Helper listening on %s for node %s", *socketPath, *nodeID)
 	if err = instance.RunSocket(ctx, *socketPath, uint32(groupID)); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
@@ -144,9 +188,10 @@ func ensureStateDirectory(path string) error {
 
 func readFixedStatus(unit string, observedAt time.Time) (string, error) {
 	allowed := map[string]string{
-		"xray.service":     "xray",
-		"sing-box.service": "sing-box",
-		"mita.service":     "mita",
+		"xray.service":      "xray",
+		"mcui-xray.service": "xray",
+		"sing-box.service":  "sing-box",
+		"mita.service":      "mita",
 	}
 	core, ok := allowed[unit]
 	if !ok || observedAt.IsZero() {

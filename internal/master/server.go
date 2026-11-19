@@ -99,6 +99,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.handleAPI("POST /api/v1/admin/xray-installs", x.createXrayInstall)
 	x.handleAPI("POST /api/v1/admin/xray-installs/{id}/approve", x.approveXrayInstall)
 	x.handleAPI("POST /api/v1/admin/xray-installs/{id}/signed-task", x.recordSignedXrayInstall)
+	x.handleAPI("POST /api/v1/admin/xray-installs/{id}/dispatch", x.dispatchXrayInstall)
 	x.handleAPI("GET /api/v1/admin/cores/releases", x.coreReleases)
 	x.handleAPI("GET /api/v1/admin/cores/backups", x.coreBackupsSnapshot)
 	x.handleAPI("POST /api/v1/admin/nodes/disable", x.disableNode)
@@ -106,6 +107,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.handleAPI("POST /api/v1/agent/heartbeat", x.heartbeat)
 	x.handleAPI("GET /api/v1/agent/tasks/next", x.nextTask)
 	x.handleAPI("POST /api/v1/agent/tasks/ack", x.acknowledgeTask)
+	x.handleAPI("POST /api/v1/agent/tasks/renew-install", x.renewXrayInstallLease)
 	x.handleAPI("POST /api/v1/helper/tasks/authorize", x.authorizeHelperTask)
 	if webDir != "" {
 		x.mux.Handle("/", x.staticHandler(webDir))

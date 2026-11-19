@@ -128,6 +128,11 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 	if decoder.Decode(&trailing) != io.EOF {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
+	if h.cfg.XrayInstall != nil {
+		if install, err := h.cfg.XrayInstall.Key.Verify(request.Task); err == nil {
+			_ = conn.SetWriteDeadline(minTime(time.Now().Add(10*time.Minute), install.ExpiresAt.Add(70*time.Second)))
+		}
+	}
 	result, err := h.Execute(conn, request.Task, request.LeaseID)
 	if err != nil {
 		code := "helper_unavailable"
@@ -142,6 +147,13 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
 	return h.writeSocketResponse(conn, socketResponse{Result: json.RawMessage(result)})
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 const taskStatusResultLimit = 4096

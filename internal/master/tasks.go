@@ -614,7 +614,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	metadata := s.taskAuditMetadata(nodeID)
 	out := make([]taskView, 0, len(records))
 	for _, record := range records {
-		out = append(out, decorateTaskView(toTaskView(record, runtime.PublicKey), metadata[record.TaskID]))
+		out = append(out, decorateTaskView(s.taskRecordView(record), metadata[record.TaskID]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -639,7 +639,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.decorateTaskView(toTaskView(record, runtime.PublicKey)))
+	writeJSON(w, http.StatusOK, s.decorateTaskView(s.taskRecordView(record)))
 }
 
 type taskAuditInfo struct {
@@ -701,6 +701,35 @@ func toTaskView(record taskdispatch.Record, publicKey ed25519.PublicKey) taskVie
 	if protocol.VerifyV2Task(record.Raw, publicKey) != nil || json.Unmarshal(record.Raw, &envelope) != nil {
 		return taskView{TaskID: record.TaskID, NodeID: record.NodeID, Sequence: record.Sequence, Active: record.Active, Status: "NEEDS_RECONCILIATION", Acks: []taskAckView{}}
 	}
+	out := formatTaskView(record, envelope)
+	if !record.Active && len(record.Acks) == 0 && record.ControlKind == string(protocol.Skip) {
+		var skip struct {
+			Sequence uint64 `json:"sequence"`
+			Reason   string `json:"reason"`
+		}
+		if protocol.Verify(protocol.Skip, record.ControlRaw, publicKey) == nil && json.Unmarshal(record.ControlRaw, &skip) == nil && skip.Sequence == uint64(record.Sequence) && skip.Reason == "VOID_UNISSUED" {
+			out.Status = "VOIDED"
+		}
+	}
+	return out
+}
+
+func (s *Server) taskRecordView(record taskdispatch.Record) taskView {
+	task, err := s.taskRuntime.XrayInstallPolicy.InstallKey().Verify(record.Raw)
+	if err != nil || task.TaskID != record.TaskID || task.Sequence != record.Sequence || task.NodeID != record.NodeID {
+		return toTaskView(record, s.taskRuntime.PublicKey)
+	}
+	var envelope statusTaskEnvelope
+	envelope.Operation = "core.install"
+	envelope.Payload.Core = "xray"
+	envelope.IssuedAt = task.NotBefore.UTC().Format(time.RFC3339)
+	envelope.ExpiresAt = task.ExpiresAt.UTC().Format(time.RFC3339)
+	out := formatTaskView(record, envelope)
+	out.Approval = "dual-signed"
+	return out
+}
+
+func formatTaskView(record taskdispatch.Record, envelope statusTaskEnvelope) taskView {
 	out := taskView{
 		TaskID: record.TaskID, NodeID: record.NodeID, Sequence: record.Sequence,
 		Approval:  "not-required",
@@ -719,15 +748,6 @@ func toTaskView(record taskdispatch.Record, publicKey ed25519.PublicKey) taskVie
 		}
 		out.Acks = append(out.Acks, view)
 		out.Status = ack.Status
-	}
-	if !record.Active && len(record.Acks) == 0 && record.ControlKind == string(protocol.Skip) {
-		var skip struct {
-			Sequence uint64 `json:"sequence"`
-			Reason   string `json:"reason"`
-		}
-		if protocol.Verify(protocol.Skip, record.ControlRaw, publicKey) == nil && json.Unmarshal(record.ControlRaw, &skip) == nil && skip.Sequence == uint64(record.Sequence) && skip.Reason == "VOID_UNISSUED" {
-			out.Status = "VOIDED"
-		}
 	}
 	return out
 }
@@ -756,27 +776,20 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	var expectedSequence int64
-	var expectedSequenceSet bool
 	if value := r.URL.Query().Get("next_sequence"); value != "" {
 		expectedSequence, err = strconv.ParseInt(value, 10, 64)
 		if err != nil || expectedSequence < 1 || expectedSequence > taskdispatch.MaxSequence {
 			http.Error(w, "invalid expected task sequence", http.StatusBadRequest)
 			return
 		}
-		expectedSequenceSet = true
 	}
-	var delivery taskdispatch.Delivery
-	if expectedSequenceSet {
-		delivery, err = runtime.Store.LeaseExpected(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
-			unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)
-			if buildErr != nil {
-				return nil, buildErr
-			}
-			return runtime.Signer.SignControl(protocol.Skip, unsigned)
-		})
-	} else {
-		delivery, err = runtime.Store.Lease(node.ID, now, runtime.KeyID, runtime.PublicKey)
-	}
+	delivery, err := runtime.Store.LeaseWithInstall(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
+		unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return runtime.Signer.SignControl(protocol.Skip, unsigned)
+	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install") == "xray-v1")
 	if errors.Is(err, taskdispatch.ErrNotFound) || errors.Is(err, taskdispatch.ErrLeaseActive) {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -837,17 +850,21 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task ACK target rejected", http.StatusNotFound)
 		return
 	}
-	var envelope statusTaskEnvelope
-	if protocol.VerifyV2Task(record.Raw, runtime.PublicKey) != nil || json.Unmarshal(record.Raw, &envelope) != nil {
-		http.Error(w, "stored task requires reconciliation", http.StatusConflict)
-		return
-	}
 	trustedNow, timeErr := runtime.currentTime()
 	if timeErr != nil {
 		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !validStatusAck(envelope.Payload.Core, in.Status, in.Result, trustedNow) {
+	auditAction := "task.status.ack"
+	var envelope statusTaskEnvelope
+	validAck := false
+	if protocol.VerifyV2Task(record.Raw, runtime.PublicKey) == nil && json.Unmarshal(record.Raw, &envelope) == nil {
+		validAck = validStatusAck(envelope.Payload.Core, in.Status, in.Result, trustedNow)
+	} else if task, err := s.verifyStoredXrayTask(record.Raw, false); err == nil {
+		auditAction = "task.xray.install.ack"
+		validAck = validInstallAck(task, in.Status, in.Result, trustedNow)
+	}
+	if !validAck {
 		http.Error(w, "invalid task result", http.StatusBadRequest)
 		return
 	}
@@ -869,7 +886,7 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 		if !exists || current.Disabled {
 			return store.ErrNotFound
 		}
-		s.appendAudit(st, store.Audit{At: trustedNow.Unix(), Actor: node.ID, Action: "task.status.ack", ResourceType: "task", Resource: in.TaskID, NodeID: node.ID, Outcome: in.Status})
+		s.appendAudit(st, store.Audit{At: trustedNow.Unix(), Actor: node.ID, Action: auditAction, ResourceType: "task", Resource: in.TaskID, NodeID: node.ID, Outcome: in.Status})
 		return nil
 	}); err != nil {
 		http.Error(w, "task ACK audit unavailable", http.StatusInternalServerError)
@@ -904,7 +921,7 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var envelope statusTaskEnvelope
-	if _, err := protocol.CanonicalV2TaskBytes(in.Task); err != nil || json.Unmarshal(in.Task, &envelope) != nil || envelope.Operation != "core.status" {
+	if json.Unmarshal(in.Task, &envelope) != nil {
 		http.Error(w, "helper authorization denied", http.StatusForbidden)
 		return
 	}
@@ -923,12 +940,48 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "task runtime clock unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	previous, err := runtime.Store.ValidateLease(envelope.NodeID, envelope.TaskID, envelope.Sequence, in.LeaseID, in.Task, now, runtime.KeyID, runtime.PublicKey)
+	var previous int64
+	var err error
+	switch envelope.Operation {
+	case "core.status":
+		previous, err = runtime.Store.ValidateLease(envelope.NodeID, envelope.TaskID, envelope.Sequence, in.LeaseID, in.Task, now, runtime.KeyID, runtime.PublicKey)
+	case "core.install":
+		var task lifecycleauth.InstallTask
+		task, err = s.verifyStoredXrayTask(in.Task, true)
+		if err == nil && s.taskCheckpoint != nil && task.NodeID == envelope.NodeID {
+			previous, err = runtime.Store.ValidateInstallLease(task, in.LeaseID, in.Task, now)
+		} else if err == nil {
+			err = lifecycleauth.ErrDenied
+		}
+	default:
+		err = lifecycleauth.ErrDenied
+	}
 	if err != nil {
 		http.Error(w, "helper authorization denied", http.StatusForbidden)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"server_time": now.Format(time.RFC3339Nano), "previous_sequence": previous})
+}
+
+func validInstallAck(task lifecycleauth.InstallTask, status string, raw json.RawMessage, now time.Time) bool {
+	switch status {
+	case "ACK_ACCEPTED", "RUNNING", "VERIFYING":
+		return len(raw) == 0 || string(raw) == "null"
+	case "EXPIRED", "NEEDS_RECONCILIATION":
+		var result statusFailure
+		if !decodeExactResult(raw, &result) {
+			return false
+		}
+		if status == "EXPIRED" {
+			return result.ErrorCode == "task_expired" && !now.Before(task.ExpiresAt)
+		}
+		return result.ErrorCode == "reconciliation_required"
+	case "SUCCEEDED", "ROLLED_BACK", "FAILED":
+		var result lifecycleauth.InstallResult
+		return decodeExactResult(raw, &result) && result.Version == task.Version && result.SHA256 == task.SHA256 && result.Outcome == status
+	default:
+		return false
+	}
 }
 
 func validStatusAck(core, status string, result json.RawMessage, now time.Time) bool {

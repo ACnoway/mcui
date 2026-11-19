@@ -28,6 +28,7 @@ type Client struct {
 	taskHandler          TaskHandler
 	taskHandlerFactory   StatusTaskHandlerFactory
 	taskSequenceProvider func() (int64, error)
+	xrayInstalls         bool
 }
 
 type localState struct {

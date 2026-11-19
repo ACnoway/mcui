@@ -27,6 +27,7 @@ const code = ref('')
 const nodes = ref<NodeRecord[]>([])
 const audits = ref<Audit[]>([])
 const tasks = ref<StatusTask[]>([])
+const statusTasks = computed(() => tasks.value.filter(task => task.operation === 'core.status'))
 const xrayInstalls = ref<XrayInstall[]>([])
 const xrayInstallInput = ref({ version: '', architecture: 'amd64', sha256: '', manifest_version: '' as number | '', approver_id: '' })
 const xrayInstallBusy = ref(false)
@@ -296,6 +297,23 @@ async function uploadSignedXrayInstall(install: XrayInstall, event: Event) {
     xrayInstallBusy.value = false
   }
 }
+function xrayTask(id: string) {
+  return tasks.value.find(task => task.task_id === id && task.operation === 'core.install')
+}
+async function dispatchXrayInstall(install: XrayInstall) {
+  if (xrayInstallBusy.value || !confirm('确认将该签发任务投递到指定节点？')) return
+  const { task_id, node_id } = install.proposal
+  xrayInstallError.value = ''
+  xrayInstallBusy.value = true
+  try {
+    await apiWithStepUp<StatusTask>(`/api/v1/admin/xray-installs/${encodeURIComponent(task_id)}/dispatch`, {})
+    if (selectedNode.value?.id === node_id) await refreshNodeTasks(node_id)
+  } catch (e) {
+    xrayInstallError.value = e instanceof Error ? e.message : '投递 Xray 安装失败'
+  } finally {
+    xrayInstallBusy.value = false
+  }
+}
 async function createStatusTask() {
   if (!selectedNode.value) return
   error.value = ''
@@ -369,13 +387,13 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
           <button class="quiet" @click="selectedNode = null">关闭</button>
         </div>
       </section>
-      <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!tasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in tasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small><small v-if="task.control">控制消息：{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() < Date.parse(task.expires_at) && task.control !== 'cancel'" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button><button v-if="task.active && task.status === 'QUEUED' && !task.lease_deadline && !task.control && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() >= Date.parse(task.expires_at) && task.control !== 'skip'" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
+      <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!statusTasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in statusTasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small><small v-if="task.control">控制消息：{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() < Date.parse(task.expires_at) && task.control !== 'cancel'" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button><button v-if="task.active && task.status === 'QUEUED' && !task.lease_deadline && !task.control && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() >= Date.parse(task.expires_at) && task.control !== 'skip'" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
       <section v-if="selectedNode && admin?.can_prepare_xray_installs" class="card">
         <div class="section-head">
           <h2>Xray 安装审批</h2>
-          <button class="outline" @click="loadXrayInstalls(selectedNode.id)">刷新审批</button>
+          <button class="outline" @click="refreshNodeTasks(selectedNode.id)">刷新审批和结果</button>
         </div>
-        <p>当前账号 ID：{{ admin.id }}。安装提案预留节点的下一个任务序号，有效期 30 分钟。审批登记后等待后续投递功能。</p>
+        <p>当前账号 ID：{{ admin.id }}。安装提案预留节点的下一个任务序号，有效期 30 分钟。</p>
         <form v-if="admin.role === 'operator' && !selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="createXrayInstall">
           <label>精确版本<input v-model.trim="xrayInstallInput.version" placeholder="v26.10.31" required /></label>
           <label>架构<select v-model="xrayInstallInput.architecture"><option>amd64</option><option>arm64</option></select></label>
@@ -390,6 +408,7 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
           <div>
             <strong>#{{ install.proposal.sequence }} · Xray {{ install.proposal.version }} · {{ install.proposal.architecture }}</strong>
             <span>{{ xrayInstallStatus[install.status] }} · {{ new Date(install.proposal.expires_at * 1000).toLocaleString() }} 过期</span>
+            <small v-if="xrayTask(install.proposal.task_id)" aria-live="polite">任务结果 {{ xrayTask(install.proposal.task_id)?.status }}</small>
           </div>
           <button class="outline" @click="downloadXrayProposal(install)">下载提案 JSON</button>
           <label v-if="admin.id === install.proposal.approver_id && install.status === 'AWAITING_APPROVAL'">
@@ -401,6 +420,8 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
             <label>独立签发任务 JSON<input name="task" type="file" accept=".json,application/json" required /></label>
             <button :disabled="xrayInstallBusy">核验签发任务</button>
           </form>
+          <button v-if="admin.id === install.proposal.approver_id && install.status === 'SIGNED_TASK_VERIFIED' && !xrayTask(install.proposal.task_id)"
+            :disabled="xrayInstallBusy" @click="dispatchXrayInstall(install)">投递安装任务</button>
         </div>
       </section>
       <section class="card"><span class="eyebrow">AUDIT TRAIL</span><h2>安全事件</h2><div v-for="(event, i) in audits" :key="i" class="audit-row"><time>{{ new Date(event.at*1000).toLocaleString() }}</time><span>{{ event.action }}</span><small>{{ event.outcome }}</small></div><p v-if="!audits.length" class="empty">暂无事件</p></section>
@@ -409,6 +430,6 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
         <section class="card"><span class="eyebrow">ADMIN ACCOUNTS</span><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
       </section>
     </template>
-    <footer>管理请求需经服务端认证与授权。Core 官方版本目录仅供查看；Agent 安装包不包含 Core，安装与其他节点副作用操作仍关闭。</footer>
+    <footer>管理请求需经服务端认证与授权。Core 官方版本目录仅供查看；启用 Xray 的节点可通过独立审批安装 Core。</footer>
   </main>
 </template>

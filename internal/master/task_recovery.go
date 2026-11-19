@@ -91,6 +91,13 @@ func (s *Server) reconcileTaskRuntime() error {
 
 	seen := make(map[string]taskdispatch.TaskReference, len(refs))
 	for _, ref := range refs {
+		if task, err := s.verifyStoredXrayTask(ref.Raw, false); err == nil {
+			if task.TaskID != ref.TaskID || task.NodeID != ref.NodeID || task.Sequence != ref.Sequence || (ref.ControlKind != "" && ref.ControlKind != string(protocol.Skip)) {
+				return fmt.Errorf("%w: invalid Xray install record %q", ErrTaskAuditReconciliation, ref.TaskID)
+			}
+			seen[ref.TaskID] = ref
+			continue
+		}
 		var body statusTaskEnvelope
 		if ref.TaskID == "" || ref.NodeID == "" || ref.Sequence < 1 || protocol.VerifyV2Task(ref.Raw, s.taskRuntime.PublicKey) != nil || json.Unmarshal(ref.Raw, &body) != nil || body.TaskID != ref.TaskID || body.NodeID != ref.NodeID || body.Sequence != ref.Sequence || body.Operation != "core.status" {
 			return fmt.Errorf("%w: invalid signed task record %q", ErrTaskAuditReconciliation, ref.TaskID)

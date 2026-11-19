@@ -1,12 +1,12 @@
 # MCUI Master and empty Agent
 
-MCUI is a multi-Core control plane in staged development. The repository contains the Master panel, a Core-free Agent, and a Phase 2 status-only signed task path with a privileged Helper and isolated signer process. Core installation and configuration operations remain unavailable. The first demo target is the complete Xray workflow; installation guidance and Docker builds follow that demo, before adding other Cores.
+MCUI is a multi-Core control plane in staged development. The repository contains the Master panel, a Core-free Agent, and a signed task path with a privileged Helper and isolated signers. Opt-in Xray installation is the first remote lifecycle operation. The first demo target is the complete Xray workflow.
 
 ## Current stage
 
 Phase 0/1 engineering work is complete and formal exit evidence remains outstanding. Phase 2 connects scoped status-task creation, external signing, Token-authenticated pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The remotely executable action is a fixed read-only service status query. [Phase 0/1 status](docs/phase-0-1-implementation.md) · [Phase 2 progress](docs/phase-2-progress.md) · [Phase 2 operations](docs/phase-2-operations.md)
 
-Phase 3 includes a read-only official Core release catalog, a Master-side backup cache, a TUF release tool, and the local root-only `mcui-xray` lifecycle. The local tool requires an independently provisioned TUF root and exact release digest, and can pin an exact Core delegation version. The HTTPS panel can reserve an Xray install sequence, record the dual-signed approval, and verify the independently signed task under the independent checkpoint. Signed install delivery, production trust materials, and the Agent/Helper update supervisor remain pending. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Phase 3 progress](docs/phase-3-progress.md) · [Install approvals](docs/phase-3-approval.md) · [Operations](docs/phase-3-operations.md) · [TUF releases](docs/phase-3-release.md)
+Phase 3 includes the official Core release catalog, Master backup cache, TUF release tool and local `mcui-xray` lifecycle. The HTTPS panel can reserve a sequence, verify a dual-signed approval and dispatch an independently signed Xray install task under the checkpoint. Opt-in Agents and Helpers independently verify the fixed source, exact release and TUF delegation version. Production trust, remote operation acceptance and the Agent/Helper update supervisor remain pending. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Phase 3 progress](docs/phase-3-progress.md) · [Install approvals](docs/phase-3-approval.md) · [Operations](docs/phase-3-operations.md) · [TUF releases](docs/phase-3-release.md)
 
 ## Development checks
 

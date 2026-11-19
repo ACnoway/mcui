@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/taskcontrol"
 	_ "modernc.org/sqlite"
@@ -69,12 +70,13 @@ type Ack struct {
 }
 
 type taskEnvelope struct {
-	TaskID    string    `json:"task_id"`
-	NodeID    string    `json:"node_id"`
-	Sequence  int64     `json:"sequence"`
-	KeyID     string    `json:"signing_key_id"`
-	Operation string    `json:"operation"`
-	ExpiresAt time.Time `json:"expires_at"`
+	SchemaVersion int       `json:"schema_version"`
+	TaskID        string    `json:"task_id"`
+	NodeID        string    `json:"node_id"`
+	Sequence      int64     `json:"sequence"`
+	KeyID         string    `json:"signing_key_id"`
+	Operation     string    `json:"operation"`
+	ExpiresAt     time.Time `json:"expires_at"`
 }
 
 type Store struct{ db *sql.DB }
@@ -346,7 +348,7 @@ SELECT
    WHERE a.node_id!=t.node_id OR a.sequence!=t.sequence) +
  (SELECT COUNT(*) FROM tasks t WHERE t.active=1 AND EXISTS
    (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
-    (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status'))))
+    (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND (`+terminalFailureSQL+`)))))
 `, MaxSequence).Scan(&bad)
 	if err != nil || bad != 0 {
 		return fmt.Errorf("invalid task delivery database contents: violations=%d: %v", bad, err)
@@ -354,7 +356,7 @@ SELECT
 	if controlsPresent {
 		if err = db.QueryRow(`SELECT COUNT(*) FROM tasks t WHERE t.active=0 AND NOT EXISTS
  (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND
-  (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status')))
+  (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND (` + terminalFailureSQL + `))))
  AND NOT EXISTS (SELECT 1 FROM task_controls c WHERE c.task_id=t.task_id AND c.kind='skip'
    AND json_extract(CAST(c.raw AS TEXT),'$.reason')='VOID_UNISSUED' AND t.lease_id IS NULL AND t.lease_deadline IS NULL)`).Scan(&bad); err != nil || bad != 0 {
 			return fmt.Errorf("invalid terminal task data: violations=%d: %v", bad, err)
@@ -365,7 +367,7 @@ SELECT
     OR typeof(c.raw)!='blob' OR length(c.raw)=0 OR length(c.raw)>65536
     OR NOT (
       (t.active=1 AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND a.status IN ('RUNNING','VERIFYING','SUCCEEDED','FAILED','ROLLING_BACK','ROLLED_BACK','EXPIRED','CANCELED','NEEDS_RECONCILIATION')))
-      OR (t.active=0 AND c.kind='skip' AND EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status'))))
+      OR (t.active=0 AND c.kind='skip' AND EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id AND (a.status IN ('SUCCEEDED','ROLLED_BACK','EXPIRED','CANCELED') OR (a.status='FAILED' AND (` + terminalFailureSQL + `)))))
       OR (t.active=0 AND c.kind='skip' AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.task_id=t.task_id) AND t.lease_id IS NULL AND t.lease_deadline IS NULL AND json_extract(CAST(c.raw AS TEXT),'$.reason')='VOID_UNISSUED')
     )`).Scan(&bad); err != nil || bad != 0 {
 			return fmt.Errorf("invalid task control data: violations=%d: %v", bad, err)
@@ -483,6 +485,18 @@ func (s *Store) Provision(authenticatedNodeID string, sequence int64, raw []byte
 	if err := protocol.VerifyV2Task(raw, configuredKey); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
+	return s.provision(body, raw)
+}
+
+func (s *Store) ProvisionInstall(raw []byte, key lifecycleauth.InstallKey, now time.Time) error {
+	task, err := key.Verify(raw)
+	if err != nil || !task.ActiveAt(now) {
+		return ErrIdentity
+	}
+	return s.provision(taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: "core.install", ExpiresAt: task.ExpiresAt}, raw)
+}
+
+func (s *Store) provision(body taskEnvelope, raw []byte) error {
 	rawCopy := bytes.Clone(raw)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -495,7 +509,7 @@ func (s *Store) Provision(authenticatedNodeID string, sequence int64, raw []byte
 	var existingRaw []byte
 	err = tx.QueryRow(`SELECT node_id,sequence,raw,key_id FROM tasks WHERE task_id=?`, body.TaskID).Scan(&existingNode, &existingSeq, &existingRaw, &existingKey)
 	if err == nil {
-		if existingNode != body.NodeID || existingSeq != sequence || existingKey != configuredKeyID || !bytes.Equal(existingRaw, rawCopy) {
+		if existingNode != body.NodeID || existingSeq != body.Sequence || existingKey != body.KeyID || !bytes.Equal(existingRaw, rawCopy) {
 			return ErrConflict
 		}
 		return tx.Commit()
@@ -504,7 +518,7 @@ func (s *Store) Provision(authenticatedNodeID string, sequence int64, raw []byte
 		return err
 	}
 	var slotNode string
-	err = tx.QueryRow(`SELECT task_id FROM tasks WHERE node_id=? AND sequence=?`, body.NodeID, sequence).Scan(&slotNode)
+	err = tx.QueryRow(`SELECT task_id FROM tasks WHERE node_id=? AND sequence=?`, body.NodeID, body.Sequence).Scan(&slotNode)
 	if err == nil {
 		return ErrConflict
 	}
@@ -522,10 +536,10 @@ func (s *Store) Provision(authenticatedNodeID string, sequence int64, raw []byte
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(sequence),0) FROM tasks WHERE node_id=?`, body.NodeID).Scan(&maxSeq); err != nil {
 		return err
 	}
-	if sequence != maxSeq+1 {
+	if body.Sequence != maxSeq+1 {
 		return ErrSequence
 	}
-	if _, err = tx.Exec(`INSERT INTO tasks(task_id,node_id,sequence,raw,key_id,active) VALUES(?,?,?,?,?,1)`, body.TaskID, body.NodeID, sequence, rawCopy, configuredKeyID); err != nil {
+	if _, err = tx.Exec(`INSERT INTO tasks(task_id,node_id,sequence,raw,key_id,active) VALUES(?,?,?,?,?,1)`, body.TaskID, body.NodeID, body.Sequence, rawCopy, body.KeyID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -536,7 +550,7 @@ func (s *Store) Provision(authenticatedNodeID string, sequence int64, raw []byte
 // of the same task again and never creates a replacement task. The key ID and
 // key must be supplied from trusted local configuration for every delivery.
 func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey) (Delivery, error) {
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil)
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, false)
 }
 
 // LeaseExpected reconciles the Agent's durable next sequence before leasing
@@ -546,10 +560,17 @@ func (s *Store) LeaseExpected(authenticatedNodeID string, now time.Time, configu
 	if expectedSequence < 1 || expectedSequence > MaxSequence || buildSkip == nil {
 		return Delivery{}, fmt.Errorf("%w: invalid expected sequence recovery", ErrInvalid)
 	}
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip)
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, false)
 }
 
-func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error)) (Delivery, error) {
+func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable bool) (Delivery, error) {
+	if expected < 0 || expected > MaxSequence || expected > 0 && buildSkip == nil {
+		return Delivery{}, ErrInvalid
+	}
+	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, installCapable && expected > 0)
+}
+
+func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable bool) (Delivery, error) {
 	var zero Delivery
 	if s == nil || s.db == nil || authenticatedNodeID == "" || now.IsZero() || configuredKeyID == "" || len(configuredKey) != ed25519.PublicKeySize {
 		return zero, fmt.Errorf("%w: invalid lease arguments", ErrInvalid)
@@ -572,7 +593,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	}
 	defer tx.Rollback()
 	if expectedSequence > 0 {
-		recovery, isRecovery, recoverErr := s.recoverExpectedSequence(tx, authenticatedNodeID, expectedSequence, now, configuredKeyID, configuredKey, buildSkip)
+		recovery, isRecovery, recoverErr := s.recoverExpectedSequence(tx, authenticatedNodeID, expectedSequence, now, configuredKeyID, configuredKey, buildSkip, installKey, installCapable)
 		if recoverErr != nil {
 			return zero, recoverErr
 		}
@@ -602,18 +623,12 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	if lastStatusVersion.Valid {
 		d.LastStatusVersion = lastStatusVersion.Int64
 	}
-	if storedKey != configuredKeyID {
-		return zero, ErrIdentity
-	}
 	if controlKind.Valid {
 		d.ControlKind = controlKind.String
 	}
-	if err := protocol.VerifyV2Task(d.Raw, configuredKey); err != nil {
-		return zero, fmt.Errorf("%w: stored task: %v", ErrInvalid, err)
-	}
-	var body taskEnvelope
-	if err := json.Unmarshal(d.Raw, &body); err != nil {
-		return zero, fmt.Errorf("%w: stored task fields: %v", ErrInvalid, err)
+	body, err := verifyDeliveryTask(d.Raw, storedKey, configuredKeyID, configuredKey, installKey, installCapable)
+	if err != nil {
+		return zero, err
 	}
 	if body.NodeID != authenticatedNodeID || body.NodeID != d.NodeID || body.TaskID != d.TaskID || body.Sequence != d.Sequence || body.KeyID != storedKey {
 		return zero, ErrIdentity
@@ -662,7 +677,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	return d, nil
 }
 
-func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int64, now time.Time, keyID string, publicKey ed25519.PublicKey, buildSkip func(int64, string) ([]byte, error)) (Delivery, bool, error) {
+func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int64, now time.Time, keyID string, publicKey ed25519.PublicKey, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable bool) (Delivery, bool, error) {
 	var activeSequence sql.NullInt64
 	if err := tx.QueryRow(`SELECT sequence FROM tasks WHERE node_id=? AND active=1`, nodeID).Scan(&activeSequence); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Delivery{}, false, err
@@ -672,6 +687,15 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 		return Delivery{}, false, err
 	}
 	if activeSequence.Valid && expected > activeSequence.Int64 {
+		if installCapable && expected == activeSequence.Int64+1 {
+			var raw []byte
+			if err := tx.QueryRow(`SELECT raw FROM tasks WHERE node_id=? AND sequence=? AND active=1`, nodeID, activeSequence.Int64).Scan(&raw); err != nil {
+				return Delivery{}, false, err
+			}
+			if task, err := installKey.Verify(raw); err == nil && task.NodeID == nodeID && task.Sequence == activeSequence.Int64 {
+				return Delivery{}, false, nil // Agent can replay its durable terminal ACK.
+			}
+		}
 		return Delivery{}, false, ErrSequence
 	}
 	if !activeSequence.Valid && expected > highWater+1 {
@@ -697,11 +721,8 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 	if active == 1 && activeSequence.Valid && expected == activeSequence.Int64 {
 		return Delivery{}, false, nil
 	}
-	if storedKey != keyID || protocol.VerifyV2Task(d.Raw, publicKey) != nil {
-		return Delivery{}, false, ErrIdentity
-	}
-	var body taskEnvelope
-	if json.Unmarshal(d.Raw, &body) != nil || body.TaskID != d.TaskID || body.NodeID != nodeID || body.Sequence != expected || body.KeyID != keyID || body.Operation != "core.status" {
+	body, err := verifyDeliveryTask(d.Raw, storedKey, keyID, publicKey, installKey, installCapable)
+	if err != nil || body.TaskID != d.TaskID || body.NodeID != nodeID || body.Sequence != expected || body.KeyID != storedKey {
 		return Delivery{}, false, ErrIdentity
 	}
 	if active != 0 && active != 1 {
@@ -756,7 +777,7 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 	if err = tx.QueryRow(`SELECT status FROM acks WHERE task_id=? ORDER BY status_version DESC LIMIT 1`, d.TaskID).Scan(&terminal); err != nil {
 		return Delivery{}, false, ErrSequence
 	}
-	if !terminalStatuses[terminal] && !(terminal == "FAILED" && body.Operation == "core.status") {
+	if !terminalStatuses[terminal] && !(terminal == "FAILED" && isTerminalFailure(body)) {
 		return Delivery{}, false, ErrSequence
 	}
 	if now.Before(body.ExpiresAt) {
@@ -815,6 +836,28 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 	return d, true, nil
 }
 
+func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed25519.PublicKey, installKey lifecycleauth.InstallKey, installCapable bool) (taskEnvelope, error) {
+	var body taskEnvelope
+	if storedKey == statusKeyID {
+		if err := protocol.VerifyV2Task(raw, statusKey); err != nil {
+			return body, fmt.Errorf("%w: stored task: %v", ErrInvalid, err)
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return body, fmt.Errorf("%w: stored task fields: %v", ErrInvalid, err)
+		}
+		return body, nil
+	}
+	if storedKey == installKey.ID && installKey.ID != "" {
+		if !installCapable {
+			return body, ErrNotFound
+		}
+		if task, err := installKey.Verify(raw); err == nil {
+			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: "core.install", ExpiresAt: task.ExpiresAt}, nil
+		}
+	}
+	return body, ErrIdentity
+}
+
 // Acknowledge stores a node-bound, monotonically increasing status report.
 // Same-version byte-for-byte duplicates succeed idempotently. A terminal ACK
 // closes the slot; later newer ACKs are rejected. No ACK is an execution hook.
@@ -845,9 +888,7 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 	if taskNode != authenticatedNodeID || taskSeq != ack.Sequence {
 		return ErrIdentity
 	}
-	var operation struct {
-		Operation string `json:"operation"`
-	}
+	var operation taskEnvelope
 	if json.Unmarshal(raw, &operation) != nil {
 		return ErrIdentity
 	}
@@ -898,18 +939,28 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 	if _, err = tx.Exec(`INSERT INTO acks(task_id,status_version,node_id,sequence,status,result) VALUES(?,?,?,?,?,?)`, ack.TaskID, ack.StatusVersion, ack.NodeID, ack.Sequence, ack.Status, resultCopy); err != nil {
 		return err
 	}
-	if terminalStatuses[ack.Status] || (ack.Status == "FAILED" && operation.Operation == "core.status") {
+	terminal := terminalStatuses[ack.Status] || (ack.Status == "FAILED" && isTerminalFailure(operation))
+	if terminal {
 		if _, err = tx.Exec(`UPDATE tasks SET active=0,lease_id=NULL,lease_deadline=NULL WHERE task_id=? AND active=1`, ack.TaskID); err != nil {
 			return err
 		}
 	}
-	if ack.Status == "RUNNING" || ack.Status == "NEEDS_RECONCILIATION" || terminalStatuses[ack.Status] || (ack.Status == "FAILED" && operation.Operation == "core.status") {
+	if ack.Status == "RUNNING" || ack.Status == "NEEDS_RECONCILIATION" || terminal {
 		if _, err = tx.Exec(`DELETE FROM task_controls WHERE task_id=?`, ack.TaskID); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
+
+// An Xray install reports FAILED only before activation. A rollback has its
+// own terminal state and an uncertain outcome fences the sequence.
+func isTerminalFailure(task taskEnvelope) bool {
+	return task.Operation == "core.status" || (task.SchemaVersion == 1 && task.Operation == "core.install")
+}
+
+const terminalFailureSQL = `json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status' OR
+  (json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.install')`
 
 func newLeaseID() (string, error) {
 	var b [16]byte

@@ -5,6 +5,7 @@
 package helper
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -15,9 +16,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"golang.org/x/sys/unix"
 )
@@ -44,6 +47,12 @@ type Config struct {
 	ReadStatus         func(unit string) (string, error)
 	ReadStatusAt       func(unit string, observedAt time.Time) (string, error)
 	Checkpoint         StatusCheckpoint
+	XrayInstall        *XrayInstallConfig
+}
+
+type XrayInstallConfig struct {
+	Key   lifecycleauth.InstallKey
+	Apply func(context.Context, lifecycleauth.InstallTask, func(context.Context) error) (string, error)
 }
 type Helper struct {
 	dir *os.File
@@ -131,6 +140,20 @@ func openDir(path string, c Config) (*Helper, error) {
 		keys[id] = k
 	}
 	c.Keys = keys
+	if c.XrayInstall != nil {
+		install := *c.XrayInstall
+		if c.Checkpoint == nil || c.TrustedTimeHealthy == nil || install.Key.ID == "" ||
+			len(install.Key.PublicKey) != ed25519.PublicKeySize || install.Apply == nil {
+			return nil, ErrDenied
+		}
+		for id, status := range c.Keys {
+			if install.Key.ID == id || bytes.Equal(install.Key.PublicKey, status.PublicKey) {
+				return nil, ErrDenied
+			}
+		}
+		install.Key.PublicKey = bytes.Clone(install.Key.PublicKey)
+		c.XrayInstall = &install
+	}
 	fd, e := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if e != nil {
 		return nil, e
@@ -233,6 +256,34 @@ func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (st
 	if serverTime.IsZero() {
 		return "", ErrReconciliation
 	}
+	if h.cfg.XrayInstall != nil {
+		if install, err := h.cfg.XrayInstall.Key.Verify(raw); err == nil {
+			if install.NodeID != h.cfg.NodeID || install.Architecture != runtime.GOARCH {
+				return "", ErrDenied
+			}
+			t := task{Node: install.NodeID, ID: install.TaskID, Sequence: install.Sequence}
+			return h.executeAuthorized(raw, t, install.NotBefore, install.NotBefore, install.ExpiresAt, serverTime, previousSequence, true, false, func(now time.Time) (string, error) {
+				ctx, cancel := context.WithDeadline(context.Background(), install.ExpiresAt)
+				defer cancel()
+				outcome, err := h.cfg.XrayInstall.Apply(ctx, install, func(ctx context.Context) error {
+					server, previous, err := h.cfg.Checkpoint.AuthorizeStatus(ctx, raw, leaseIDs[0])
+					if err != nil || previous != install.Sequence-1 || !h.cfg.TrustedTimeHealthy() {
+						return ErrDenied
+					}
+					local := h.cfg.Now()
+					if local.Before(now) || !install.ActiveAt(local) || !install.ActiveAt(server) || absDuration(local.Sub(server)) > 30*time.Second {
+						return ErrDenied
+					}
+					return nil
+				})
+				if err != nil || (outcome != "SUCCEEDED" && outcome != "ROLLED_BACK" && outcome != "FAILED") {
+					return "", ErrReconciliation
+				}
+				result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: outcome, Version: install.Version, SHA256: install.SHA256})
+				return string(result), err
+			})
+		}
+	}
 	return h.executeUIDAt(cred.Uid, raw, serverTime, previousSequence, true)
 }
 func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
@@ -278,12 +329,21 @@ func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, prev
 	default:
 		return "", ErrDenied
 	}
+	return h.executeAuthorized(raw, t, issued, before, expires, trustedNow, previousSequence, checkpointed, true, func(now time.Time) (string, error) {
+		if h.cfg.ReadStatusAt != nil {
+			return h.cfg.ReadStatusAt(unit, now)
+		}
+		return h.cfg.ReadStatus(unit)
+	})
+}
+
+func (h *Helper) executeAuthorized(raw []byte, t task, issued, before, expires, trustedNow time.Time, previousSequence int64, checkpointed, retryPending bool, execute func(time.Time) (string, error)) (string, error) {
 	if checkpointed && previousSequence != t.Sequence-1 {
 		return "", ErrReconciliation
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if e = unix.Flock(int(h.dir.Fd()), unix.LOCK_EX); e != nil {
+	if e := unix.Flock(int(h.dir.Fd()), unix.LOCK_EX); e != nil {
 		return "", e
 	}
 	defer unix.Flock(int(h.dir.Fd()), unix.LOCK_UN)
@@ -341,6 +401,9 @@ func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, prev
 			if !r.Pending {
 				return r.Result, nil
 			}
+			if !retryPending {
+				return "", ErrReconciliation
+			}
 			existingIndex = i
 			break
 		}
@@ -355,12 +418,7 @@ func (h *Helper) executeUIDAt(uid uint32, raw []byte, trustedNow time.Time, prev
 			return "", e
 		}
 	}
-	var result string
-	if h.cfg.ReadStatusAt != nil {
-		result, e = h.cfg.ReadStatusAt(unit, now)
-	} else {
-		result, e = h.cfg.ReadStatus(unit)
-	}
+	result, e := execute(now)
 	if e != nil || len(result) > 4096 {
 		return "", ErrReconciliation
 	}

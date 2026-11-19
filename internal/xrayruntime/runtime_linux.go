@@ -19,6 +19,10 @@ import (
 
 const StateDir = "/var/lib/mcui-xray"
 
+var errRollback = errors.New("Xray installation rolled back")
+var errUnknown = errors.New("Xray transaction requires reconciliation")
+var errCommitted = errors.New("Xray transaction committed")
+
 type Action string
 
 const (
@@ -80,7 +84,7 @@ func (r *Runtime) Status() (Status, error) { return r.readStatus() }
 
 // Apply fetches only the exact operator-selected, TUF-authorized release.
 func (r *Runtime) Apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client) error {
-	return r.apply(ctx, action, release, trust, 0)
+	return r.apply(ctx, action, release, trust, 0, nil)
 }
 
 // ApplyWithManifest pins the approved version of the Core targets delegation
@@ -89,13 +93,32 @@ func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release 
 	if manifestVersion <= 0 {
 		return artifacttrust.ErrUntrustedTarget
 	}
-	return r.apply(ctx, action, release, trust, manifestVersion)
+	return r.apply(ctx, action, release, trust, manifestVersion, nil)
 }
 
-func (r *Runtime) apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64) error {
+// InstallAuthorized rechecks the remote authorization before candidate
+// execution and immediately before recording any activation intent.
+func (r *Runtime) InstallAuthorized(ctx context.Context, release Release, trust *artifacttrust.Client, manifestVersion int64, authorize func(context.Context) error) (string, error) {
+	if manifestVersion <= 0 || authorize == nil {
+		return "FAILED", nil
+	}
+	err := r.apply(ctx, Install, release, trust, manifestVersion, authorize)
+	switch {
+	case err == nil || errors.Is(err, errCommitted):
+		return "SUCCEEDED", nil
+	case errors.Is(err, errRollback):
+		return "ROLLED_BACK", nil
+	case errors.Is(err, errUnknown):
+		return "", err
+	default:
+		return "FAILED", nil
+	}
+}
+
+func (r *Runtime) apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64, authorize func(context.Context) error) error {
 	state, err := r.ready()
 	if err != nil {
-		return err
+		return errors.Join(errUnknown, err)
 	}
 	next := selection{Release: release, Running: action == Install || state.Current.Running}
 	if err := validateTransition(state.Current, intent{Action: action, Next: next}); err != nil {
@@ -121,11 +144,21 @@ func (r *Runtime) apply(ctx context.Context, action Action, release Release, tru
 	}); err != nil {
 		return fmt.Errorf("stage Xray release: %w", err)
 	}
+	if authorize != nil {
+		if err := authorize(ctx); err != nil {
+			return err
+		}
+	}
 	if err := r.runPreflight(ctx, release); err != nil {
 		return fmt.Errorf("preflight Xray release: %w", err)
 	}
 	if err := trust.Revalidate(ctx, target); err != nil {
 		return err
+	}
+	if authorize != nil {
+		if err := authorize(ctx); err != nil {
+			return err
+		}
 	}
 	return r.change(ctx, state, action, next)
 }
@@ -197,16 +230,19 @@ func (r *Runtime) change(ctx context.Context, state Status, action Action, next 
 		return err
 	}
 	if err := r.verifyBundle(state.Current.Release); err != nil {
-		return fmt.Errorf("verify committed Xray bundle: %w", err)
+		return errors.Join(errUnknown, fmt.Errorf("verify committed Xray bundle: %w", err))
 	}
 	state.Pending = &attempt
 	if err := r.save(state); err != nil {
-		return fmt.Errorf("persist Xray transaction intent: %w", err)
+		return errors.Join(errUnknown, fmt.Errorf("persist Xray transaction intent: %w", err))
 	}
 	if err := r.applySelection(ctx, state.Current, next); err != nil {
 		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancel()
-		return errors.Join(fmt.Errorf("apply Xray transaction: %w", err), r.rollback(rollbackCtx, state))
+		if rollbackErr := r.rollback(rollbackCtx, state); rollbackErr != nil {
+			return errors.Join(errUnknown, fmt.Errorf("apply Xray transaction: %w", err), rollbackErr)
+		}
+		return errors.Join(errRollback, fmt.Errorf("apply Xray transaction: %w", err))
 	}
 	if next.Release != state.Current.Release {
 		state.Previous = state.Current.Release
@@ -218,10 +254,10 @@ func (r *Runtime) change(ctx context.Context, state Status, action Action, next 
 	state.LastAction, state.LastResult = action, "committed"
 	if err := r.save(state); err != nil {
 		// A rename may already have completed even when directory fsync fails.
-		return fmt.Errorf("persist Xray commit; run recover before continuing: %w", err)
+		return errors.Join(errUnknown, fmt.Errorf("persist Xray commit; run recover before continuing: %w", err))
 	}
 	if err := r.prune(state); err != nil {
-		return fmt.Errorf("Xray transaction committed; bundle cleanup failed: %w", err)
+		return errors.Join(errCommitted, fmt.Errorf("bundle cleanup failed: %w", err))
 	}
 	return nil
 }

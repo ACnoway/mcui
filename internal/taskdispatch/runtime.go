@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/taskauth"
 	"github.com/ACnoway/mcui/internal/taskcontrol"
@@ -485,12 +486,23 @@ func (s *Store) ValidateLease(nodeID, taskID string, sequence int64, leaseID str
 	if err != nil || verified.TaskID != taskID || int64(verified.Sequence) != sequence || verified.KeyID != keyID {
 		return 0, ErrIdentity
 	}
+	return s.validateBoundLease(nodeID, taskID, sequence, leaseID, raw, now, keyID)
+}
+
+func (s *Store) ValidateInstallLease(task lifecycleauth.InstallTask, leaseID string, raw []byte, now time.Time) (int64, error) {
+	if !task.ActiveAt(now) {
+		return 0, ErrIdentity
+	}
+	return s.validateBoundLease(task.NodeID, task.TaskID, task.Sequence, leaseID, raw, now, task.KeyID)
+}
+
+func (s *Store) validateBoundLease(nodeID, taskID string, sequence int64, leaseID string, raw []byte, now time.Time, keyID string) (int64, error) {
 	var storedNode, storedKey string
 	var storedRaw []byte
 	var active int
 	var storedLease sql.NullString
 	var deadline sql.NullInt64
-	err = s.db.QueryRow(`SELECT node_id,raw,key_id,active,lease_id,lease_deadline FROM tasks WHERE task_id=?`, taskID).Scan(&storedNode, &storedRaw, &storedKey, &active, &storedLease, &deadline)
+	err := s.db.QueryRow(`SELECT node_id,raw,key_id,active,lease_id,lease_deadline FROM tasks WHERE task_id=?`, taskID).Scan(&storedNode, &storedRaw, &storedKey, &active, &storedLease, &deadline)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -508,4 +520,19 @@ func (s *Store) ValidateLease(nodeID, taskID string, sequence int64, leaseID str
 		return 0, ErrSequence
 	}
 	return sequence - 1, nil
+}
+
+func (s *Store) RenewInstallLease(task lifecycleauth.InstallTask, leaseID string, raw []byte, now time.Time) error {
+	if _, err := s.ValidateInstallLease(task, leaseID, raw, now); err != nil {
+		return err
+	}
+	result, err := s.db.Exec(`UPDATE tasks SET lease_deadline=? WHERE task_id=? AND node_id=? AND sequence=? AND active=1 AND lease_id=? AND lease_deadline>?`, now.Add(LeasePeriod).UnixNano(), task.TaskID, task.NodeID, task.Sequence, leaseID, now.UnixNano())
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count != 1 {
+		return ErrLeaseActive
+	}
+	return nil
 }
