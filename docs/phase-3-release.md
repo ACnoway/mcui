@@ -4,7 +4,8 @@
 
 ## 1. 发布位置和密钥
 
-- Xray、sing-box 和 mita 继续从各自的官方 GitHub Releases 下载。MCUI 自建的 Agent/Helper 双架构 ZIP 放在 `ACnoway/mcui` 的 GitHub Releases。
+- Xray、sing-box 和 mita 使用各自官方 GitHub Releases 上的原始二进制包。MCUI 的安装器仅选择已核验并登记进有效签名清单的版本与架构。
+- V1 通过 `ACnoway/mcui` 的 GitHub Releases 发布预构建的主控安装包、Agent 首次安装包和现有 Agent/Helper 双架构更新 ZIP。主控脚本与 Compose 共用发布流程，镜像引用固定版本。首次安装包的构建和可信引导仍待接入正式发布流程。
 - 先以草稿上传 `manifest.json` 和 `manifest.json.sig`，再将包含两个附件的 Release 发布为 Latest。客户端通过固定仓库的 `releases/latest` 取得标签，再从该标签取两个文件。给已发布的 Latest Release 更换附件会导致同版本内容冲突。每次变更发新标签和更高版本，保留清单引用的制品版本。可以单独发布清单更新，复用已发布的 ZIP。每个设为 Latest 的 Release 都需带这两个文件。
 - 维护者在离线签发环境保管一把 Ed25519 发布私钥。通过可信安装包或带外配置为节点预置对应公钥并核对指纹。发布私钥与任务签发、SSH 和 GitHub 上传凭据分开。更换或撤销公钥通过节点本地管理完成。
 
@@ -23,11 +24,13 @@ go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
 
 私钥使用 Ed25519 PKCS#8 PEM，Unix 上仅所有者可访问。公钥支持 PKIX PEM 或标准 Base64 编码的 32 字节原始公钥。核对 `verify` 输出中的原始公钥 SHA-256 指纹、清单版本及原始字节摘要。签发命令拒绝覆盖已有签名文件。
 
-任务仍绑定节点、动作和清单中的精确制品。Agent 与 Helper 分别核验清单签名和版本，再按相同长度和 SHA-256 校验官方源或主控缓存的字节。对账和启动恢复按照[节点操作手册](./phase-3-operations.md#进程中断恢复验收)。清单字段和防回退规则见[制品信任方案](./artifact-trust.md)。
+任务绑定节点、动作和清单中的精确制品。V1 面板由有效清单筛选可安装版本，默认选择当前节点可安装的最新稳定版，并在创建任务时锁定实际版本与摘要。Agent 与 Helper 分别核验清单签名和版本，再按相同长度和 SHA-256 校验官方源或主控缓存的字节。[节点启动恢复](./phase-3-operations.md#进程中断恢复验收) · [制品信任方案](./artifact-trust.md)
 
 ### 生产发布验收
 
 - 维护者核验首批制品和发布公钥，签发并发布首份生产清单。
+- 验证一键脚本和 Compose 的发布入口、首次凭据、证书接入，以及从面板命令安装空 Agent。验证管理员选择默认版本后使用核准的官方 Xray 制品。
+- 发布检查覆盖 Go、前端锁文件、镜像及已支持的 Core 版本，记录修复版本和升级方式。验证补丁的签名、安装和回滚。
 - 用生产信任材料完成节点部署，确认 chrony 实际通过 NTS 使用 `time.cloudflare.com`，验证签名清单、安装及结果回报。单机用户按单机流程备份和恢复。启用了独立检查点的部署另外验证旧快照拒绝。[单机备份恢复](./phase-2-operations.md#单机运行与备份恢复)
 - 使用独立的运行时发布密钥和节点更新授权密钥验收远程成对更新，在待发布的节点配置上复验断电和磁盘写满后的恢复与结果回报。[成对更新](./phase-3-runtime-update.md)
 - 记录对应提交、支持平台、部署与恢复结果。常规开发使用隔离节点和测试信任材料。[阶段 3 开发进度](./phase-3-progress.md#后续工作)

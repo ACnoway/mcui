@@ -1,6 +1,8 @@
 # 主控与 Agent 接入运维
 
-Agent 主动连接主控的 TLS 1.3 API，通过一次性安装码换取节点 Token。安装包包含 Linux amd64 和 arm64 的 Agent、只读状态 Helper 及其 systemd 单元。任务签名和 NTS 时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
+本文记录当前手工部署与迁移流程。Agent 主动连接主控的 TLS 1.3 API，通过一次性安装码换取节点 Token。现有构建脚本打包 Linux amd64 和 arm64 的 Agent、只读状态 Helper 及其 systemd 单元。任务签名和 NTS 时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
+
+V1 的待实现入口包括主控一键脚本和 Compose、首次自动创建单管理员、本机默认监听与 HTTPS 反代。面板生成的一条命令将自动准备 Agent 和 Helper 的依赖、可信配置、服务和节点身份。当前版本请按下文预置证书与公钥。[主控安装目标](./project-overview-and-development-workflow.md#13-主控安装与首次登录) · [Agent 首次部署目标](./project-overview-and-development-workflow.md#41-首次部署流程)
 
 ## 主控和批准的安装包
 
@@ -49,4 +51,4 @@ sudo -u mcui /usr/local/bin/mcuidb backup -db /var/lib/mcui/mcui.db -out /var/li
 /usr/local/bin/mcuidb verify -db /var/lib/mcui/restore-candidate.db
 ```
 
-数据库、节点撤销状态、管理员凭据和审计均属敏感数据。备份必须放在受访问控制和静态加密保护的存储上，并有独立权限与保留计划；`mcuidb` 不加密备份，也不提供防篡改/新鲜度证明。恢复旧数据可能复活当时尚未记录的撤销、凭据或管理员变更。必须先停服并用独立可信检查点核对新鲜度；无法证明状态连续时，不得把候选文件放到线上路径或恢复节点注册/轮换。候选文件的完整性通过不等于恢复获准。
+数据库、节点撤销状态、管理员凭据和审计均属敏感数据。备份须放在受访问控制和静态加密保护的存储上，并有独立权限与保留计划。`mcuidb` 提供一致性和结构验证。恢复前停止主控，按单机流程核对两库、撤销与账本。启用独立检查点时，还须核对检查点的新鲜度。状态连续性无法确认时暂停恢复线上数据库、节点注册和轮换。[单机及独立检查点恢复](./phase-2-operations.md#8-部署独立检查点)

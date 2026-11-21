@@ -1,12 +1,21 @@
-# MCUI Master and empty Agent
+# MCUI
 
-MCUI is a multi-Core control plane in staged development. The repository contains the Master panel, a Core-free Agent, and a signed task path with a privileged Helper and isolated signers. Opt-in remote Xray operations cover installation, start, stop, upgrade, explicit downgrade, and uninstall. The first demo target is the complete Xray workflow.
+MCUI is a lightweight panel for managing proxy services on Linux nodes. The Master manages nodes and Core configuration. Agents connect outbound to the Master, and clients connect directly to the proxy Core on each node.
+
+## V1 deployment target
+
+1. Install one Master with a one-click script or Docker Compose. MCUI publishes Master and Agent packages through GitHub Releases. A fresh Master is reachable only locally. Configure your own HTTPS reverse proxy or configure TLS on the Master to enable public access.
+2. Sign in as the single administrator with the generated initial credentials. The installer prints them once in its output, or in the Master container logs for Compose. First sign-in sets a new password and enrolls MFA.
+3. Add a node and copy a single installation command from the panel. On a supported Linux host, the command installs and enrolls the Core-free Agent and its restricted Helper, including the required trust configuration.
+4. Manage the node from the same administrator account. Pick a Core version, defaulting to the latest verified stable release available for that node. MCUI selects and verifies the official binary package and handles task signing. The panel controls installation, start, stop, upgrade, downgrade, and uninstall.
+
+The first delivery validates this workflow on Xray with a real client connection. The full V1 scope also includes sing-box and mita. The plan covers indexed SQLite access for low-resource hosts and signed updates with recovery. [Product scope](docs/project-overview-and-development-workflow.md) · [Implementation order](docs/phased-development-workflow.md#4-当前开发顺序)
 
 ## Current stage
 
-Phase 0/1 engineering work is complete and formal exit evidence remains outstanding. Phase 2 connects scoped status-task creation, external signing, Token-authenticated pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The remotely executable action is a fixed read-only service status query. [Phase 0/1 status](docs/phase-0-1-implementation.md) · [Phase 2 progress](docs/phase-2-progress.md) · [Phase 2 operations](docs/phase-2-operations.md)
+The current development build supports manual bootstrap, direct TLS, scoped accounts, and Agent enrollment with pre-provisioned trust. Phase 2 delivered signed, read-only status tasks, Token-authenticated pull and ACK, durable intake, and a restricted Helper socket. [Phase 0/1 status](docs/phase-0-1-implementation.md) · [Phase 2 progress](docs/phase-2-progress.md)
 
-Phase 3 has the Core release catalog, Master backup cache, and signed Xray lifecycle tasks. Version changes bind the exact installed release and an approved target. Downgrade and uninstall require separate confirmation. A node supervisor applies independently authorized Agent and Helper updates from Master or local staging and restores the previous pair after a failed trial. A single Master supports both remote workflows with Cloudflare NTS. A separate rollback checkpoint is optional. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Single-host backup and recovery](docs/phase-2-operations.md#单机运行与备份恢复) · [Paired runtime updates](docs/phase-3-runtime-update.md) · [Production release](docs/phase-3-release.md#生产发布验收)
+Phase 3 adds the official Core release catalog, a backup cache, signed Xray lifecycle tasks through a manual signing workflow, and paired Agent/Helper updates with rollback. A single Master supports the remote workflows with Cloudflare NTS and an optional independent rollback checkpoint. Xray currently uses an empty bootstrap configuration for lifecycle tests. The deployment target above, a real proxy connection, and production release acceptance are pending. [Phase 3 progress](docs/phase-3-progress.md) · [Single-host recovery](docs/phase-2-operations.md#单机运行与备份恢复) · [Production release](docs/phase-3-release.md#生产发布验收)
 
 ## Development checks
 
@@ -36,7 +45,7 @@ Provide a one-time `MCUI_BOOTSTRAP_TOKEN` through a trusted local mechanism, the
 
 ## TLS panel and Agent enrollment
 
-In the TLS panel, a scoped security administrator creates a node and generates a one-time install command after MFA. The command verifies the approved installer SHA-256 before running it. The installer configures the Agent and the status-only Helper, then redeems the code over HTTPS. See [Agent deployment and migration](docs/phase-1-operations.md) for release metadata, trust provisioning, and service setup.
+In the current direct-TLS panel, a security administrator creates a node and generates a one-time install command after MFA. The command verifies the approved installer SHA-256 before running it. The installer expects pre-provisioned task trust and deploys the Agent and the status-only Helper. [Current Agent deployment and migration](docs/phase-1-operations.md)
 
 The Agent uses the system CA store or an explicit locally trusted CA. Its node Token is stored in a private identity file and authenticates heartbeat, task delivery, and ACK. Re-enrollment preserves the node ID and ledgers. The old Token expires as soon as the replacement is redeemed.
 
@@ -54,7 +63,6 @@ SQLite migrations cover the previous certificate-backed and serialized database 
 - `internal/taskauth`, `internal/taskcontrol`, `internal/tasksigner`: signed status verification, V1 cancel/skip verification and signing for the restricted Phase 2 controls, plus isolated task signing
 - `internal/taskledger`, `internal/taskslots`, `internal/taskdispatch`, `internal/agenttasks`: durable status-task intake, delivery, ACK, and Helper checkpoint flow
 - `internal/helper`: Linux-only peer credential and task verification boundary; runs fixed read-only status queries and fails closed on uncertain ledger state
-- `internal/checkpoint`: experimental transition model requiring an independently trusted authority and durable local journal
-- `internal/checkpointstore`, `internal/checkpointjournal`: experimental SQLite authority and journal primitives; not independently deployed, authenticated or connected to runtime
+- `internal/checkpoint`, `internal/checkpointstore`, `internal/checkpointjournal`: optional independent rollback checkpoint and its SQLite authority and journal
 - `internal/corecatalog`: read-only official GitHub release metadata for Xray, sing-box, and mita; entries are discovery data and do not authorize installation
 - `web`: Vue administration panel
