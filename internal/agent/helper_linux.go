@@ -24,7 +24,7 @@ type unixStatusExecutor struct{ socketPath string }
 
 type helperSocketRequest struct {
 	LeaseID          string          `json:"lease_id,omitempty"`
-	Task             json.RawMessage `json:"task"`
+	Task             json.RawMessage `json:"task,omitempty"`
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 	Probe            bool            `json:"probe,omitempty"`
 }
