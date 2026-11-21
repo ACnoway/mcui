@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
@@ -19,6 +20,7 @@ var errXrayInstallScope = errors.New("Xray install outside current scope")
 type xrayInstallRequest struct {
 	TaskID          string `json:"task_id"`
 	NodeID          string `json:"node_id"`
+	Operation       string `json:"operation"`
 	Version         string `json:"version"`
 	Architecture    string `json:"architecture"`
 	SHA256          string `json:"sha256"`
@@ -90,6 +92,20 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Xray install proposal", http.StatusBadRequest)
 		return
 	}
+	schema := lifecycleauth.SignedManifestProposalVersion
+	switch in.Operation {
+	case "", "core.install":
+		in.Operation = "core.install"
+	case "core.start", "core.stop":
+		schema = lifecycleauth.ControlProposalVersion
+		if in.ManifestVersion != 0 {
+			http.Error(w, "Xray control does not use a manifest version", http.StatusBadRequest)
+			return
+		}
+	default:
+		http.Error(w, "invalid Xray lifecycle operation", http.StatusBadRequest)
+		return
+	}
 	if !s.stepUp(ctx, in.MFACode) {
 		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
 		return
@@ -100,7 +116,7 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proposal := lifecycleauth.Proposal{
-		SchemaVersion: lifecycleauth.SignedManifestProposalVersion, Core: "xray", Operation: "core.install",
+		SchemaVersion: schema, Core: "xray", Operation: in.Operation,
 		TaskID: in.TaskID, NodeID: in.NodeID, RequesterID: ctx.Admin.ID,
 		Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, ManifestVersion: in.ManifestVersion,
 		SigningKeyID: policy.SigningKeyID(), CreatedAt: now.Unix(), ExpiresAt: now.Add(30 * time.Minute).Unix(),
@@ -156,7 +172,7 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		st.XrayInstalls[proposal.TaskID] = record
-		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: "task.xray.install.reserve", ResourceType: "task", Resource: proposal.TaskID, NodeID: proposal.NodeID, Outcome: "reserved"})
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: xrayTaskAudit(proposal.Operation, "reserve"), ResourceType: "task", Resource: proposal.TaskID, NodeID: proposal.NodeID, Outcome: "reserved"})
 		return nil
 	})
 	if err != nil {
@@ -234,7 +250,7 @@ func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request)
 		record.ApprovalID = requestID
 		record.SignedTask = compact.Bytes()
 		st.XrayInstalls[p.TaskID] = record
-		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: "task.xray.install.verify", ResourceType: "task", Resource: p.TaskID, NodeID: p.NodeID, Detail: record.ApprovalID, Outcome: "signature-verified"})
+		s.appendAudit(st, store.Audit{At: now.Unix(), Actor: ctx.Admin.ID, Action: xrayTaskAudit(p.Operation, "verify"), ResourceType: "task", Resource: p.TaskID, NodeID: p.NodeID, Detail: record.ApprovalID, Outcome: "signature-verified"})
 		return nil
 	})
 	if err != nil {
@@ -294,7 +310,7 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		writeXrayInstallError(w, r, err)
 		return
 	}
-	if err := s.recordTaskAudit(ctx.Admin.ID, "task.xray.install.dispatch", task.TaskID, task.NodeID, "queued"); err != nil {
+	if err := s.recordTaskAudit(ctx.Admin.ID, xrayTaskAudit(task.Operation, "dispatch"), task.TaskID, task.NodeID, "queued"); err != nil {
 		http.Error(w, "Xray task audit unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -304,6 +320,10 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.taskRecordView(dispatched))
+}
+
+func xrayTaskAudit(operation, event string) string {
+	return "task.xray." + strings.TrimPrefix(operation, "core.") + "." + event
 }
 
 func (s *Server) readXrayDispatch(id, requester string, policy *lifecycleauth.Policy) (store.XrayInstall, error) {

@@ -24,30 +24,46 @@ func (p *Policy) InstallKey() InstallKey {
 }
 
 type InstallTask struct {
-	TaskID, NodeID, KeyID, ApprovalID string
-	Sequence, ManifestVersion         int64
-	Version, Architecture, SHA256     string
-	NotBefore, ExpiresAt              time.Time
-	SignedManifest                    bool
+	TaskID, NodeID, KeyID, ApprovalID        string
+	Sequence, ManifestVersion                int64
+	Operation, Version, Architecture, SHA256 string
+	NotBefore, ExpiresAt                     time.Time
+	SignedManifest                           bool
 }
 
-// Verify validates the exact signed V1 Xray install envelope against a
+func IsControlOperation(operation string) bool {
+	return operation == "core.start" || operation == "core.stop"
+}
+
+// Verify validates the exact signed V1 Xray lifecycle envelope against a
 // purpose-specific local key. Callers must bind the local node and trusted time.
 func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 	var wire installTask
 	if len(raw) == 0 || len(raw) > maxProofBytes || !identifier.MatchString(key.ID) ||
 		len(key.PublicKey) != ed25519.PublicKeySize || protocol.Verify(protocol.Task, raw, key.PublicKey) != nil ||
-		json.Unmarshal(raw, &wire) != nil || wire.SigningKeyID != key.ID || wire.Operation != "core.install" ||
+		json.Unmarshal(raw, &wire) != nil || wire.SigningKeyID != key.ID ||
 		wire.Payload.Core != "xray" || !digestPattern.MatchString(wire.ApprovalID) || wire.IssuedAt != wire.NotBefore {
 		return InstallTask{}, ErrDenied
 	}
-	prefix := "xray-"
-	if strings.HasPrefix(wire.Payload.ArtifactID, "xray-manifest-") {
-		prefix = "xray-manifest-"
+	payload := wire.Payload
+	var signedManifest bool
+	switch {
+	case wire.Operation == "core.install":
+		prefix := "xray-"
+		if strings.HasPrefix(payload.ArtifactID, "xray-manifest-") {
+			prefix, signedManifest = "xray-manifest-", true
+		}
+		architecture, digest, ok := strings.Cut(strings.TrimPrefix(payload.ArtifactID, prefix), "-")
+		if !ok || payload.ArtifactID != prefix+architecture+"-"+digest {
+			return InstallTask{}, ErrDenied
+		}
+		payload.Architecture, payload.SHA256 = architecture, digest
+	case IsControlOperation(wire.Operation):
+		// Only a release-bound control envelope can pass the lifecycle key.
+	default:
+		return InstallTask{}, ErrDenied
 	}
-	architecture, digest, ok := strings.Cut(strings.TrimPrefix(wire.Payload.ArtifactID, prefix), "-")
-	if !ok || wire.Payload.ArtifactID != prefix+architecture+"-"+digest ||
-		(architecture != "amd64" && architecture != "arm64") || !corecatalog.ValidXrayRelease(wire.Payload.Version, digest) {
+	if (payload.Architecture != "amd64" && payload.Architecture != "arm64") || !corecatalog.ValidXrayRelease(payload.Version, payload.SHA256) {
 		return InstallTask{}, ErrDenied
 	}
 	before, err := time.Parse(time.RFC3339, wire.NotBefore)
@@ -60,14 +76,14 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 	}
 	return InstallTask{
 		TaskID: wire.TaskID, NodeID: wire.NodeID, KeyID: key.ID, ApprovalID: wire.ApprovalID,
-		Sequence: wire.Sequence, ManifestVersion: wire.Payload.ManifestVersion, Version: wire.Payload.Version,
-		Architecture: architecture, SHA256: digest, NotBefore: before, ExpiresAt: expires, SignedManifest: prefix == "xray-manifest-",
+		Sequence: wire.Sequence, Operation: wire.Operation, Version: payload.Version, ManifestVersion: payload.ManifestVersion,
+		Architecture: payload.Architecture, SHA256: payload.SHA256, NotBefore: before, ExpiresAt: expires, SignedManifest: signedManifest,
 	}, nil
 }
 
 func (t InstallTask) Matches(p Proposal, id string) bool {
 	return id == t.ApprovalID && p.TaskID == t.TaskID && p.NodeID == t.NodeID && p.SigningKeyID == t.KeyID &&
-		p.Sequence == t.Sequence && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
+		p.Sequence == t.Sequence && p.Operation == t.Operation && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
 		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion) &&
 		p.Architecture == t.Architecture && p.SHA256 == t.SHA256 &&
 		t.NotBefore.Unix() >= p.CreatedAt && t.ExpiresAt.Unix() <= p.ExpiresAt

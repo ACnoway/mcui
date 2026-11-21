@@ -720,7 +720,7 @@ func (s *Server) taskRecordView(record taskdispatch.Record) taskView {
 		return toTaskView(record, s.taskRuntime.PublicKey)
 	}
 	var envelope statusTaskEnvelope
-	envelope.Operation = "core.install"
+	envelope.Operation = task.Operation
 	envelope.Payload.Core = "xray"
 	envelope.IssuedAt = task.NotBefore.UTC().Format(time.RFC3339)
 	envelope.ExpiresAt = task.ExpiresAt.UTC().Format(time.RFC3339)
@@ -787,7 +787,8 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 			return nil, buildErr
 		}
 		return runtime.Signer.SignControl(protocol.Skip, unsigned)
-	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install"), r.URL.Query().Get("install_reconciliation") == "v1")
+	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install"), r.URL.Query().Get("install_reconciliation") == "v1",
+		r.URL.Query().Get("xray_control") == "v1")
 	if errors.Is(err, taskdispatch.ErrNotFound) || errors.Is(err, taskdispatch.ErrLeaseActive) {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -862,7 +863,7 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 	if protocol.VerifyV2Task(record.Raw, runtime.PublicKey) == nil && json.Unmarshal(record.Raw, &envelope) == nil {
 		validAck = validStatusAck(envelope.Payload.Core, in.Status, in.Result, trustedNow)
 	} else if task, err := s.verifyStoredXrayTask(record.Raw, false); err == nil {
-		auditAction = "task.xray.install.ack"
+		auditAction = xrayTaskAudit(task.Operation, "ack")
 		validAck = validInstallAck(task, in.Status, in.Result, trustedNow)
 	}
 	if !validAck {
@@ -946,7 +947,7 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 	switch envelope.Operation {
 	case "core.status":
 		previous, err = runtime.Store.ValidateLease(envelope.NodeID, envelope.TaskID, envelope.Sequence, in.LeaseID, in.Task, now, runtime.KeyID, runtime.PublicKey)
-	case "core.install":
+	case "core.install", "core.start", "core.stop":
 		var task lifecycleauth.InstallTask
 		task, err = s.verifyStoredXrayTask(in.Task, true)
 		if err == nil && s.taskCheckpoint != nil && task.NodeID == envelope.NodeID {

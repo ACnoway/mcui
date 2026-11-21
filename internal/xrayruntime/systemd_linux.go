@@ -51,7 +51,17 @@ func (systemdService) start(ctx context.Context) error {
 }
 
 func (systemdService) stop(ctx context.Context) error {
-	return systemctl(ctx, 20*time.Second, "stop", serviceUnit)
+	if err := systemctl(ctx, 20*time.Second, "stop", serviceUnit); err != nil {
+		return err
+	}
+	state, err := serviceState(ctx)
+	if err != nil {
+		return err
+	}
+	if state["MainPID"] != "0" || state["ActiveState"] != "inactive" || state["SubState"] != "dead" {
+		return errors.New("Xray systemd service is not stopped")
+	}
+	return nil
 }
 
 func checkPID(ctx context.Context, expected int) error {
@@ -66,12 +76,24 @@ func checkPID(ctx context.Context, expected int) error {
 }
 
 func runningPID(ctx context.Context) (int, error) {
+	values, err := serviceState(ctx)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(values["MainPID"])
+	if err != nil || pid <= 1 || values["ActiveState"] != "active" || values["SubState"] != "running" {
+		return 0, errors.New("Xray systemd process is not running")
+	}
+	return pid, nil
+}
+
+func serviceState(ctx context.Context) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	command := systemctlCommand(ctx, "show", "--property=ActiveState,SubState,MainPID", serviceUnit)
 	data, err := command.Output()
 	if err != nil {
-		return 0, fmt.Errorf("read Xray systemd status: %w", err)
+		return nil, fmt.Errorf("read Xray systemd status: %w", err)
 	}
 	values := make(map[string]string, 3)
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
@@ -80,11 +102,7 @@ func runningPID(ctx context.Context) (int, error) {
 			values[name] = value
 		}
 	}
-	pid, err := strconv.Atoi(values["MainPID"])
-	if err != nil || pid <= 1 || values["ActiveState"] != "active" || values["SubState"] != "running" {
-		return 0, errors.New("Xray systemd process is not running")
-	}
-	return pid, nil
+	return values, nil
 }
 
 func systemctl(ctx context.Context, timeout time.Duration, action string, unit string) error {

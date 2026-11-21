@@ -403,7 +403,7 @@ SELECT
 	if oversized != 0 {
 		return errors.New("invalid task delivery ACK history limit")
 	}
-	ackRows, err := db.Query(`SELECT a.task_id,a.status_version,a.status,COALESCE((` + installTaskSQL + `),0) FROM acks a JOIN tasks t ON t.task_id=a.task_id ORDER BY a.task_id,a.status_version`)
+	ackRows, err := db.Query(`SELECT a.task_id,a.status_version,a.status,COALESCE((` + xrayTaskSQL + `),0) FROM acks a JOIN tasks t ON t.task_id=a.task_id ORDER BY a.task_id,a.status_version`)
 	if err != nil {
 		return err
 	}
@@ -414,15 +414,15 @@ SELECT
 	for ackRows.Next() {
 		var current, status string
 		var n int64
-		var install bool
-		if err := ackRows.Scan(&current, &n, &status, &install); err != nil {
+		var xrayTask bool
+		if err := ackRows.Scan(&current, &n, &status, &xrayTask); err != nil {
 			return err
 		}
 		if current != task {
 			task, ackVersion, previous = current, 0, ""
 			rolledBack = false
 		}
-		if n != ackVersion+1 || (ackVersion != 0 && !validTransition(previous, status, install)) || (status == "ROLLING_BACK" && rolledBack) {
+		if n != ackVersion+1 || (ackVersion != 0 && !validTransition(previous, status, xrayTask)) || (status == "ROLLING_BACK" && rolledBack) {
 			return fmt.Errorf("invalid task delivery ACK history for task %q", current)
 		}
 		rolledBack = rolledBack || status == "ROLLING_BACK"
@@ -496,7 +496,7 @@ func (s *Store) ProvisionInstall(raw []byte, key lifecycleauth.InstallKey, now t
 	if err != nil || !task.ActiveAt(now) {
 		return ErrIdentity
 	}
-	return s.provision(taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: "core.install", ExpiresAt: task.ExpiresAt}, raw)
+	return s.provision(taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: task.Operation, ExpiresAt: task.ExpiresAt}, raw)
 }
 
 func (s *Store) provision(body taskEnvelope, raw []byte) error {
@@ -553,7 +553,7 @@ func (s *Store) provision(body taskEnvelope, raw []byte) error {
 // of the same task again and never creates a replacement task. The key ID and
 // key must be supplied from trusted local configuration for every delivery.
 func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey) (Delivery, error) {
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, "", false)
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, "", false, false)
 }
 
 // LeaseExpected reconciles the Agent's durable next sequence before leasing
@@ -563,17 +563,17 @@ func (s *Store) LeaseExpected(authenticatedNodeID string, now time.Time, configu
 	if expectedSequence < 1 || expectedSequence > MaxSequence || buildSkip == nil {
 		return Delivery{}, fmt.Errorf("%w: invalid expected sequence recovery", ErrInvalid)
 	}
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, "", false)
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, "", false, false)
 }
 
-func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string, reconcileInstall bool) (Delivery, error) {
+func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string, reconcileInstall, controlCapable bool) (Delivery, error) {
 	if expected < 0 || expected > MaxSequence || expected > 0 && buildSkip == nil {
 		return Delivery{}, ErrInvalid
 	}
-	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, mode, reconcileInstall)
+	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, mode, reconcileInstall, controlCapable)
 }
 
-func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string, reconcileInstall bool) (Delivery, error) {
+func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string, reconcileInstall, controlCapable bool) (Delivery, error) {
 	var zero Delivery
 	if s == nil || s.db == nil || authenticatedNodeID == "" || now.IsZero() || configuredKeyID == "" || len(configuredKey) != ed25519.PublicKeySize {
 		return zero, fmt.Errorf("%w: invalid lease arguments", ErrInvalid)
@@ -597,7 +597,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	defer tx.Rollback()
 	installCapable := expectedSequence > 0 && (mode == "xray-v1" || mode == "xray-manifest-v1")
 	if expectedSequence > 0 {
-		recovery, isRecovery, recoverErr := s.recoverExpectedSequence(tx, authenticatedNodeID, expectedSequence, now, configuredKeyID, configuredKey, buildSkip, installKey, installCapable)
+		recovery, isRecovery, recoverErr := s.recoverExpectedSequence(tx, authenticatedNodeID, expectedSequence, now, configuredKeyID, configuredKey, buildSkip, installKey, installCapable, controlCapable)
 		if recoverErr != nil {
 			return zero, recoverErr
 		}
@@ -627,7 +627,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	if controlKind.Valid {
 		d.ControlKind = controlKind.String
 	}
-	body, err := verifyDeliveryTask(d.Raw, storedKey, configuredKeyID, configuredKey, installKey, installCapable)
+	body, err := verifyDeliveryTask(d.Raw, storedKey, configuredKeyID, configuredKey, installKey, installCapable, controlCapable)
 	if err != nil {
 		return zero, err
 	}
@@ -658,7 +658,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 			return zero, fmt.Errorf("%w: stored control message", ErrInvalid)
 		}
 	}
-	if lastStatus == "NEEDS_RECONCILIATION" && isInstallTask(body) && reconcileInstall && !controlKind.Valid {
+	if lastStatus == "NEEDS_RECONCILIATION" && isXrayTask(body) && reconcileInstall && !controlKind.Valid {
 		// The fenced envelope is delivered without any execution lease.
 		if lease.Valid || leaseDeadline.Valid {
 			if _, err = tx.Exec(`UPDATE tasks SET lease_id=NULL,lease_deadline=NULL WHERE task_id=?`, d.TaskID); err != nil {
@@ -687,7 +687,7 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	return d, nil
 }
 
-func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int64, now time.Time, keyID string, publicKey ed25519.PublicKey, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable bool) (Delivery, bool, error) {
+func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int64, now time.Time, keyID string, publicKey ed25519.PublicKey, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, installCapable, controlCapable bool) (Delivery, bool, error) {
 	var activeSequence sql.NullInt64
 	if err := tx.QueryRow(`SELECT sequence FROM tasks WHERE node_id=? AND active=1`, nodeID).Scan(&activeSequence); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Delivery{}, false, err
@@ -702,7 +702,8 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 			if err := tx.QueryRow(`SELECT raw FROM tasks WHERE node_id=? AND sequence=? AND active=1`, nodeID, activeSequence.Int64).Scan(&raw); err != nil {
 				return Delivery{}, false, err
 			}
-			if task, err := installKey.Verify(raw); err == nil && task.NodeID == nodeID && task.Sequence == activeSequence.Int64 {
+			if task, err := installKey.Verify(raw); err == nil && task.NodeID == nodeID && task.Sequence == activeSequence.Int64 &&
+				(!lifecycleauth.IsControlOperation(task.Operation) || controlCapable) {
 				return Delivery{}, false, nil // Agent can replay its durable terminal ACK.
 			}
 		}
@@ -731,7 +732,7 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 	if active == 1 && activeSequence.Valid && expected == activeSequence.Int64 {
 		return Delivery{}, false, nil
 	}
-	body, err := verifyDeliveryTask(d.Raw, storedKey, keyID, publicKey, installKey, installCapable)
+	body, err := verifyDeliveryTask(d.Raw, storedKey, keyID, publicKey, installKey, installCapable, controlCapable)
 	if err != nil || body.TaskID != d.TaskID || body.NodeID != nodeID || body.Sequence != expected || body.KeyID != storedKey {
 		return Delivery{}, false, ErrIdentity
 	}
@@ -846,7 +847,7 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 	return d, true, nil
 }
 
-func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed25519.PublicKey, installKey lifecycleauth.InstallKey, installCapable bool) (taskEnvelope, error) {
+func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed25519.PublicKey, installKey lifecycleauth.InstallKey, installCapable, controlCapable bool) (taskEnvelope, error) {
 	var body taskEnvelope
 	if storedKey == statusKeyID {
 		if err := protocol.VerifyV2Task(raw, statusKey); err != nil {
@@ -862,7 +863,10 @@ func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed2
 			return body, ErrNotFound
 		}
 		if task, err := installKey.Verify(raw); err == nil {
-			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: "core.install", ExpiresAt: task.ExpiresAt, SignedManifest: task.SignedManifest}, nil
+			if lifecycleauth.IsControlOperation(task.Operation) && !controlCapable {
+				return body, ErrNotFound
+			}
+			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: task.Operation, ExpiresAt: task.ExpiresAt, SignedManifest: task.SignedManifest}, nil
 		}
 	}
 	return body, ErrIdentity
@@ -933,7 +937,7 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 		if err = tx.QueryRow(`SELECT status FROM acks WHERE task_id=? AND status_version=?`, ack.TaskID, maxVersion.Int64).Scan(&previous); err != nil {
 			return err
 		}
-		if !validTransition(previous, ack.Status, isInstallTask(operation)) {
+		if !validTransition(previous, ack.Status, isXrayTask(operation)) {
 			return ErrConflict
 		}
 	}
@@ -955,7 +959,7 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 			return err
 		}
 	}
-	if ack.Status == "NEEDS_RECONCILIATION" && isInstallTask(operation) {
+	if ack.Status == "NEEDS_RECONCILIATION" && isXrayTask(operation) {
 		if _, err = tx.Exec(`UPDATE tasks SET lease_id=NULL,lease_deadline=NULL WHERE task_id=?`, ack.TaskID); err != nil {
 			return err
 		}
@@ -968,18 +972,18 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 	return tx.Commit()
 }
 
-// An Xray install reports FAILED only before activation. A rollback has its
+// An Xray task reports FAILED before changing the service. A rollback has its
 // own terminal state and an uncertain outcome fences the sequence.
 func isTerminalFailure(task taskEnvelope) bool {
-	return task.Operation == "core.status" || isInstallTask(task)
+	return task.Operation == "core.status" || isXrayTask(task)
 }
 
-func isInstallTask(task taskEnvelope) bool {
-	return task.SchemaVersion == 1 && task.Operation == "core.install"
+func isXrayTask(task taskEnvelope) bool {
+	return task.SchemaVersion == 1 && (task.Operation == "core.install" || lifecycleauth.IsControlOperation(task.Operation))
 }
 
-const installTaskSQL = `json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.install'`
-const terminalFailureSQL = `json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status' OR (` + installTaskSQL + `)`
+const xrayTaskSQL = `json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation') IN ('core.install','core.start','core.stop')`
+const terminalFailureSQL = `json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status' OR (` + xrayTaskSQL + `)`
 
 func newLeaseID() (string, error) {
 	var b [16]byte
@@ -989,10 +993,10 @@ func newLeaseID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// Only Xray installation has a protocol for resolving a fenced observation.
-func validTransition(from, to string, install bool) bool {
+// Only Xray lifecycle tasks can resolve a fenced observation.
+func validTransition(from, to string, xrayTask bool) bool {
 	if from == "NEEDS_RECONCILIATION" {
-		return install && (to == "SUCCEEDED" || to == "ROLLED_BACK")
+		return xrayTask && (to == "SUCCEEDED" || to == "ROLLED_BACK")
 	}
 	if terminalStatuses[from] {
 		return false

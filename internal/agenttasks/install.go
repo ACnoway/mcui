@@ -196,6 +196,9 @@ func (r *installRuntime) prepare(ctx context.Context, install lifecycleauth.Inst
 	if install.Architecture != runtime.GOARCH {
 		return lifecycleauth.ErrDenied
 	}
+	if lifecycleauth.IsControlOperation(install.Operation) {
+		return nil
+	}
 	if backend, ok := r.artifacts.(interface{ UsesSignedManifest() bool }); ok && backend.UsesSignedManifest() != install.SignedManifest {
 		return lifecycleauth.ErrDenied
 	}

@@ -43,7 +43,8 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 | operation | payload 必填字段（除 core 外） |
 |---|---|
 | `core.status` | 无；V1 仅定义签名结构，阶段 2 的运行时使用 V2，规则见[状态任务协议草案](./phase-2-protocol-draft.md) |
-| `core.start`, `core.stop`, `core.restart`, `core.uninstall` | 无 |
+| `core.start`, `core.stop` | Xray 远程启停使用已安装的 `version`、`architecture`、`sha256`。仅有 `core` 的旧信封保留解析兼容。 |
+| `core.restart`, `core.uninstall` | 无 |
 | `core.install`, `core.upgrade`, `core.downgrade` | `version`、`artifact_id` 为标识符；`manifest_version` 为正整数 |
 | `config.apply` | `revision` 正整数、`content_sha256` 摘要、`core_version` 标识符 |
 
@@ -68,6 +69,8 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 ### 阶段 2 已接通的 V2 状态查询子集
 
 状态查询使用 `schema_version: 2`、`operation: core.status`。V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。显式启用单签名清单的 Agent 通过 `install=xray-manifest-v1` 接收独立签发的 V1 `core.install`，共享同一节点序号。旧 TUF 节点使用 `install=xray-v1` 处理已投递任务。安装租约为 60 秒，同一节点凭据可为未过期的同一信封续租。租约到期只重投相同签名消息。Agent 账本先写入再处理；重复 ACK 可重放，执行中状态重启后进入 `NEEDS_RECONCILIATION`。[Xray 安装操作说明](./phase-3-operations.md#5-启用远程-xray-安装)
+
+支持远程启停的 Agent 在轮询中声明 `xray_control=v1`。独立签发的 V1 `core.start`、`core.stop` 共享上述租约、序号及 ACK 规则。Helper 只接受绑定已安装版本、架构、SHA-256 的启停信封。制品缓存接口只接受符合条件的签名安装任务。[远程启停操作说明](./phase-3-operations.md#6-远程启停)
 
 Helper 要求当前 Master 签发租约、提交完整原始签名消息并从 TLS 验证的 Master 获取当前时间和前序终态位置。检查点返回的前序序号只允许将已终结缺口写入 Helper 本地 ledger；未知缺口不跳过。状态读取仅执行固定 `systemctl show` 属性查询。Agent 过期收到的签名任务只持久化 `EXPIRED` 并 ACK，不执行 Helper。执行结果不确定时两端保持 reconciliation 栅栏，不能删除账本恢复。
 

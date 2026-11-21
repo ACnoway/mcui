@@ -105,6 +105,7 @@ func (c *Client) processStatusTask(state localState) error {
 			if _, ok := c.taskHandler.(installReconciliationHandler); ok {
 				endpoint += "&install_reconciliation=v1"
 			}
+			endpoint += "&xray_control=v1"
 		}
 	}
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)

@@ -27,7 +27,9 @@ const (
 	proposalTTL                   = 30 * time.Minute
 	taskTTL                       = 10 * time.Minute
 	requestDomain                 = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
+	controlRequestDomain          = "MCUI-XRAY-CONTROL-REQUEST-V1\n"
 	SignedManifestProposalVersion = 3
+	ControlProposalVersion        = 4
 )
 
 var (
@@ -48,7 +50,7 @@ type Proposal struct {
 	Version         string `json:"version"`
 	Architecture    string `json:"architecture"`
 	SHA256          string `json:"sha256"`
-	ManifestVersion int64  `json:"manifest_version"`
+	ManifestVersion int64  `json:"manifest_version,omitempty"`
 	RequesterID     string `json:"requester_id"`
 	ApproverID      string `json:"approver_id,omitempty"` // Retained for stored V1 proposals.
 	SigningKeyID    string `json:"signing_key_id"`
@@ -157,9 +159,14 @@ func ParseRequest(raw []byte) (Request, error) {
 func (p Proposal) valid() bool {
 	validSchema := (p.singleOperator() && p.ApproverID == "") ||
 		(p.SchemaVersion == 1 && identifier.MatchString(p.ApproverID) && p.ApproverID != p.RequesterID)
-	return validSchema && p.Operation == "core.install" && p.Core == "xray" &&
+	validOperation := p.Operation == "core.install" && p.SchemaVersion != ControlProposalVersion &&
+		p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence
+	if IsControlOperation(p.Operation) {
+		validOperation = p.SchemaVersion == ControlProposalVersion && p.ManifestVersion == 0
+	}
+	return validSchema && validOperation && p.Core == "xray" &&
 		taskIDPattern.MatchString(p.TaskID) && security.ValidNodeID(p.NodeID) &&
-		p.Sequence >= 1 && p.Sequence <= maxSequence && p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence &&
+		p.Sequence >= 1 && p.Sequence <= maxSequence &&
 		corecatalog.ValidXrayRelease(p.Version, p.SHA256) && (p.Architecture == "amd64" || p.Architecture == "arm64") &&
 		identifier.MatchString(p.RequesterID) &&
 		identifier.MatchString(p.SigningKeyID) && p.CreatedAt > 0 && p.ExpiresAt <= maxUnixTime &&
@@ -167,7 +174,14 @@ func (p Proposal) valid() bool {
 }
 
 func (p Proposal) singleOperator() bool {
-	return p.SchemaVersion == 2 || p.SchemaVersion == SignedManifestProposalVersion
+	return p.SchemaVersion == 2 || p.SchemaVersion == SignedManifestProposalVersion || p.SchemaVersion == ControlProposalVersion
+}
+
+func (p Proposal) requestDomain() string {
+	if p.SchemaVersion == ControlProposalVersion {
+		return controlRequestDomain
+	}
+	return requestDomain
 }
 
 func (policy *Policy) requesterKey(p Proposal) ed25519.PublicKey {
@@ -206,7 +220,7 @@ func (policy *Policy) SignRequest(p Proposal, key ed25519.PrivateKey, now time.T
 	if !p.singleOperator() || !matchesPrivate(key, policy.requesterKey(p)) || at < p.CreatedAt || at >= p.ExpiresAt {
 		return Request{}, ErrDenied
 	}
-	message, err := signingBytes(requestDomain, requestContent{Proposal: p, RequestedAt: at})
+	message, err := signingBytes(p.requestDomain(), requestContent{Proposal: p, RequestedAt: at})
 	if err != nil {
 		return Request{}, err
 	}
@@ -221,7 +235,7 @@ func (policy *Policy) VerifyRequest(r Request, now time.Time) (string, error) {
 		r.RequestedAt > now.Unix() || now.Unix() >= r.taskExpiry() {
 		return "", ErrDenied
 	}
-	message, err := signingBytes(requestDomain, requestContent{Proposal: p, RequestedAt: r.RequestedAt})
+	message, err := signingBytes(p.requestDomain(), requestContent{Proposal: p, RequestedAt: r.RequestedAt})
 	if err != nil || !verify(operator, message, r.Signature) {
 		return "", ErrDenied
 	}

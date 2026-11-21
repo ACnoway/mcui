@@ -45,7 +45,7 @@ func (s *Server) openXrayBackup(in artifacttrust.BackupRequest) (*os.File, int) 
 		return nil, http.StatusServiceUnavailable
 	}
 	task, err := s.verifyStoredXrayTask(in.Task, true)
-	if err != nil || !task.SignedManifest {
+	if err != nil || task.Operation != "core.install" || !task.SignedManifest {
 		return nil, http.StatusForbidden
 	}
 	now, err := s.taskRuntime.currentTime()

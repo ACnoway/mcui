@@ -140,6 +140,12 @@ function buildVectors() {
       schema_version: 1, node_id: 'node-001', sequence: 1, reason: 'VOID_UNISSUED',
       issued_at: '2026-11-16T00:00:00Z', not_before: '2026-11-16T00:00:00Z', expires_at: '2026-11-16T00:10:00Z',
     })),
+    vector('task-xray-stop', 'task', makeObject('task', {
+      schema_version: 1, task_id: 'task-xray-stop-001', node_id: 'node-001', sequence: 2,
+      operation: 'core.stop', issued_at: '2026-11-16T00:00:00Z', not_before: '2026-11-16T00:00:00Z',
+      expires_at: '2026-11-16T00:10:00Z', approval_id: '1'.repeat(64),
+      payload: { core: 'xray', version: 'v26.10.31', architecture: 'amd64', sha256: 'a'.repeat(64) },
+    })),
   ]
   const task = parseStrict(vectors[0].input_json)
   const negativeCases = [

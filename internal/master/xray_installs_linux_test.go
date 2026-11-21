@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -362,6 +363,68 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	}
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=2", nil, true), http.StatusNoContent)
 
+	for i, operation := range []string{"core.stop", "core.start"} {
+		control := in
+		control.TaskID = "xray-control-" + operation[5:] + "-000000000001"
+		control.Operation, control.ManifestVersion = operation, 0
+		res := request(http.MethodPost, base, "test-session-token", client.csrf, control)
+		assertStatus(res, http.StatusCreated)
+		var view xrayInstallView
+		if err := json.Unmarshal(res.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		sequence := int64(i + 2)
+		p, err := lifecycleauth.ParseProposal(view.Proposal)
+		if err != nil || p.Operation != operation || p.Sequence != sequence || p.SchemaVersion != lifecycleauth.ControlProposalVersion {
+			t.Fatalf("control proposal: %+v (%v)", p, err)
+		}
+		proof, err := policy.SignRequest(p, operatorPrivate, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controlTask, err := policy.Issue(t.Context(), ledger, proof, signerPrivate, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := map[string]any{"request": proof, "task": json.RawMessage(controlTask)}
+		assertStatus(request(http.MethodPost, base+"/"+control.TaskID+"/signed-task", "other-session", "other-csrf", body), http.StatusNotFound)
+		assertStatus(request(http.MethodPost, base+"/"+control.TaskID+"/signed-task", "test-session-token", client.csrf, body), http.StatusOK)
+		res = request(http.MethodPost, base+"/"+control.TaskID+"/dispatch", "test-session-token", client.csrf, map[string]any{})
+		assertStatus(res, http.StatusCreated)
+		var dispatched taskView
+		if err := json.Unmarshal(res.Body.Bytes(), &dispatched); err != nil || dispatched.Operation != operation {
+			t.Fatalf("dispatched control: %+v (%v)", dispatched, err)
+		}
+		next := "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=" + strconv.FormatInt(sequence, 10)
+		assertStatus(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
+		res = client.request(http.MethodGet, next+"&xray_control=v1", nil, true)
+		assertStatus(res, http.StatusOK)
+		var delivery helperAuthorizationRequest
+		if err := json.Unmarshal(res.Body.Bytes(), &delivery); err != nil || len(delivery.LeaseID) != 32 || !bytes.Equal(delivery.Task, controlTask) {
+			t.Fatalf("invalid control delivery: %+v (%v)", delivery, err)
+		}
+		assertStatus(client.request(http.MethodPost, artifacttrust.BackupEndpoint, artifacttrust.BackupRequest{
+			Task: delivery.Task, LeaseID: delivery.LeaseID, Length: int64(len(backupPayload)),
+		}, true), http.StatusForbidden)
+		acks, err := runner.ProcessXrayInstall(t.Context(), delivery.Task, delivery.LeaseID, nil, 0, now)
+		if err != nil || len(acks) != 4 || acks[3].Status != "SUCCEEDED" {
+			t.Fatalf("control %s ACKs: %+v (%v)", operation, acks, err)
+		}
+		for _, ack := range acks {
+			assertStatus(client.request(http.MethodPost, ackPath, taskAckRequest{
+				TaskID: control.TaskID, Sequence: sequence, StatusVersion: ack.StatusVersion, Status: ack.Status, Result: ack.Result,
+			}, true), http.StatusNoContent)
+		}
+		res = request(http.MethodGet, "/api/v1/admin/tasks/"+control.TaskID, "test-session-token", "", nil)
+		assertStatus(res, http.StatusOK)
+		if err := json.Unmarshal(res.Body.Bytes(), &dispatched); err != nil || dispatched.Operation != operation || dispatched.Status != "SUCCEEDED" {
+			t.Fatalf("reported control: %+v (%v)", dispatched, err)
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("unexpected install and control execution count: %d", calls.Load())
+	}
+
 	advance(30 * time.Minute)
 	assertStatus(request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, issueBody), http.StatusConflict)
 	changed.TaskID = "xray-install-0000000000002"
@@ -370,7 +433,7 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	changed.TaskID = "xray-install-0000000000003"
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, changed), http.StatusConflict)
 	assertStatus(client.request(http.MethodPost, "/api/v1/admin/tasks", status, false), http.StatusCreated)
-	res = client.request(http.MethodGet, reconcilePath+"2", nil, true)
+	res = client.request(http.MethodGet, reconcilePath+"4", nil, true)
 	assertStatus(res, http.StatusOK)
 	if !strings.Contains(res.Body.String(), status.RequestID) || strings.Contains(res.Body.String(), "reconcile_install") {
 		t.Fatalf("next sequence did not resume normal delivery: %s", res.Body)

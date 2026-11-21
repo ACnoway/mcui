@@ -230,6 +230,45 @@ func TestLifecycleControlsAndRequiresExplicitDowngrade(t *testing.T) {
 	}
 }
 
+func TestRemoteControlUsesExpectedReleaseAndRecovers(t *testing.T) {
+	ctx := t.Context()
+	svc := &fakeService{}
+	r := newRuntime(t, svc)
+	svc.dir = r.dir
+	release := stageFixture(t, r, "v26.10.31")
+	applyFixture(t, r, Install, selection{Release: release, Running: true})
+	stopHash, startHash := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	checks := 0
+	authorize := func(context.Context) error { checks++; return nil }
+	mismatch := Release{Version: release.Version, SHA256: strings.Repeat("c", 64)}
+	if outcome, err := r.ControlAuthorized(ctx, Stop, mismatch, stopHash, authorize); err != nil || outcome != "FAILED" || !svc.running || checks != 0 {
+		t.Fatalf("stale control changed the service: %q, %v", outcome, err)
+	}
+	if outcome, err := r.ControlAuthorized(ctx, Stop, release, stopHash, func(context.Context) error {
+		return errors.New("lease denied")
+	}); err != nil || outcome != "FAILED" || !svc.running || readState(t, r).Pending != nil {
+		t.Fatalf("unauthorized stop changed the service: %q, %v", outcome, err)
+	}
+	if outcome, err := r.ControlAuthorized(ctx, Stop, release, stopHash, authorize); err != nil || outcome != "SUCCEEDED" || svc.running {
+		t.Fatalf("stop = %q, %v", outcome, err)
+	}
+	if outcome, err := r.ReconcileControl(ctx, Start, release, stopHash); err == nil || outcome != "" {
+		t.Fatalf("start accepted a stop receipt: %q, %v", outcome, err)
+	}
+	state := readState(t, r)
+	state.Pending = &intent{Action: Start, Next: selection{Release: release, Running: true}, ControlHash: startHash}
+	if err := r.save(state); err != nil {
+		t.Fatal(err)
+	}
+	svc.running = true // Interrupted after start and before commit.
+	if outcome, err := r.ReconcileControl(ctx, Start, release, startHash); err != nil || outcome != "ROLLED_BACK" || svc.running {
+		t.Fatalf("interrupted start recovery = %q, %v", outcome, err)
+	}
+	if outcome, err := r.ControlAuthorized(ctx, Start, release, strings.Repeat("d", 64), authorize); err != nil || outcome != "SUCCEEDED" || !svc.running || checks != 2 {
+		t.Fatalf("start = %q, %v; checks=%d", outcome, err, checks)
+	}
+}
+
 func TestLifecycleRejectsUntrustedArtifactsAndConcurrentWriters(t *testing.T) {
 	r := newRuntime(t, &fakeService{})
 	release := Release{"v26.10.31", strings.Repeat("1", 64)}

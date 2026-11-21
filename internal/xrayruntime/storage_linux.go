@@ -143,16 +143,28 @@ func (r *Runtime) readStatus() (Status, error) {
 		if err := validateTransition(current, *state.Pending); err != nil {
 			return Status{}, err
 		}
-		if state.Pending.InstallHash != "" && (state.Pending.Action != Install || !validInstallHash(state.Pending.InstallHash)) {
+		if state.Pending.InstallHash != "" && (state.Pending.Action != Install || !validTaskHash(state.Pending.InstallHash)) {
 			return Status{}, errors.New("invalid Xray install intent identity")
+		}
+		if state.Pending.ControlHash != "" && (!isServiceControl(state.Pending.Action) || !validTaskHash(state.Pending.ControlHash)) {
+			return Status{}, errors.New("invalid Xray control intent identity")
 		}
 	}
 	if receipt := state.InstallReceipt; receipt != nil {
-		if !validInstallHash(receipt.Hash) || !receipt.Release.valid() || (receipt.Outcome != "SUCCEEDED" && receipt.Outcome != "ROLLED_BACK") {
+		if !receipt.valid() || receipt.Action != "" {
 			return Status{}, errors.New("invalid Xray install receipt")
 		}
 	}
+	if receipt := state.ControlReceipt; receipt != nil {
+		if !receipt.valid() || !isServiceControl(receipt.Action) {
+			return Status{}, errors.New("invalid Xray control receipt")
+		}
+	}
 	return state, nil
+}
+
+func (r taskReceipt) valid() bool {
+	return validTaskHash(r.Hash) && r.Release.valid() && (r.Outcome == "SUCCEEDED" || r.Outcome == "ROLLED_BACK")
 }
 
 func (r *Runtime) save(state Status) error {

@@ -141,7 +141,8 @@ func main() {
 		config.XrayInstall = &helper.XrayInstallConfig{
 			Key: lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key},
 			Apply: func(ctx context.Context, task lifecycleauth.InstallTask, hash string, authorize func(context.Context) error) (string, error) {
-				if task.SignedManifest != signedManifest {
+				control := lifecycleauth.IsControlOperation(task.Operation)
+				if !control && task.SignedManifest != signedManifest {
 					return "FAILED", nil
 				}
 				runtime, err := xrayruntime.Open(false)
@@ -149,7 +150,11 @@ func main() {
 					return "", err
 				}
 				defer runtime.Close()
-				return runtime.InstallAuthorized(ctx, xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}, artifacts, task.ManifestVersion, hash, authorize)
+				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
+				if control {
+					return runtime.ControlAuthorized(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash, authorize)
+				}
+				return runtime.InstallAuthorized(ctx, release, artifacts, task.ManifestVersion, hash, authorize)
 			},
 			Reconcile: func(ctx context.Context, task lifecycleauth.InstallTask, hash string) (string, error) {
 				runtime, err := xrayruntime.Open(false)
@@ -157,7 +162,11 @@ func main() {
 					return "", err
 				}
 				defer runtime.Close()
-				return runtime.ReconcileInstall(ctx, xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}, hash)
+				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
+				if lifecycleauth.IsControlOperation(task.Operation) {
+					return runtime.ReconcileControl(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash)
+				}
+				return runtime.ReconcileInstall(ctx, release, hash)
 			},
 		}
 	}

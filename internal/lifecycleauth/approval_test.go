@@ -97,6 +97,39 @@ func newLedger(t *testing.T) (string, *Ledger) {
 	return path, ledger
 }
 
+func TestIssueXrayControlBindsActionAndInstalledRelease(t *testing.T) {
+	a := newTestAuthority(t)
+	_, ledger := newLedger(t)
+	p := a.proposal
+	p.SchemaVersion, p.Operation, p.ManifestVersion = ControlProposalVersion, "core.stop", 0
+	request := a.request(t, p)
+	raw, err := a.policy.Issue(t.Context(), ledger, request, a.taskKey, a.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := a.policy.VerifyIssuedTask(raw, request, a.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := a.policy.InstallKey().Verify(raw)
+	if err != nil || !task.Matches(p, id) || task.SignedManifest {
+		t.Fatalf("verified control task = %+v, %v", task, err)
+	}
+	changed := request
+	changed.Proposal.Operation = "core.start"
+	mismatch, err := signInstallTask(changed, id, a.taskKey, a.policy.signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.policy.VerifyIssuedTask(mismatch, request, a.now); !errors.Is(err, ErrDenied) {
+		t.Fatalf("accepted different signed action: %v", err)
+	}
+	p.ManifestVersion = 1
+	if _, err := a.policy.SignRequest(p, a.requestKey, a.now); !errors.Is(err, ErrDenied) {
+		t.Fatalf("accepted artifact metadata on a control proposal: %v", err)
+	}
+}
+
 func TestIssueExactInstallAndReplayAfterReopen(t *testing.T) {
 	a := newTestAuthority(t)
 	path, ledger := newLedger(t)

@@ -345,6 +345,10 @@ func validateTaskPayload(operation string, value any) error {
 		return errors.New("task payload must be an object")
 	}
 	expected := []string{"core"}
+	releaseControl := (operation == "core.start" || operation == "core.stop") && len(payload) != 1
+	if releaseControl {
+		expected = append(expected, "version", "architecture", "sha256")
+	}
 	switch operation {
 	case "core.status", "core.start", "core.stop", "core.restart", "core.uninstall":
 	case "core.install", "core.upgrade", "core.downgrade":
@@ -359,6 +363,14 @@ func validateTaskPayload(operation string, value any) error {
 	}
 	if err := validCore(payload, "core"); err != nil {
 		return err
+	}
+	if releaseControl {
+		digest, ok := payload["sha256"].(string)
+		if payload["core"] != "xray" || (payload["architecture"] != "amd64" && payload["architecture"] != "arm64") ||
+			!ok || !digestPattern.MatchString(digest) {
+			return errors.New("invalid Xray control release identity")
+		}
+		return validIdentifier(payload, "version")
 	}
 	switch operation {
 	case "core.install", "core.upgrade", "core.downgrade":

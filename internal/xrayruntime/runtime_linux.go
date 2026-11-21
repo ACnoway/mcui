@@ -49,22 +49,25 @@ type intent struct {
 	Action      Action    `json:"action"`
 	Next        selection `json:"next"`
 	InstallHash string    `json:"install_hash,omitempty"`
+	ControlHash string    `json:"control_hash,omitempty"`
 }
 
-type installReceipt struct {
+type taskReceipt struct {
 	Hash    string  `json:"hash"`
 	Release Release `json:"release"`
 	Outcome string  `json:"outcome"`
+	Action  Action  `json:"action,omitempty"`
 }
 
 type Status struct {
-	Schema         int             `json:"schema"`
-	Current        selection       `json:"current"`
-	Previous       Release         `json:"previous"`
-	Pending        *intent         `json:"pending,omitempty"`
-	LastAction     Action          `json:"last_action,omitempty"`
-	LastResult     string          `json:"last_result,omitempty"`
-	InstallReceipt *installReceipt `json:"install_receipt,omitempty"`
+	Schema         int          `json:"schema"`
+	Current        selection    `json:"current"`
+	Previous       Release      `json:"previous"`
+	Pending        *intent      `json:"pending,omitempty"`
+	LastAction     Action       `json:"last_action,omitempty"`
+	LastResult     string       `json:"last_result,omitempty"`
+	InstallReceipt *taskReceipt `json:"install_receipt,omitempty"`
+	ControlReceipt *taskReceipt `json:"control_receipt,omitempty"`
 }
 
 type service interface {
@@ -108,10 +111,13 @@ func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release 
 // InstallAuthorized rechecks the remote authorization before candidate
 // execution and immediately before recording any activation intent.
 func (r *Runtime) InstallAuthorized(ctx context.Context, release Release, trust *artifacttrust.Client, manifestVersion int64, hash string, authorize func(context.Context) error) (string, error) {
-	if manifestVersion <= 0 || !validInstallHash(hash) || authorize == nil {
+	if manifestVersion <= 0 || !validTaskHash(hash) || authorize == nil {
 		return "FAILED", nil
 	}
-	err := r.apply(ctx, Install, release, trust, manifestVersion, hash, authorize)
+	return taskOutcome(r.apply(ctx, Install, release, trust, manifestVersion, hash, authorize))
+}
+
+func taskOutcome(err error) (string, error) {
 	switch {
 	case err == nil || errors.Is(err, errCommitted):
 		return "SUCCEEDED", nil
@@ -173,8 +179,24 @@ func (r *Runtime) apply(ctx context.Context, action Action, release Release, tru
 }
 
 func (r *Runtime) Control(ctx context.Context, action Action, expected Release) error {
+	return r.control(ctx, action, expected, "", nil)
+}
+
+// ControlAuthorized limits remote control to the fixed service and confirms the
+// current lease before committing an intent for the exact installed release.
+func (r *Runtime) ControlAuthorized(ctx context.Context, action Action, expected Release, hash string, authorize func(context.Context) error) (string, error) {
+	if !isServiceControl(action) || !validTaskHash(hash) || authorize == nil {
+		return "FAILED", nil
+	}
+	return taskOutcome(r.control(ctx, action, expected, hash, authorize))
+}
+
+func (r *Runtime) control(ctx context.Context, action Action, expected Release, hash string, authorize func(context.Context) error) error {
 	state, err := r.ready()
 	if err != nil {
+		if authorize != nil {
+			return errors.Join(errUnknown, err)
+		}
 		return err
 	}
 	if !expected.valid() || state.Current.Release != expected {
@@ -191,13 +213,29 @@ func (r *Runtime) Control(ctx context.Context, action Action, expected Release) 
 	default:
 		return errors.New("invalid Xray control action")
 	}
-	return r.change(ctx, state, intent{Action: action, Next: next})
+	if authorize != nil {
+		if err := authorize(ctx); err != nil {
+			return err
+		}
+	}
+	return r.change(ctx, state, intent{Action: action, Next: next, ControlHash: hash})
 }
 
-// ReconcileInstall returns a persisted result for the exact signed task. A
-// matching interrupted activation can only be rolled back by this method.
+// ReconcileInstall returns the persisted result of the exact signed install.
 func (r *Runtime) ReconcileInstall(ctx context.Context, release Release, hash string) (string, error) {
-	if !release.valid() || !validInstallHash(hash) {
+	return r.reconcileTask(ctx, Install, release, hash)
+}
+
+// ReconcileControl only reads a receipt or rolls back a matching transaction.
+func (r *Runtime) ReconcileControl(ctx context.Context, action Action, release Release, hash string) (string, error) {
+	if !isServiceControl(action) {
+		return "", errUnknown
+	}
+	return r.reconcileTask(ctx, action, release, hash)
+}
+
+func (r *Runtime) reconcileTask(ctx context.Context, action Action, release Release, hash string) (string, error) {
+	if !release.valid() || !validTaskHash(hash) {
 		return "", errUnknown
 	}
 	state, err := r.readStatus()
@@ -205,7 +243,12 @@ func (r *Runtime) ReconcileInstall(ctx context.Context, release Release, hash st
 		return "", err
 	}
 	if state.Pending != nil {
-		if state.Pending.InstallHash != hash || state.Pending.Next.Release != release {
+		pending := state.Pending
+		pendingHash := pending.InstallHash
+		if action != Install {
+			pendingHash = pending.ControlHash
+		}
+		if pending.Action != action || pendingHash != hash || pending.Next.Release != release {
 			return "", errUnknown
 		}
 		if err := r.rollback(ctx, state); err != nil {
@@ -217,6 +260,12 @@ func (r *Runtime) ReconcileInstall(ctx context.Context, release Release, hash st
 		}
 	}
 	receipt := state.InstallReceipt
+	if action != Install {
+		receipt = state.ControlReceipt
+		if receipt != nil && receipt.Action != action {
+			return "", errUnknown
+		}
+	}
 	if receipt == nil || receipt.Hash != hash || receipt.Release != release {
 		return "", errUnknown
 	}
@@ -226,12 +275,24 @@ func (r *Runtime) ReconcileInstall(ctx context.Context, release Release, hash st
 	return receipt.Outcome, nil
 }
 
-func validInstallHash(hash string) bool {
+func validTaskHash(hash string) bool {
 	if len(hash) != 64 || hash != strings.ToLower(hash) {
 		return false
 	}
 	_, err := hex.DecodeString(hash)
 	return err == nil
+}
+
+func isServiceControl(action Action) bool {
+	return action == Start || action == Stop
+}
+
+func (s *Status) recordReceipt(attempt intent, outcome string) {
+	if attempt.InstallHash != "" {
+		s.InstallReceipt = &taskReceipt{Hash: attempt.InstallHash, Release: attempt.Next.Release, Outcome: outcome}
+	} else if attempt.ControlHash != "" {
+		s.ControlReceipt = &taskReceipt{Hash: attempt.ControlHash, Release: attempt.Next.Release, Outcome: outcome, Action: attempt.Action}
+	}
 }
 
 // Recover is also called on boot. A pending transaction always rolls back to
@@ -301,9 +362,7 @@ func (r *Runtime) change(ctx context.Context, state Status, attempt intent) erro
 	}
 	state.Current, state.Pending = next, nil
 	state.LastAction, state.LastResult = action, "committed"
-	if attempt.InstallHash != "" {
-		state.InstallReceipt = &installReceipt{Hash: attempt.InstallHash, Release: next.Release, Outcome: "SUCCEEDED"}
-	}
+	state.recordReceipt(attempt, "SUCCEEDED")
 	if err := r.save(state); err != nil {
 		// A rename may already have completed even when directory fsync fails.
 		return errors.Join(errUnknown, fmt.Errorf("persist Xray commit; run recover before continuing: %w", err))
@@ -336,9 +395,7 @@ func (r *Runtime) rollback(ctx context.Context, state Status) error {
 		return fmt.Errorf("ROLLBACK_FAILED: restore committed Xray selection: %w", err)
 	}
 	state.LastAction, state.LastResult = state.Pending.Action, "rolled_back"
-	if state.Pending.InstallHash != "" {
-		state.InstallReceipt = &installReceipt{Hash: state.Pending.InstallHash, Release: state.Pending.Next.Release, Outcome: "ROLLED_BACK"}
-	}
+	state.recordReceipt(*state.Pending, "ROLLED_BACK")
 	state.Pending = nil
 	if err := r.save(state); err != nil {
 		return fmt.Errorf("ROLLBACK_FAILED: persist Xray recovery: %w", err)

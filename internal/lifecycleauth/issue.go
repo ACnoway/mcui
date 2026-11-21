@@ -13,8 +13,10 @@ import (
 type installPayload struct {
 	Core            string `json:"core"`
 	Version         string `json:"version"`
-	ArtifactID      string `json:"artifact_id"`
-	ManifestVersion int64  `json:"manifest_version"`
+	ArtifactID      string `json:"artifact_id,omitempty"`
+	ManifestVersion int64  `json:"manifest_version,omitempty"`
+	Architecture    string `json:"architecture,omitempty"`
+	SHA256          string `json:"sha256,omitempty"`
 }
 
 type installTask struct {
@@ -83,12 +85,17 @@ func expectedInstallTask(request Request, requestID string) installTask {
 	if p.SchemaVersion == SignedManifestProposalVersion {
 		prefix = "xray-manifest-"
 	}
+	payload := installPayload{Core: p.Core, Version: p.Version}
+	if IsControlOperation(p.Operation) {
+		payload.Architecture, payload.SHA256 = p.Architecture, p.SHA256
+	} else {
+		payload.ArtifactID, payload.ManifestVersion = prefix+p.Architecture+"-"+p.SHA256, p.ManifestVersion
+	}
 	issued := time.Unix(request.RequestedAt, 0).UTC().Format(time.RFC3339)
 	return installTask{
 		SchemaVersion: 1, TaskID: p.TaskID, NodeID: p.NodeID, Sequence: p.Sequence, Operation: p.Operation,
 		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(request.taskExpiry(), 0).UTC().Format(time.RFC3339),
-		Payload: installPayload{Core: p.Core, Version: p.Version,
-			ArtifactID: prefix + p.Architecture + "-" + p.SHA256, ManifestVersion: p.ManifestVersion},
+		Payload:    payload,
 		ApprovalID: requestID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
 	}
 }
