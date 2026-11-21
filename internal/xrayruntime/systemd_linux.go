@@ -58,8 +58,19 @@ func (systemdService) stop(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A failed start can leave the unit failed even after systemd finishes
+	// stopping it. Clear that state before restoring the previous selection.
+	if state["MainPID"] == "0" && state["ActiveState"] == "failed" && state["SubState"] == "failed" {
+		if err := systemctl(ctx, 20*time.Second, "reset-failed", serviceUnit); err != nil {
+			return err
+		}
+		state, err = serviceState(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if state["MainPID"] != "0" || state["ActiveState"] != "inactive" || state["SubState"] != "dead" {
-		return errors.New("Xray systemd service is not stopped")
+		return fmt.Errorf("Xray systemd service is not stopped (%s/%s, PID %s)", state["ActiveState"], state["SubState"], state["MainPID"])
 	}
 	return nil
 }
