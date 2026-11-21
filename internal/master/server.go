@@ -43,6 +43,8 @@ var (
 type Server struct {
 	store          *store.Store
 	bootstrapToken string
+	singleAdmin    bool
+	proxy          *httpsProxy
 	installer      *agentInstaller
 	nodeAccess     sync.RWMutex
 	taskState      sync.Mutex
@@ -81,6 +83,8 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x := &Server{store: s, bootstrapToken: bootstrapToken, coreCatalog: corecatalog.NewClient(), mux: http.NewServeMux(), attempts: map[string]attempt{}}
 	x.mux.HandleFunc("GET /healthz", x.health)
 	x.handleAPI("POST /api/v1/bootstrap", x.bootstrap)
+	x.handleAPI("GET /api/v1/admin/setup", x.setupMode)
+	x.handleAPI("POST /api/v1/admin/setup", x.completeAdminSetup)
 	x.handleAPI("POST /api/v1/admin/login", x.login)
 	x.handleAPI("POST /api/v1/admin/logout", x.logout)
 	x.handleAPI("GET /api/v1/admin/me", x.me)
@@ -123,7 +127,13 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	return x
 }
 
-func (s *Server) Handler() http.Handler { return securityHeaders(s.mux) }
+func (s *Server) Handler() http.Handler {
+	handler := http.Handler(s.mux)
+	if s.proxy != nil {
+		handler = s.proxy.wrap(handler)
+	}
+	return securityHeaders(handler)
+}
 
 func (s *Server) ConfigureCoreCatalog(source corecatalog.Source) {
 	if source != nil {
@@ -306,6 +316,15 @@ func passwordHash(password, saltEncoded string) string {
 	return base64.RawStdEncoding.EncodeToString(h)
 }
 
+func newPasswordHash(password string) (string, error) {
+	var saltBytes [16]byte
+	if _, err := rand.Read(saltBytes[:]); err != nil {
+		return "", err
+	}
+	salt := base64.RawStdEncoding.EncodeToString(saltBytes[:])
+	return salt + ":" + passwordHash(password, salt), nil
+}
+
 func (s *Server) allowAttempt(key string) bool {
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
@@ -338,6 +357,9 @@ func (s *Server) allowAttempt(key string) bool {
 }
 
 func clientAddress(r *http.Request) string {
+	if proxy, ok := proxyRequest(r); ok && proxy.client != "" {
+		return proxy.client
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -355,33 +377,25 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if !usernamePattern.MatchString(in.Username) || len(in.Password) == 0 || len(in.Password) > 1024 || len(in.Code) != 6 {
+	if !validLoginFields(in.Username, in.Password) || (in.Code != "" && len(in.Code) != 6) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if !s.allowAttempt("login-ip:"+clientAddress(r)) || !s.allowAttempt("login-user:"+hash(strings.ToLower(in.Username))) {
+	if !s.allowLoginAttempt(r, in.Username) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
 	}
-	var a store.Admin
-	_ = s.store.View(func(st store.State) error {
-		for _, candidate := range st.Admins {
-			if candidate.Username == in.Username {
-				a = candidate
-				break
-			}
+	a, passwordOK := s.verifyAdminPassword(in.Username, in.Password)
+	if passwordOK && a.SetupPending {
+		secret, err := generateTOTPSecret()
+		if err != nil {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
 		}
-		return nil
-	})
-	parts := strings.SplitN(a.PasswordHash, ":", 2)
-	passwordOK := false
-	if len(parts) == 2 {
-		passwordOK = subtle.ConstantTimeCompare([]byte(parts[1]), []byte(passwordHash(in.Password, parts[0]))) == 1
-	} else {
-		// Keep the unknown-user path close to the real password-verification cost.
-		_ = passwordHash(in.Password, "AAECAwQFBgcICQoLDA0ODw")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "setup_required", "totp_secret": secret})
+		return
 	}
-	if !passwordOK || !validTOTP(a.TOTPSecret, in.Code, time.Now()) || a.Disabled {
+	if !passwordOK || !validTOTP(a.TOTPSecret, in.Code, time.Now()) {
 		_ = s.recordAudit("anonymous", "admin.login", "admin", in.Username, "denied")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -399,6 +413,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	session := store.Session{ID: hash(token), AdminID: a.ID, CreatedAt: now, LastSeen: now, MFAAt: now, ExpiresAt: now + int64(sessionAbsoluteLimit.Seconds()), CSRFToken: csrfToken}
 	err = s.store.Update(func(st *store.State) error {
+		current := st.Admins[a.ID]
+		if current.Disabled || current.SetupPending || current.PasswordHash != a.PasswordHash || current.TOTPSecret != a.TOTPSecret {
+			return store.ErrNotFound
+		}
 		st.Sessions[session.ID] = session
 		s.appendAudit(st, store.Audit{At: now, Actor: a.ID, Action: "admin.login", ResourceType: "admin", Resource: a.ID, Outcome: "success"})
 		return nil
@@ -407,7 +425,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "mcui_session", Value: token, Path: "/", Secure: r.TLS != nil, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(sessionAbsoluteLimit.Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: "mcui_session", Value: token, Path: "/", Secure: secureRequest(r), HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(sessionAbsoluteLimit.Seconds())})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "csrf_token": csrfToken})
 }
 
@@ -427,7 +445,8 @@ func (s *Server) adminAuth(r *http.Request) (adminContext, bool) {
 			return nil
 		}
 		admin, ok := st.Admins[ss.AdminID]
-		if !ok || admin.Disabled || ss.ExpiresAt <= now || ss.LastSeen <= 0 || now-ss.LastSeen > int64(sessionIdleLimit.Seconds()) {
+		if !ok || admin.Disabled || admin.SetupPending || (s.singleAdmin && (admin.Role != "security_admin" || !admin.AllNodes)) ||
+			ss.ExpiresAt <= now || ss.LastSeen <= 0 || now-ss.LastSeen > int64(sessionIdleLimit.Seconds()) {
 			delete(st.Sessions, id)
 			return nil
 		}
@@ -445,6 +464,9 @@ func (s *Server) adminAuth(r *http.Request) (adminContext, bool) {
 func sameOriginRequest(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin != "" {
+		if proxy, ok := proxyRequest(r); ok {
+			return origin == proxy.origin
+		}
 		scheme := "http"
 		if r.TLS != nil {
 			scheme = "https"
@@ -468,11 +490,12 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": ctx.Admin.ID, "username": ctx.Admin.Username, "role": ctx.Admin.Role,
-		"can_prepare_xray_installs": r.TLS != nil && s.taskRuntime != nil && s.taskRuntime.XrayInstallPolicy != nil && ctx.Admin.Role == "operator",
-		"can_update_runtime":        r.TLS != nil && s.runtimeUpdates != nil && ctx.Admin.Role == "security_admin",
+		"can_prepare_xray_installs": secureRequest(r) && s.taskRuntime != nil && s.taskRuntime.XrayInstallPolicy != nil && ctx.Admin.Role == "operator",
+		"can_update_runtime":        secureRequest(r) && s.runtimeUpdates != nil && ctx.Admin.Role == "security_admin",
+		"can_manage_admins":         !s.singleAdmin && ctx.Admin.Role == "security_admin",
 		"all_nodes":                 ctx.Admin.AllNodes, "node_ids": ctx.Admin.NodeIDs, "node_groups": ctx.Admin.NodeGroups,
 		"can_create_nodes":   ctx.Admin.Role == "security_admin" && (ctx.Admin.AllNodes || len(ctx.Admin.NodeGroups) > 0),
-		"can_install_agents": r.TLS != nil && s.installer != nil && ctx.Admin.Role == "security_admin",
+		"can_install_agents": secureRequest(r) && s.installer != nil && ctx.Admin.Role == "security_admin",
 		"can_disable_nodes":  ctx.Admin.Role == "security_admin" && (ctx.Admin.AllNodes || len(ctx.Admin.NodeGroups) > 0 || len(ctx.Admin.NodeIDs) > 0),
 		"csrf_token":         ctx.Session.CSRFToken, "mfa_recent": time.Now().Unix()-ctx.Session.MFAAt <= int64(sensitiveMFALimit.Seconds()),
 	})
@@ -574,6 +597,10 @@ func normalizeUnique(values []string, valid func(string) bool) ([]string, bool) 
 }
 
 func (s *Server) createAdmin(w http.ResponseWriter, r *http.Request) {
+	if s.singleAdmin {
+		http.Error(w, "delegated accounts are disabled", http.StatusForbidden)
+		return
+	}
 	ctx, ok := s.requireCSRF(w, r)
 	if !ok {
 		return
@@ -643,6 +670,10 @@ func (s *Server) createAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) disableAdmin(w http.ResponseWriter, r *http.Request) {
+	if s.singleAdmin {
+		http.Error(w, "delegated accounts are disabled", http.StatusForbidden)
+		return
+	}
 	ctx, ok := s.requireCSRF(w, r)
 	if !ok {
 		return
@@ -701,7 +732,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.appendAudit(st, store.Audit{At: time.Now().Unix(), Actor: ctx.Admin.ID, Action: "admin.logout", ResourceType: "admin", Resource: ctx.Admin.ID, Outcome: "success"})
 		return nil
 	})
-	http.SetCookie(w, &http.Cookie{Name: "mcui_session", Value: "", Path: "/", Secure: r.TLS != nil, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "mcui_session", Value: "", Path: "/", Secure: secureRequest(r), HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

@@ -29,6 +29,9 @@ GOOS=linux GOARCH=amd64 go build ./...
 GOOS=linux GOARCH=arm64 go build ./...
 node scripts/verify-protocol-vectors.mjs
 node scripts/verify-protocol-v2-vectors.mjs
+for script in scripts/*.sh deploy/agent-installer.sh deploy/master/installer.sh; do
+  bash -n "$script"
+done
 
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build

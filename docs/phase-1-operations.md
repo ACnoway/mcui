@@ -2,7 +2,7 @@
 
 本文记录当前手工部署与迁移流程。Agent 主动连接主控的 TLS 1.3 API，通过一次性安装码换取节点 Token。现有构建脚本打包 Linux amd64 和 arm64 的 Agent、只读状态 Helper 及其 systemd 单元。任务签名和 NTS 时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
 
-V1 的待实现入口包括主控一键脚本和 Compose、首次自动创建单管理员、本机默认监听与 HTTPS 反代。面板生成的一条命令将自动准备 Agent 和 Helper 的依赖、可信配置、服务和节点身份。当前版本请按下文预置证书与公钥。[主控安装目标](./project-overview-and-development-workflow.md#13-主控安装与首次登录) · [Agent 首次部署目标](./project-overview-and-development-workflow.md#41-首次部署流程)
+单管理员 Master 的 systemd、Compose、首次登录和 HTTPS 配置见[主控部署](./master-deployment.md)。Agent 当前按下文预置证书与公钥，自动准备依赖和信任材料属于[Agent 一键部署目标](./project-overview-and-development-workflow.md#41-首次部署流程)。
 
 ## 主控和批准的安装包
 

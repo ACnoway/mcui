@@ -87,6 +87,7 @@ type Admin struct {
 	NodeGroups   []string `json:"node_groups,omitempty"`
 	AllNodes     bool     `json:"all_nodes,omitempty"`
 	Disabled     bool     `json:"disabled"`
+	SetupPending bool     `json:"setup_pending,omitempty"`
 }
 
 type Node struct {

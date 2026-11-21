@@ -7,7 +7,8 @@ type StatusResult = { core?: string; load_state?: string; active_state?: string;
 type TaskAck = { status_version: number; status: string; result?: StatusResult }
 type StatusTask = { task_id: string; node_id: string; sequence: number; created_by?: string; created_at?: string; approval: string; control?: string; operation: string; core: string; issued_at: string; expires_at: string; active: boolean; lease_deadline?: string; status: string; acks: TaskAck[] }
 type ManagedAdmin = { id: string; username: string; role: string; node_ids: string[]; node_groups: string[]; disabled: boolean }
-type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean; can_update_runtime: boolean }
+type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_manage_admins: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean; can_update_runtime: boolean }
+type LoginResult = { status: 'ok'; csrf_token: string } | { status: 'setup_required'; totp_secret: string }
 type RuntimeUpdate = {
   id: string; sequence: number; version: string; architecture: string; expires_at: string; current_pair_sha256?: string
   status: 'QUEUED' | 'DELIVERED' | 'COMMITTED' | 'ROLLED_BACK' | 'REJECTED' | 'EXPIRED'
@@ -82,9 +83,12 @@ const installCommand = ref<{ node: NodeRecord; command: string; expires_at: numb
 const generatingCommand = ref(false)
 const commandCopied = ref(false)
 const bootstrapToken = ref('')
+const manualBootstrap = ref(false)
 const bootstrapUser = ref('admin')
 const bootstrapPassword = ref('')
 const bootstrapTOTP = ref('')
+const firstLoginSecret = ref('')
+const firstLoginPassword = ref('')
 const admin = ref<AdminInfo | null>(null)
 const selectedNode = ref<NodeRecord | null>(null)
 const statusCore = ref('xray')
@@ -116,7 +120,7 @@ async function apiWithStepUp<T>(path: string, body: Record<string, unknown>): Pr
   }
 }
 async function refresh() {
-  const adminRequest = admin.value?.role === 'security_admin' ? api<ManagedAdmin[]>('/api/v1/admin/admins') : Promise.resolve([] as ManagedAdmin[])
+  const adminRequest = admin.value?.can_manage_admins ? api<ManagedAdmin[]>('/api/v1/admin/admins') : Promise.resolve([] as ManagedAdmin[])
   const [nodeData, auditData, adminData] = await Promise.all([api<NodeRecord[]>('/api/v1/admin/nodes'), api<Audit[]>('/api/v1/admin/audit'), adminRequest])
   nodes.value = nodeData
   audits.value = auditData.slice(-100).reverse()
@@ -161,10 +165,58 @@ async function loadCoreCatalog(page = 1, append = false) {
 function refreshCoreCatalog() { return loadCoreCatalog(1, false) }
 function loadOlderCoreReleases() { return loadCoreCatalog(coreCatalogPage.value + 1, true) }
 async function login() {
-  loading.value = true; error.value = ''
-  try { const result = await api<{ csrf_token: string }>('/api/v1/admin/login', { method: 'POST', body: JSON.stringify({ username: username.value, password: password.value, code: code.value }) }); csrfToken = result.csrf_token; admin.value = await api<AdminInfo>('/api/v1/admin/me'); loggedIn.value = true; password.value = ''; code.value = ''; await refresh() }
-  catch (e) { error.value = e instanceof Error ? e.message : '登录失败' }
-  finally { loading.value = false }
+  loading.value = true
+  error.value = ''
+  try {
+    const result = await api<LoginResult>('/api/v1/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: username.value, password: password.value, code: code.value }),
+    })
+    if (result.status === 'setup_required') {
+      firstLoginSecret.value = result.totp_secret
+      code.value = ''
+      return
+    }
+    csrfToken = result.csrf_token
+    admin.value = await api<AdminInfo>('/api/v1/admin/me')
+    loggedIn.value = true
+    password.value = ''
+    code.value = ''
+    await refresh()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '登录失败'
+  } finally {
+    loading.value = false
+  }
+}
+function clearFirstLogin() {
+  firstLoginSecret.value = ''
+  firstLoginPassword.value = ''
+  password.value = ''
+  code.value = ''
+  error.value = ''
+}
+async function completeFirstLogin() {
+  loading.value = true
+  error.value = ''
+  try {
+    await api('/api/v1/admin/setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: username.value,
+        initial_password: password.value,
+        new_password: firstLoginPassword.value,
+        totp_secret: firstLoginSecret.value,
+        code: code.value,
+      }),
+    })
+    clearFirstLogin()
+    error.value = '密码与 MFA 已设置，请使用新密码登录'
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '首次登录设置失败'
+  } finally {
+    loading.value = false
+  }
 }
 async function bootstrap() {
   loading.value = true; error.value = ''
@@ -421,7 +473,21 @@ async function controlStatusTask(task: StatusTask, action: 'cancel' | 'skip' | '
   } catch (e) { error.value = e instanceof Error ? e.message : action === 'cancel' ? '取消任务失败' : action === 'void' ? '关闭未投递任务失败' : '跳过任务失败' }
 }
 async function logout() { try { await api('/api/v1/admin/logout', { method: 'POST', body: '{}' }) } finally { csrfToken = ''; admin.value = null; selectedNode.value = null; loggedIn.value = false; nodes.value = []; audits.value = []; tasks.value = []; xrayInstalls.value = []; xrayInstallRetry = undefined; managedAdmins.value = []; createdTOTP.value = ''; installCommand.value = null } }
-onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/me'); csrfToken = admin.value.csrf_token; await refresh(); loggedIn.value = true } catch { loggedIn.value = false } })
+onMounted(async () => {
+  try {
+    admin.value = await api<AdminInfo>('/api/v1/admin/me')
+    csrfToken = admin.value.csrf_token
+    await refresh()
+    loggedIn.value = true
+  } catch {
+    loggedIn.value = false
+    try {
+      manualBootstrap.value = (await api<{ manual_bootstrap: boolean }>('/api/v1/admin/setup')).manual_bootstrap
+    } catch {
+      manualBootstrap.value = false
+    }
+  }
+})
 </script>
 
 <template>
@@ -429,8 +495,22 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
     <header class="topbar"><div><span class="eyebrow">MCUI / CONTROL PLANE</span><h1>节点管理</h1></div><button v-if="loggedIn" class="quiet" @click="logout">退出登录</button></header>
     <p v-if="error" class="notice">{{ error }}</p>
     <section v-if="!loggedIn" class="auth-grid">
-      <form class="card" @submit.prevent="login"><span class="eyebrow">ADMIN ACCESS</span><h2>管理员登录</h2><label>用户名<input v-model="username" autocomplete="username" required /></label><label>密码<input v-model="password" type="password" autocomplete="current-password" required /></label><label>Authenticator 验证码<input v-model="code" inputmode="numeric" autocomplete="one-time-code" minlength="6" maxlength="6" required /></label><button :disabled="loading">登录</button></form>
-      <form class="card secondary" @submit.prevent="bootstrap"><span class="eyebrow">FIRST RUN ONLY</span><h2>初始化安全管理员</h2><p>仅在服务端设置 MCUI_BOOTSTRAP_TOKEN 后可用。</p><label>初始化令牌<input v-model="bootstrapToken" type="password" required /></label><label>用户名<input v-model="bootstrapUser" required /></label><label>密码（至少 12 位）<input v-model="bootstrapPassword" type="password" minlength="12" required /></label><label>TOTP 密钥（Base32）<input v-model="bootstrapTOTP" autocomplete="off" required /></label><button class="outline" :disabled="loading">创建管理员</button></form>
+      <form v-if="firstLoginSecret" class="card" @submit.prevent="completeFirstLogin">
+        <h2>设置管理员密码和 MFA</h2>
+        <label>新密码（至少 12 位）<input v-model="firstLoginPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required /></label>
+        <label>把此密钥添加到身份验证器<input :value="firstLoginSecret" readonly autocomplete="off" /></label>
+        <label>身份验证器验证码<input v-model="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required /></label>
+        <button :disabled="loading">保存设置</button>
+        <button class="outline" type="button" :disabled="loading" @click="clearFirstLogin">返回登录</button>
+      </form>
+      <form v-else class="card" @submit.prevent="login">
+        <h2>管理员登录</h2>
+        <label>用户名<input v-model="username" autocomplete="username" required /></label>
+        <label>密码<input v-model="password" type="password" autocomplete="current-password" required /></label>
+        <label>身份验证器验证码（首次登录可留空）<input v-model="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" /></label>
+        <button :disabled="loading">登录</button>
+      </form>
+      <form v-if="manualBootstrap && !firstLoginSecret" class="card secondary" @submit.prevent="bootstrap"><h2>初始化安全管理员</h2><label>初始化令牌<input v-model="bootstrapToken" type="password" required /></label><label>用户名<input v-model="bootstrapUser" required /></label><label>密码（至少 12 位）<input v-model="bootstrapPassword" type="password" minlength="12" required /></label><label>TOTP 密钥（Base32）<input v-model="bootstrapTOTP" autocomplete="off" required /></label><button class="outline" :disabled="loading">创建管理员</button></form>
     </section>
     <template v-else>
       <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => nodeStatus(n) === '在线').length }}</strong></div><div class="metric"><span>当前阶段</span><strong>03 / CORE LIFECYCLE</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
@@ -534,7 +614,7 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
         </div>
       </section>
       <section class="card"><span class="eyebrow">AUDIT TRAIL</span><h2>安全事件</h2><div v-for="(event, i) in audits" :key="i" class="audit-row"><time>{{ new Date(event.at*1000).toLocaleString() }}</time><span>{{ event.action }}</span><small>{{ event.outcome }}</small></div><p v-if="!audits.length" class="empty">暂无事件</p></section>
-      <section v-if="admin?.role === 'security_admin'" class="admin-grid">
+      <section v-if="admin?.can_manage_admins" class="admin-grid">
         <form class="card" @submit.prevent="createAdmin"><span class="eyebrow">SCOPED ACCESS</span><h2>开通范围账号</h2><p>仅创建节点范围受限的审计员或运维员。运维员可创建只读状态查询任务；范围不可超出当前安全管理员的授权。</p><label>用户名<input v-model="newAdminUsername" autocomplete="off" required /></label><label>初始密码（至少 12 位）<input v-model="newAdminPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label>角色<select v-model="newAdminRole"><option value="auditor">审计员</option><option value="operator">运维员（只读状态查询）</option></select></label><label>节点组范围<input v-model="newAdminGroups" placeholder="west, east" autocomplete="off" /></label><label>节点 ID 范围<input v-model="newAdminNodeIDs" placeholder="node-…" autocomplete="off" /></label><button :disabled="loading">创建范围账号</button><p v-if="createdTOTP" class="invite">一次性 TOTP 密钥：{{ createdTOTP }}<br />请通过可信渠道交给该账号持有人；此页面退出后不再显示。</p></form>
         <section class="card"><span class="eyebrow">ADMIN ACCOUNTS</span><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
       </section>

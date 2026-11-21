@@ -116,7 +116,7 @@ func (s *Server) createInstallCommand(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if !security.ValidNodeID(node.ID) || r.TLS == nil || s.installer == nil {
+	if !security.ValidNodeID(node.ID) || !secureRequest(r) || s.installer == nil {
 		http.Error(w, "Agent installer unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -164,7 +164,7 @@ func (s *Server) createInstallCommand(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil {
+	if !secureRequest(r) {
 		http.Error(w, "HTTPS required", http.StatusUpgradeRequired)
 		return
 	}
@@ -228,7 +228,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authenticateNode(r *http.Request) (store.Node, bool) {
 	var node store.Node
 	auth := r.Header.Values("Authorization")
-	if r.TLS == nil || len(auth) != 1 {
+	if !secureRequest(r) || len(auth) != 1 {
 		return node, false
 	}
 	scheme, token, ok := strings.Cut(auth[0], " ")

@@ -66,7 +66,7 @@ func (s *Server) xrayInstallAccess(w http.ResponseWriter, r *http.Request) (admi
 		http.NotFound(w, r)
 		return ctx, nil, false
 	}
-	if r.TLS == nil || s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil {
+	if !secureRequest(r) || s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil {
 		http.Error(w, "Xray install requires HTTPS and a configured task runtime and authorization policy", http.StatusServiceUnavailable)
 		return ctx, nil, false
 	}

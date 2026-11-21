@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Server) serveXrayBackup(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil {
+	if !secureRequest(r) {
 		http.Error(w, "TLS required", http.StatusUpgradeRequired)
 		return
 	}

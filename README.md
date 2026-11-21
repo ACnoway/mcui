@@ -13,9 +13,9 @@ The first delivery validates this workflow on Xray with a real client connection
 
 ## Current stage
 
-The current development build supports manual bootstrap, direct TLS, scoped accounts, and Agent enrollment with pre-provisioned trust. Phase 2 delivered signed, read-only status tasks, Token-authenticated pull and ACK, durable intake, and a restricted Helper socket. [Phase 0/1 status](docs/phase-0-1-implementation.md) · [Phase 2 progress](docs/phase-2-progress.md)
+The Master can be built as a systemd installer or a Compose image with local access by default. Both paths initialize a single administrator with mandatory password change and MFA enrollment. Direct TLS and a configured HTTPS reverse proxy support public access. The development build also supports manual bootstrap, scoped accounts, and Agent enrollment with pre-provisioned trust. [Master deployment](docs/master-deployment.md) · [Phase 0/1 status](docs/phase-0-1-implementation.md)
 
-Phase 3 adds the official Core release catalog, a backup cache, signed Xray lifecycle tasks through a manual signing workflow, and paired Agent/Helper updates with rollback. A single Master supports the remote workflows with Cloudflare NTS and an optional independent rollback checkpoint. Xray currently uses an empty bootstrap configuration for lifecycle tests. The deployment target above, a real proxy connection, and production release acceptance are pending. [Phase 3 progress](docs/phase-3-progress.md) · [Single-host recovery](docs/phase-2-operations.md#单机运行与备份恢复) · [Production release](docs/phase-3-release.md#生产发布验收)
+Phase 3 adds the official Core release catalog, a backup cache, signed Xray lifecycle tasks through a manual signing workflow, and paired Agent/Helper updates with rollback. A single Master supports the remote workflows with Cloudflare NTS and an optional independent rollback checkpoint. Xray uses an empty bootstrap configuration for lifecycle tests. Release publication, automatic Agent trust provisioning, panel-driven Xray signing, and a real proxy connection are pending. [Phase 3 progress](docs/phase-3-progress.md) · [Single-host recovery](docs/phase-2-operations.md#单机运行与备份恢复) · [Production release](docs/phase-3-release.md#生产发布验收)
 
 ## Development checks
 

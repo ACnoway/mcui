@@ -1,0 +1,23 @@
+services:
+  master:
+    image: ${MCUI_MASTER_IMAGE:?Set MCUI_MASTER_IMAGE to a versioned MCUI Master image}
+    ports:
+      - "127.0.0.1:${MCUI_MASTER_PORT:-8080}:8080"
+    environment:
+      MCUI_PUBLIC_URL: ${MCUI_PUBLIC_URL:-}
+      MCUI_HTTPS_PROXY_PEER: ${MCUI_HTTPS_PROXY_PEER:-}
+      MCUI_AGENT_INSTALLER_URL: ${MCUI_AGENT_INSTALLER_URL:-}
+      MCUI_AGENT_INSTALLER_SHA256: ${MCUI_AGENT_INSTALLER_SHA256:-}
+    volumes:
+      - master-data:/var/lib/mcui-master
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  master-data:

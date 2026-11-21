@@ -917,7 +917,7 @@ func (s *Server) acknowledgeTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 	s.nodeAccess.RLock()
 	defer s.nodeAccess.RUnlock()
-	if r.TLS == nil {
+	if !secureRequest(r) {
 		http.Error(w, "TLS required", http.StatusUpgradeRequired)
 		return
 	}

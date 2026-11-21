@@ -89,7 +89,7 @@ func (s *Server) createRuntimeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	policy := s.runtimeUpdates
-	if r.TLS == nil || policy == nil {
+	if !secureRequest(r) || policy == nil {
 		http.Error(w, "remote runtime update unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -190,7 +190,7 @@ func (s *Server) listRuntimeUpdates(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if r.TLS == nil || s.runtimeUpdates == nil {
+	if !secureRequest(r) || s.runtimeUpdates == nil {
 		http.Error(w, "remote runtime update unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -223,7 +223,7 @@ func (s *Server) listRuntimeUpdates(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runtimeSupervisor(r *http.Request) (string, bool) {
 	node := r.PathValue("node")
-	if r.TLS == nil || s.runtimeUpdates == nil || !security.ValidNodeID(node) {
+	if !secureRequest(r) || s.runtimeUpdates == nil || !security.ValidNodeID(node) {
 		return "", false
 	}
 	headers := r.Header.Values("Authorization")

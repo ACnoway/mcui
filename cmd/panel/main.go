@@ -27,12 +27,17 @@ import (
 )
 
 func main() {
-	addr := flag.String("listen", "127.0.0.1:8080", "listen address; without TLS, loopback only")
+	addr := flag.String("listen", envOr("MCUI_LISTEN", "127.0.0.1:8080"), "listen address; without TLS, loopback by default")
 	dbPath := flag.String("db", "./data/mcui.db", "SQLite database path")
 	webDir := flag.String("web", "./web/dist", "built web assets directory")
-	tlsCertPath := flag.String("tls-cert", "", "Master HTTPS certificate PEM")
-	tlsKeyPath := flag.String("tls-key", "", "Master HTTPS private key PEM")
-	publicURL := flag.String("public-url", os.Getenv("MCUI_PUBLIC_URL"), "public HTTPS Master origin in Agent install commands")
+	tlsCertPath := flag.String("tls-cert", os.Getenv("MCUI_TLS_CERT"), "Master HTTPS certificate PEM")
+	tlsKeyPath := flag.String("tls-key", os.Getenv("MCUI_TLS_KEY"), "Master HTTPS private key PEM")
+	publicURL := flag.String("public-url", os.Getenv("MCUI_PUBLIC_URL"), "public HTTPS Master origin for the proxy and Agent install commands")
+	proxyPeer := flag.String("https-proxy-peer", os.Getenv("MCUI_HTTPS_PROXY_PEER"), "exact IP of the trusted HTTPS reverse proxy")
+	containerHTTP := flag.Bool("container-http", false, "allow HTTP on the isolated Compose network")
+	singleAdmin := flag.Bool("single-admin", false, "enable single-admin deployment and initialize a fresh database")
+	initAdminOnly := flag.Bool("init-admin-only", false, "prepare a single administrator locally and exit")
+	recoverAdmin := flag.Bool("recover-initial-admin", false, "rotate the initial password of a pending administrator locally and exit")
 	installerURL := flag.String("agent-installer-url", os.Getenv("MCUI_AGENT_INSTALLER_URL"), "approved Agent installer HTTPS URL")
 	installerDigest := flag.String("agent-installer-sha256", os.Getenv("MCUI_AGENT_INSTALLER_SHA256"), "approved Agent installer SHA-256 digest")
 	coreBackupDir := flag.String("core-backup-dir", "./data/core-backups", "directory for one latest stable Core backup per official project")
@@ -46,13 +51,24 @@ func main() {
 	checkpointConfig := registerTaskCheckpointFlags()
 	flag.Parse()
 	usingTLS := *tlsCertPath != "" || *tlsKeyPath != ""
+	usingProxy := *proxyPeer != ""
+	if *initAdminOnly && *recoverAdmin {
+		log.Fatal("choose either -init-admin-only or -recover-initial-admin")
+	}
+	if (*initAdminOnly || *recoverAdmin) && checkpointConfig.enabled() {
+		log.Fatal("offline administrator setup cannot open a checkpoint-coordinated database")
+	}
 	if usingTLS && (*tlsCertPath == "" || *tlsKeyPath == "") {
 		log.Fatal("TLS mode requires -tls-cert and -tls-key")
 	}
-	if !usingTLS && !loopbackListen(*addr) {
-		log.Fatal("HTTP mode is development-only and must listen on loopback")
+	if usingTLS && usingProxy {
+		log.Fatal("choose either direct TLS or the trusted HTTPS proxy")
 	}
-	if (*xrayInstallPolicyPath != "" || *runtimeUpdatePolicyPath != "") && (!usingTLS || *taskDBPath == "") {
+	if !usingTLS && !usingProxy && !*containerHTTP && !loopbackListen(*addr) {
+		log.Fatal("plain HTTP must listen on loopback outside the isolated Compose network")
+	}
+	secureTransport := usingTLS || usingProxy
+	if (*xrayInstallPolicyPath != "" || *runtimeUpdatePolicyPath != "") && (!secureTransport || *taskDBPath == "") {
 		log.Fatal("remote Xray and runtime updates require Master HTTPS and -task-db")
 	}
 	var tlsConfig *tls.Config
@@ -75,7 +91,7 @@ func main() {
 	var s *store.Store
 	var err error
 	if checkpointConfig.enabled() {
-		if *taskDBPath == "" || !usingTLS {
+		if *taskDBPath == "" || !secureTransport {
 			log.Fatal("task checkpoint requires -task-db and Master HTTPS")
 		}
 		if err = checkpointConfig.validate(); err != nil {
@@ -88,14 +104,22 @@ func main() {
 		}
 		defer closeCheckpoint()
 		s, err = store.OpenExisting(*dbPath)
+	} else if *recoverAdmin {
+		s, err = store.OpenExisting(*dbPath)
 	} else {
-		_ = os.MkdirAll(filepath.Dir(*dbPath), 0700)
+		if err = os.MkdirAll(filepath.Dir(*dbPath), 0700); err != nil {
+			log.Fatalf("create panel database directory: %v", err)
+		}
 		s, err = store.Open(*dbPath)
 	}
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer s.Close()
+	if *initAdminOnly || *recoverAdmin {
+		prepareAdmin(s, *recoverAdmin)
+		return
+	}
 	var xrayInstallPolicy *lifecycleauth.Policy
 	if *xrayInstallPolicyPath != "" {
 		xrayInstallPolicy, err = readXrayInstallPolicy(*xrayInstallPolicyPath)
@@ -104,8 +128,16 @@ func main() {
 		}
 	}
 	srv := master.New(s, os.Getenv("MCUI_BOOTSTRAP_TOKEN"), *webDir)
-	if *publicURL != "" || *installerURL != "" || *installerDigest != "" {
-		if !usingTLS {
+	if *singleAdmin {
+		srv.EnableSingleAdmin()
+	}
+	if usingProxy {
+		if err := srv.ConfigureHTTPSProxy(*publicURL, *proxyPeer); err != nil {
+			log.Fatalf("configure HTTPS proxy: %v", err)
+		}
+	}
+	if *installerURL != "" || *installerDigest != "" {
+		if !secureTransport {
 			log.Fatal("Agent install commands require Master HTTPS")
 		}
 		if err := srv.ConfigureAgentInstaller(*publicURL, *installerURL, *installerDigest); err != nil {
@@ -168,12 +200,58 @@ func main() {
 		}
 	}
 	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, TLSConfig: tlsConfig}
+	listener, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	if *singleAdmin {
+		prepareAdmin(s, false)
+	}
+	if err := notifyReady(); err != nil {
+		log.Fatalf("notify systemd readiness: %v", err)
+	}
 	if usingTLS {
 		log.Printf("mcui Master listening with TLS 1.3 on %s", *addr)
-		log.Fatal(httpServer.ListenAndServeTLS("", ""))
+		log.Fatal(httpServer.ServeTLS(listener, "", ""))
 	}
-	log.Printf("mcui development Master listening on loopback HTTP %s; Agent enrollment is unavailable", *addr)
-	log.Fatal(httpServer.ListenAndServe())
+	if usingProxy {
+		log.Printf("mcui Master listening for the configured HTTPS proxy on %s", *addr)
+	} else {
+		log.Printf("mcui Master listening on local HTTP %s; Agent enrollment is unavailable", *addr)
+	}
+	log.Fatal(httpServer.Serve(listener))
+}
+
+func notifyReady() error {
+	socket := os.Getenv("NOTIFY_SOCKET")
+	if socket == "" {
+		return nil
+	}
+	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: socket, Net: "unixgram"})
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.Write([]byte("READY=1"))
+	return err
+}
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func prepareAdmin(s *store.Store, recoverPending bool) {
+	username, password, err := master.PrepareSingleAdmin(s, recoverPending)
+	if err != nil {
+		log.Fatalf("prepare administrator: %v", err)
+	}
+	if username != "" {
+		fmt.Printf("MCUI initial administrator\nUsername: %s\nPassword: %s\n", username, password)
+	}
 }
 
 func readRuntimeUpdatePolicy(path string) (master.RuntimeUpdatePolicy, error) {
