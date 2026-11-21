@@ -18,6 +18,7 @@ import (
 	"github.com/ACnoway/mcui/internal/agenttasks"
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
+	"github.com/ACnoway/mcui/internal/runtimehealth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/taskauth"
 	"github.com/ACnoway/mcui/internal/taskledger"
@@ -102,6 +103,14 @@ func main() {
 	if nodeID == "" {
 		log.Fatal("no node identity; run the installation command first")
 	}
+	managed := runtimehealth.Managed()
+	trial, err := runtimehealth.Trial()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if managed && (*taskKeyID == "" || *taskPublicKeyPath == "") {
+		log.Fatal("managed runtime requires the task ledger and Helper configuration")
+	}
 	installEnabled := *installKeyID != "" || *installKeyPath != "" || *releaseKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
 	signedManifest := *releaseKeyPath != ""
 	if installEnabled && (*installKeyID == "" || *installKeyPath == "" || *taskKeyID == "" ||
@@ -120,7 +129,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("parse task public key: %v", err)
 		}
-		ledger, err := openTaskLedger(*taskLedgerPath, false)
+		openLedger := taskledger.Open
+		if trial {
+			openLedger = taskledger.OpenIdle
+		}
+		ledger, err := openLedger(*taskLedgerPath)
 		if err != nil {
 			log.Fatalf("open Agent task ledger: %v", err)
 		}
@@ -192,6 +205,26 @@ func main() {
 			return agentTaskHandler{runner: runner}, nil
 		}); err != nil {
 			log.Fatalf("configure status-task runtime: %v", err)
+		}
+		if managed {
+			if err := client.CheckRuntimeIdentity(); err != nil {
+				log.Fatal(err)
+			}
+			probe, ok := executor.(interface {
+				ProbeRuntime(context.Context, string) error
+			})
+			if !ok {
+				log.Fatal("managed runtime requires the Linux Helper socket")
+			}
+			if err := probe.ProbeRuntime(context.Background(), nodeID); err != nil {
+				log.Fatal(err)
+			}
+			if err := runtimehealth.NotifyReady(); err != nil {
+				log.Fatal(err)
+			}
+			if err := runtimehealth.WaitForCommit(); err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 	for {

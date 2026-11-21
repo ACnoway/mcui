@@ -65,6 +65,18 @@ func (c *Client) NodeID() (string, error) {
 	return state.NodeID, err
 }
 
+// CheckRuntimeIdentity validates the stored enrollment without changing it.
+func (c *Client) CheckRuntimeIdentity() error {
+	state, err := c.load()
+	if err != nil {
+		return err
+	}
+	if state.NodeToken == "" {
+		return errors.New("runtime requires an enrolled Agent identity")
+	}
+	return nil
+}
+
 func (c *Client) load() (localState, error) {
 	var state localState
 	dir, err := os.Lstat(filepath.Dir(c.statePath))

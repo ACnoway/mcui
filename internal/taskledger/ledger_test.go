@@ -105,6 +105,38 @@ func TestInitializeAndOpenFailClosed(t *testing.T) {
 	}
 }
 
+func TestOpenIdleDoesNotRecoverAnInterruptedTask(t *testing.T) {
+	path := filepath.Join(privateDir(t), "ledger.db")
+	l, err := Initialize(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0)
+	task := Task{ID: "attempt", Sequence: 1, Envelope: []byte("signed"), NotBefore: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute)}
+	if _, err := l.Accept(task, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Start(1, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := OpenIdle(path); err == nil {
+		l.Close()
+		t.Fatal("trial opened an active task ledger")
+	}
+	l, err = connect(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	persisted, err := l.Get(1)
+	if err != nil || persisted.State != Running {
+		t.Fatalf("trial changed the existing task: %+v, %v", persisted, err)
+	}
+}
+
 func TestConsumeVoidPersistsCancellationTombstoneAndAdvancesSequence(t *testing.T) {
 	path := filepath.Join(privateDir(t), "void.db")
 	l, err := Initialize(path)

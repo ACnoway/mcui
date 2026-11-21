@@ -56,6 +56,16 @@ func Initialize(path string) (*Ledger, error) {
 
 // Open requires an existing initialized ledger, and does not recreate it.
 func Open(path string) (*Ledger, error) {
+	return open(path, false)
+}
+
+// OpenIdle validates the existing schema and requires an empty current slot.
+// A trial runtime must not recover a running task or start new work.
+func OpenIdle(path string) (*Ledger, error) {
+	return open(path, true)
+}
+
+func open(path string, idle bool) (*Ledger, error) {
 	l, err := connect(path)
 	if err != nil {
 		return nil, err
@@ -95,6 +105,14 @@ func Open(path string) (*Ledger, error) {
 	if err != nil || badCancels != 0 {
 		l.Close()
 		return nil, fmt.Errorf("invalid cancellation state: %v", err)
+	}
+	if idle {
+		var pending int
+		if err := l.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE seq=?`, next).Scan(&pending); err != nil || pending != 0 {
+			l.Close()
+			return nil, fmt.Errorf("runtime update requires an idle Agent task ledger: %v", err)
+		}
+		return l, nil
 	}
 	// The lifetime lock excludes a live worker before recovery fences its state.
 	if _, err = l.db.Exec(`UPDATE tasks SET state='NEEDS_RECONCILIATION' WHERE state='RUNNING'`); err != nil {

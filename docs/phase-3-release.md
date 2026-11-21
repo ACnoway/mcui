@@ -11,7 +11,7 @@
 ## 2. 取件核验和发布
 
 1. 每个版本和架构核对一次。记录官方地址、文件名、长度和 SHA-256，与上游公布的摘要比对（如有）。检查归档成员、可执行文件架构和许可证，关联相应的构建或运行结果。上游有可验证签名时核验并记录结果。
-2. 构建 MCUI 自身更新包可使用现有 `bash scripts/build-runtime-release.sh NEW_DIRECTORY`。同一架构的 Agent 和 Helper 作为一个 ZIP 发布，取件记录关联源码提交和构建结果。
+2. 构建 MCUI 自身更新包可使用现有 `bash scripts/build-runtime-release.sh NEW_DIRECTORY`。同一架构的 Agent 和 Helper 作为一个 ZIP 发布，取件记录关联源码提交和构建结果。供成对监督器使用的清单只包含 `mcui-runtime` 条目，由运行时专用发布密钥签署。节点授权使用另一把密钥。[成对更新手册](./phase-3-runtime-update.md)
 3. 将通过核验的条目填入[清单格式](./agent-technical-design-v1.0.md#62-制品清单最小字段)。发布时递增 `manifest_version`（正整数，最大值为 9007199254740991），设置 RFC 3339 `expires_at`。组件为 `xray`、`sing-box`、`mita` 或 `mcui-runtime`，操作系统为 `linux`，架构为 `amd64` 或 `arm64`。源标识分别为 `github:XTLS/Xray-core`、`github:SagerNet/sing-box`、`github:enfein/mieru` 和 `github:ACnoway/mcui`。ID 为 `<组件>-<架构>-<小写SHA256>`，其中 Xray 使用前缀 `xray-manifest-`。上游制品的 `build_options` 为 `upstream-prebuilt`，已核验签名记为 `verified`，确认未提供签名记为 `not-provided`。MCUI ZIP 使用 `mcui-build:<40位源码提交SHA>` 与 `not-applicable`，文件名为 `mcui-runtime-linux-<架构>.zip`。
 4. 用发布私钥对 `manifest.json` 的原始字节签名，将 64 字节 Ed25519 分离签名写入 `manifest.json.sig`。使用节点预置公钥复验后发布这两个文件。撤销制品时在下一版清单移除相应条目，`artifacts: []` 可一次撤销所有制品。
 
@@ -92,7 +92,7 @@ mkdir signed
 
 #### Agent/Helper 更新制品
 
-`bash scripts/build-runtime-release.sh NEW_DIRECTORY` 从同一源码构建两架构的 Agent/Helper ZIP，并生成 `SHA256SUMS`。每个 ZIP 只含该架构的 `mcui-agent` 和 `mcui-helper`。如需签署候选制品，对各架构核验源码、构建、长度和散列，将 `version`、`architecture`、`length`、`sha256`、`review_id` 写成 JSON 数组，通过 `prepare -role runtime-targets -input INVENTORY` 准备元数据，再由独立保管人签名。组装工具核验版本、架构、固定路径和专用委派。自动切换、服务健康监督、旧版恢复和远程更新通道仍待实现。
+`bash scripts/build-runtime-release.sh NEW_DIRECTORY` 从同一源码构建两架构的 Agent/Helper ZIP，并生成 `SHA256SUMS`。每个 ZIP 只含该架构的 `mcui-agent` 和 `mcui-helper`。如需复现历史 TUF 签发，对各架构核验源码、构建、长度和散列，将 `version`、`architecture`、`length`、`sha256`、`review_id` 写成 JSON 数组，通过 `prepare -role runtime-targets -input INVENTORY` 准备元数据，再由独立保管人签名。现有成对监督器使用独立的单签清单及节点更新授权。
 
 在签好的三个 targets 文件上生成 snapshot，并用 snapshot 单用途密钥签名。然后按同样步骤生成 timestamp 并用 timestamp 单用途密钥签名。
 

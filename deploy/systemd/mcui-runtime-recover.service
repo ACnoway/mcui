@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore the committed MCUI Agent and Helper pair
+Before=mcui-agent.service mcui-helper.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mcui-runtime boot-recover
+TimeoutStartSec=45s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mcui-runtime
+RestrictAddressFamilies=AF_UNIX

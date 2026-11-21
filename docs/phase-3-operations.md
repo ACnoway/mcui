@@ -70,11 +70,11 @@ mcui-xray recover
 2. 开始一次版本切换。在事务意图及候选切换已落盘、提交候选前，对事务进程发送 `SIGKILL`。
 3. 重新启动恢复流程。Xray 可执行 `mcui-xray recover`，或通过 systemd 启动 `mcui-xray-recover.service`。确认最后一次成功提交的版本、摘要和运行状态恢复，未决事务清除。重复运行恢复入口应得到相同状态。
 
-本地 Xray 已通过切指针后中断和恢复。Agent/Helper 自身更新实现后，使用其启动监督入口演练同样的中断场景，核对原来的两个服务、账本与节点身份。[已执行检查](./phase-3-progress.md#已执行检查)
+本地 Xray 已通过切指针后中断和恢复。Agent/Helper 的同类测试通过其成对启动监督入口执行，核对原来的两个服务、账本与节点身份。[成对更新](./phase-3-runtime-update.md) · [已执行检查](./phase-3-progress.md#已执行检查)
 
 ## 4. Agent 和 Helper 本地人工修复
 
-独立签名、自身更新监督、状态兼容验证与自动回滚仍待实现。已部署的 Agent 或 Helper 无法启动时，可使用部署前由独立渠道核验并留存的上一版二进制和配套 unit 进行带外修复。先确认旧版可读取目前账本、节点身份和协议版本。兼容性未知或账本已损坏时暂停，按阶段 2 的状态恢复流程核验。
+已纳入成对监督的节点使用 `mcui-runtime repair` 恢复中断事务，或按[成对更新手册](./phase-3-runtime-update.md#启动检查与回退)试运行上一次提交的版本。沿用原部署的 Agent 或 Helper 无法启动时，可使用部署前由独立渠道核验并留存的上一版二进制和配套 unit 进行带外修复。先确认旧版可读取目前账本、节点身份和协议版本。兼容性未知或账本已损坏时暂停，按阶段 2 的状态恢复流程核验。
 
 1. 停止 `mcui-agent.service` 和 `mcui-helper.service`，保护并保存本地配置、信任材料、版本信息和两份状态目录。
 2. 核对备份二进制和 unit 的审核记录及 SHA-256。将 `mcui-agent` 和 `mcui-helper` 安装为 `root:root`、`0755`，恢复对应 unit 与 drop-in，执行 `systemctl daemon-reload`。

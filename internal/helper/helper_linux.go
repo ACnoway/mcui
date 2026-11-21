@@ -39,10 +39,11 @@ type StatusCheckpoint interface {
 }
 
 type Config struct {
-	NodeID     string
-	AllowedUID uint32
-	Keys       map[string]TrustedKey
-	Now        func() time.Time
+	NodeID         string
+	AllowedUID     uint32
+	RuntimeManaged bool
+	Keys           map[string]TrustedKey
+	Now            func() time.Time
 	// TrustedTimeHealthy must report the health of an independently monitored time source.
 	TrustedTimeHealthy func() bool
 	ReadStatus         func(unit string) (string, error)
@@ -128,6 +129,20 @@ func Open(path string, c Config) (*Helper, error) {
 		return nil, e
 	}
 	return h, nil
+}
+
+// CheckRuntimeIdle rejects a trial update with a locally unresolved action.
+func (h *Helper) CheckRuntimeIdle() error {
+	state, err := h.load()
+	if err != nil {
+		return err
+	}
+	for _, record := range state.Records {
+		if record.Pending {
+			return ErrReconciliation
+		}
+	}
+	return nil
 }
 func openDir(path string, c Config) (*Helper, error) {
 	if os.Geteuid() != 0 || c.NodeID == "" || c.Now == nil || (c.ReadStatus == nil && c.ReadStatusAt == nil) || len(c.Keys) == 0 {

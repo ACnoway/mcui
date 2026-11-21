@@ -23,6 +23,7 @@ import (
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/helper"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
+	"github.com/ACnoway/mcui/internal/runtimehealth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/trustedtime"
 	"github.com/ACnoway/mcui/internal/xrayruntime"
@@ -95,6 +96,7 @@ func main() {
 	installEnabled := *installKeyID != "" || *installKeyPath != "" || *releaseKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
 	signedManifest := *releaseKeyPath != ""
 	config := helper.Config{
+		RuntimeManaged:     runtimehealth.Managed(),
 		NodeID:             *nodeID,
 		AllowedUID:         uint32(allowedUID),
 		Keys:               map[string]helper.TrustedKey{*taskKeyID: {PublicKey: publicKey, Purpose: "task"}},
@@ -189,6 +191,13 @@ func main() {
 	defer instance.Close()
 	if *check {
 		return
+	}
+	if trial, err := runtimehealth.Trial(); err != nil {
+		log.Fatal(err)
+	} else if trial {
+		if err := instance.CheckRuntimeIdle(); err != nil {
+			log.Fatalf("open trial Helper ledger: %v", err)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

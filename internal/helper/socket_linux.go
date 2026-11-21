@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/runtimehealth"
 	"golang.org/x/sys/unix"
 )
 
@@ -25,6 +26,7 @@ type socketRequest struct {
 	LeaseID          string          `json:"lease_id,omitempty"`
 	Task             json.RawMessage `json:"task"`
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
+	Probe            bool            `json:"probe,omitempty"`
 }
 
 type socketResponse struct {
@@ -75,6 +77,11 @@ func (h *Helper) RunSocket(ctx context.Context, path string, groupID uint32) err
 			_ = os.Remove(path)
 		}
 	}()
+	if h.cfg.RuntimeManaged {
+		if err := runtimehealth.NotifyReady(); err != nil {
+			return err
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -122,12 +129,30 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var request socketRequest
-	if err := decoder.Decode(&request); err != nil || len(request.Task) == 0 || request.ReconcileInstall == (request.LeaseID != "") {
+	if err := decoder.Decode(&request); err != nil {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
 	var trailing any
 	if decoder.Decode(&trailing) != io.EOF {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+	}
+	if request.Probe {
+		if !h.cfg.RuntimeManaged || len(request.Task) != 0 || request.LeaseID != "" || request.ReconcileInstall || h.authorizePeer(conn) != nil {
+			return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+		}
+		result, err := json.Marshal(map[string]any{"node_id": h.cfg.NodeID, "protocol": runtimehealth.Protocol})
+		if err != nil {
+			return err
+		}
+		return h.writeSocketResponse(conn, socketResponse{Result: result})
+	}
+	if len(request.Task) == 0 || request.ReconcileInstall == (request.LeaseID != "") {
+		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+	}
+	if h.cfg.RuntimeManaged {
+		if trial, err := runtimehealth.Trial(); err != nil || trial {
+			return h.writeSocketResponse(conn, socketResponse{ErrorCode: "helper_unavailable"})
+		}
 	}
 	var result string
 	var err error

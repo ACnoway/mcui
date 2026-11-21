@@ -6,8 +6,6 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
-	"debug/elf"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +13,7 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/ACnoway/mcui/internal/checkedasset"
 	"golang.org/x/sys/unix"
 )
 
@@ -48,7 +47,7 @@ func extract(ctx context.Context, archive string, release Release, length int64,
 	if written != length || fmt.Sprintf("%x", hash.Sum(nil)) != release.SHA256 {
 		return fmt.Errorf("Xray artifact SHA-256 or length mismatch")
 	}
-	if err := boundZIPDirectory(file, length); err != nil {
+	if err := checkedasset.ZIP32Directory(file, length, 3, 5); err != nil {
 		return err
 	}
 	reader, err := zip.NewReader(file, length)
@@ -84,29 +83,6 @@ func extract(ctx context.Context, archive string, release Release, length int64,
 		return err
 	}
 	return writeNew(filepath.Join(stage, "config.json"), []byte(bootstrapConfig), 0444)
-}
-
-// Require a bounded, single-disk ZIP32 directory before archive/zip allocates
-// memory for entries. Official Linux archives do not need ZIP64 or ZIP comments.
-func boundZIPDirectory(file *os.File, length int64) error {
-	var end [22]byte
-	if length < int64(len(end)) {
-		return fmt.Errorf("Xray ZIP is truncated")
-	}
-	offset := length - int64(len(end))
-	if _, err := file.ReadAt(end[:], offset); err != nil {
-		return err
-	}
-	count := binary.LittleEndian.Uint16(end[10:12])
-	size := int64(binary.LittleEndian.Uint32(end[12:16]))
-	start := int64(binary.LittleEndian.Uint32(end[16:20]))
-	if string(end[:4]) != "PK\x05\x06" || binary.LittleEndian.Uint32(end[4:8]) != 0 ||
-		binary.LittleEndian.Uint16(end[8:10]) != count || count < 3 || count > 5 ||
-		size < 46*int64(count) || size > 64<<10 || start <= 0 || start+size != offset ||
-		binary.LittleEndian.Uint16(end[20:22]) != 0 {
-		return fmt.Errorf("invalid Xray ZIP directory")
-	}
-	return nil
 }
 
 func extractEntry(ctx context.Context, entry *zip.File, stage string) error {
@@ -154,27 +130,7 @@ func validateExecutable(path string) error {
 		return err
 	}
 	defer header.Close()
-	var data [64]byte
-	if _, err := io.ReadFull(header, data[:]); err != nil {
-		return err
-	}
-	var machine elf.Machine
-	switch runtime.GOARCH {
-	case "amd64":
-		machine = elf.EM_X86_64
-	case "arm64":
-		machine = elf.EM_AARCH64
-	default:
-		return fmt.Errorf("unsupported Xray architecture")
-	}
-	objectType := elf.Type(binary.LittleEndian.Uint16(data[16:18]))
-	if string(data[:4]) != elf.ELFMAG || elf.Class(data[4]) != elf.ELFCLASS64 ||
-		elf.Data(data[5]) != elf.ELFDATA2LSB || elf.Version(data[6]) != elf.EV_CURRENT ||
-		(objectType != elf.ET_EXEC && objectType != elf.ET_DYN) ||
-		elf.Machine(binary.LittleEndian.Uint16(data[18:20])) != machine {
-		return fmt.Errorf("Xray executable has the wrong ELF architecture")
-	}
-	return nil
+	return checkedasset.LinuxExecutable(header, runtime.GOARCH)
 }
 
 type contextReader struct {

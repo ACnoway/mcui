@@ -13,6 +13,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ACnoway/mcui/internal/runtimehealth"
+	"golang.org/x/sys/unix"
 )
 
 const maxHelperFrame = 72 * 1024
@@ -23,6 +26,7 @@ type helperSocketRequest struct {
 	LeaseID          string          `json:"lease_id,omitempty"`
 	Task             json.RawMessage `json:"task"`
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
+	Probe            bool            `json:"probe,omitempty"`
 }
 
 type helperSocketResponse struct {
@@ -54,8 +58,23 @@ func (e *unixStatusExecutor) ReconcileInstall(ctx context.Context, raw []byte) (
 	return e.execute(ctx, helperSocketRequest{Task: raw, ReconcileInstall: true}, 95*time.Second)
 }
 
+func (e *unixStatusExecutor) ProbeRuntime(ctx context.Context, node string) error {
+	result, err := e.execute(ctx, helperSocketRequest{Probe: true}, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		NodeID   string `json:"node_id"`
+		Protocol int    `json:"protocol"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil || response.NodeID != node || response.Protocol != runtimehealth.Protocol {
+		return errors.New("Helper node or runtime protocol does not match")
+	}
+	return nil
+}
+
 func (e *unixStatusExecutor) execute(ctx context.Context, request helperSocketRequest, timeout time.Duration) (json.RawMessage, error) {
-	if e == nil || ctx == nil || len(request.Task) == 0 || len(request.Task) > maxHelperFrame || request.ReconcileInstall == (request.LeaseID != "") {
+	if e == nil || ctx == nil || !request.Probe && (len(request.Task) == 0 || len(request.Task) > maxHelperFrame || request.ReconcileInstall == (request.LeaseID != "")) {
 		return nil, errors.New("invalid Helper request")
 	}
 	body, err := json.Marshal(request)
@@ -72,6 +91,11 @@ func (e *unixStatusExecutor) execute(ctx context.Context, request helperSocketRe
 		return nil, err
 	}
 	defer connection.Close()
+	if request.Probe {
+		if err := requireRootHelper(connection.(*net.UnixConn)); err != nil {
+			return nil, err
+		}
+	}
 	if err = connection.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
@@ -116,6 +140,22 @@ func (e *unixStatusExecutor) execute(ctx context.Context, request helperSocketRe
 		return nil, errors.New("invalid Helper status result")
 	}
 	return append(json.RawMessage(nil), response.Result...), nil
+}
+
+func requireRootHelper(conn *net.UnixConn) error {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var peer *unix.Ucred
+	var peerErr error
+	err = raw.Control(func(fd uintptr) {
+		peer, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	})
+	if err != nil || peerErr != nil || peer == nil || peer.Uid != 0 {
+		return errors.New("runtime handshake requires a root Helper")
+	}
+	return nil
 }
 
 func writeAll(writer io.Writer, data []byte) error {

@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply an independently authorized MCUI runtime update
+Requires=mcui-runtime-recover.service
+After=mcui-runtime-recover.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mcui-runtime apply
+ExecStopPost=/usr/local/bin/mcui-runtime repair
+TimeoutStartSec=5min
+TimeoutStopSec=2min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mcui-runtime
+RestrictAddressFamilies=AF_UNIX
