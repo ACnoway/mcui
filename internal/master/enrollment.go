@@ -235,24 +235,11 @@ func (s *Server) authenticateNode(r *http.Request) (store.Node, bool) {
 	if !ok || !strings.EqualFold(scheme, "Bearer") || !security.ValidNodeSecret(token) {
 		return node, false
 	}
-	digest := hash(token)
-	err := s.store.View(func(st store.State) error {
-		for _, candidate := range st.Nodes {
-			if subtle.ConstantTimeCompare([]byte(candidate.TokenHash), []byte(digest)) == 1 && !candidate.Disabled {
-				if node.ID != "" {
-					return errors.New("duplicate node credential")
-				}
-				node = candidate
-			}
-		}
-		return nil
-	})
+	node, err := s.store.NodeByTokenHash(r.Context(), hash(token))
 	return node, err == nil && node.ID != ""
 }
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
-	s.nodeAccess.RLock()
-	defer s.nodeAccess.RUnlock()
 	node, ok := s.authenticateNode(r)
 	if !ok {
 		http.Error(w, "node credential rejected", http.StatusUnauthorized)
@@ -269,15 +256,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "heartbeat target rejected", http.StatusForbidden)
 		return
 	}
-	err := s.store.Update(func(st *store.State) error {
-		current := st.Nodes[node.ID]
-		if current.Disabled || current.TokenHash != node.TokenHash {
-			return store.ErrNotFound
-		}
-		current.LastSeen = time.Now().Unix()
-		st.Nodes[node.ID] = current
-		return nil
-	})
+	err := s.store.RecordNodeHeartbeat(r.Context(), node.ID, node.TokenHash, time.Now().Unix())
 	if err != nil {
 		http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
 		return

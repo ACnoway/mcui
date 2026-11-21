@@ -21,7 +21,7 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const driverName = "mcui-master-sqlite"
 
@@ -236,6 +236,11 @@ func migrate(db *sql.DB) error {
 	}
 	if current == 1 || current == 2 {
 		if _, err := tx.Exec(createXrayInstalls); err != nil {
+			return err
+		}
+	}
+	if current < 5 {
+		if _, err := tx.Exec(createNodeTokenIndex); err != nil {
 			return err
 		}
 	}

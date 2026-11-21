@@ -144,6 +144,9 @@ func validateSchema(db *sql.DB, version int) error {
 	if version >= 4 {
 		expectedTables["runtime_updates"] = []string{"id", "payload"}
 	}
+	if version >= 5 {
+		expectedIndexes["nodes_active_token_idx"] = struct{}{}
+	}
 	for table, expected := range expectedTables {
 		rows, err := db.Query("PRAGMA table_info(" + table + ")")
 		if err != nil {
