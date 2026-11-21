@@ -22,6 +22,7 @@ import (
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/taskcontrol"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 	_ "modernc.org/sqlite"
 )
 
@@ -64,6 +65,7 @@ type XrayDeliveryCapabilities struct {
 	Reconcile   bool
 	Control     bool
 	Change      bool
+	Config      bool
 }
 
 func (c XrayDeliveryCapabilities) supports(operation string) bool {
@@ -77,6 +79,8 @@ func (c XrayDeliveryCapabilities) supports(operation string) bool {
 		return c.Control
 	case "core.upgrade", "core.downgrade", "core.uninstall":
 		return c.Change
+	case xrayconfig.Operation:
+		return c.Config && c.InstallMode == "xray-manifest-v1"
 	default:
 		return false
 	}
@@ -1005,10 +1009,11 @@ func isTerminalFailure(task taskEnvelope) bool {
 }
 
 func isXrayTask(task taskEnvelope) bool {
-	return task.SchemaVersion == 1 && (task.Operation == "core.install" || lifecycleauth.IsControlOperation(task.Operation) || lifecycleauth.IsVersionChange(task.Operation))
+	return task.SchemaVersion == 1 && (task.Operation == "core.install" || lifecycleauth.IsControlOperation(task.Operation) ||
+		lifecycleauth.IsVersionChange(task.Operation) || task.Operation == xrayconfig.Operation)
 }
 
-const xrayTaskSQL = `json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation') IN ('core.install','core.start','core.stop','core.upgrade','core.downgrade','core.uninstall')`
+const xrayTaskSQL = `json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation') IN ('core.install','core.start','core.stop','core.upgrade','core.downgrade','core.uninstall','config.apply')`
 const terminalFailureSQL = `json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status' OR (` + xrayTaskSQL + `)`
 
 func newLeaseID() (string, error) {

@@ -8,17 +8,36 @@ import (
 
 	"github.com/ACnoway/mcui/internal/protocol"
 	"github.com/ACnoway/mcui/internal/tasksigner"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 type installPayload struct {
-	Core            string `json:"core"`
-	Version         string `json:"version"`
-	ArtifactID      string `json:"artifact_id,omitempty"`
-	ManifestVersion int64  `json:"manifest_version,omitempty"`
-	Architecture    string `json:"architecture,omitempty"`
-	SHA256          string `json:"sha256,omitempty"`
-	CurrentVersion  string `json:"current_version,omitempty"`
-	CurrentSHA256   string `json:"current_sha256,omitempty"`
+	Core            string         `json:"core"`
+	Version         string         `json:"version"`
+	ArtifactID      string         `json:"artifact_id,omitempty"`
+	ManifestVersion int64          `json:"manifest_version,omitempty"`
+	Architecture    string         `json:"architecture,omitempty"`
+	SHA256          string         `json:"sha256,omitempty"`
+	CurrentVersion  string         `json:"current_version,omitempty"`
+	CurrentSHA256   string         `json:"current_sha256,omitempty"`
+	Port            int            `json:"port,omitempty"`
+	Config          configMetadata `json:"config,omitzero"`
+}
+
+type configMetadata struct {
+	SchemaVersion      int    `json:"schema_version"`
+	NodeID             string `json:"node_id"`
+	Core               string `json:"core"`
+	CoreVersion        string `json:"core_version"`
+	Revision           int64  `json:"revision"`
+	ContentSHA256      string `json:"content_sha256"`
+	ContentSize        int    `json:"content_size"`
+	IssuedAt           string `json:"issued_at"`
+	NotBefore          string `json:"not_before"`
+	ExpiresAt          string `json:"expires_at"`
+	SigningKeyID       string `json:"signing_key_id"`
+	SignatureAlgorithm string `json:"signature_algorithm"`
+	Signature          string `json:"signature"`
 }
 
 type installTask struct {
@@ -61,6 +80,19 @@ func (policy *Policy) Issue(ctx context.Context, ledger *Ledger, request Request
 
 func signInstallTask(request Request, requestID string, key ed25519.PrivateKey, public ed25519.PublicKey) ([]byte, error) {
 	task := expectedInstallTask(request, requestID)
+	if task.Operation == xrayconfig.Operation {
+		m := &task.Payload.Config
+		m.Signature = tasksigner.PlaceholderSignature
+		configRaw, err := json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		canonical, err := protocol.CanonicalSignedBytes(protocol.Config, configRaw)
+		if err != nil {
+			return nil, err
+		}
+		m.Signature = sign(key, canonical)
+	}
 	task.Signature = tasksigner.PlaceholderSignature
 	raw, err := json.Marshal(task)
 	if err != nil {
@@ -88,16 +120,26 @@ func expectedInstallTask(request Request, requestID string) installTask {
 		prefix = "xray-manifest-"
 	}
 	payload := installPayload{Core: p.Core, Version: p.Version}
-	if IsControlOperation(p.Operation) {
+	issued := time.Unix(request.RequestedAt, 0).UTC().Format(time.RFC3339)
+	expires := time.Unix(request.taskExpiry(), 0).UTC().Format(time.RFC3339)
+	switch {
+	case p.Operation == xrayconfig.Operation:
+		payload.Architecture, payload.SHA256, payload.ManifestVersion = p.Architecture, p.SHA256, p.ManifestVersion
+		payload.Port = p.Config.Port
+		payload.Config = configMetadata{
+			SchemaVersion: 1, NodeID: p.NodeID, Core: p.Core, CoreVersion: p.Version, Revision: p.Sequence,
+			ContentSHA256: p.Config.SHA256, ContentSize: p.Config.Size, IssuedAt: issued, NotBefore: issued, ExpiresAt: expires,
+			SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
+		}
+	case IsControlOperation(p.Operation):
 		payload.Architecture, payload.SHA256 = p.Architecture, p.SHA256
-	} else {
+	default:
 		payload.ArtifactID, payload.ManifestVersion = prefix+p.Architecture+"-"+p.SHA256, p.ManifestVersion
 		payload.CurrentVersion, payload.CurrentSHA256 = p.CurrentVersion, p.CurrentSHA256
 	}
-	issued := time.Unix(request.RequestedAt, 0).UTC().Format(time.RFC3339)
 	return installTask{
 		SchemaVersion: 1, TaskID: p.TaskID, NodeID: p.NodeID, Sequence: p.Sequence, Operation: p.Operation,
-		IssuedAt: issued, NotBefore: issued, ExpiresAt: time.Unix(request.taskExpiry(), 0).UTC().Format(time.RFC3339),
+		IssuedAt: issued, NotBefore: issued, ExpiresAt: expires,
 		Payload:    payload,
 		ApprovalID: requestID, SigningKeyID: p.SigningKeyID, SignatureAlgorithm: "Ed25519",
 	}

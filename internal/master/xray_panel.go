@@ -14,6 +14,7 @@ import (
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 type panelXraySigner interface {
@@ -65,13 +66,15 @@ func (in panelXrayRequest) schema() int {
 		return lifecycleauth.ControlProposalVersion
 	case "core.upgrade", "core.downgrade", "core.uninstall":
 		return lifecycleauth.ChangeProposalVersion
+	case xrayconfig.Operation:
+		return lifecycleauth.ConfigProposalVersion
 	default:
 		return 0
 	}
 }
 
 func (in panelXrayRequest) dangerous() bool {
-	return in.Operation == "core.downgrade" || in.Operation == "core.uninstall"
+	return in.Operation == "core.downgrade" || in.Operation == "core.uninstall" || in.Operation == xrayconfig.Operation
 }
 
 func (s *Server) panelXrayAuth(w http.ResponseWriter, r *http.Request, in *panelXrayRequest) (adminContext, bool) {
@@ -143,10 +146,15 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	manifest, err := s.xrayPanel.Manifest(r.Context())
 	versions := []string{}
+	configReady := false
 	if err == nil {
 		for _, a := range manifest.Artifacts {
 			if a.Component == "xray" && a.Architecture == inventory.Architecture {
 				versions = append(versions, a.Version)
+				if a.Version == inventory.Xray.Version && a.SHA256 == inventory.Xray.SHA256 && inventory.Xray.Candidate.Valid() &&
+					inventory.Xray.Candidate != inventory.Xray.Config {
+					configReady = true
+				}
 			}
 		}
 		sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
@@ -154,6 +162,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
 		"versions": versions, "catalog_version": manifest.ManifestVersion,
+		"config_ready": configReady,
 	})
 }
 
@@ -338,6 +347,13 @@ func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest
 			}
 			if lifecycleauth.IsVersionChange(p.Operation) {
 				p.CurrentVersion, p.CurrentSHA256 = i.Xray.Version, i.Xray.SHA256
+			}
+			if p.Operation == xrayconfig.Operation {
+				if p.Version != i.Xray.Version || p.SHA256 != i.Xray.SHA256 || !i.Xray.Candidate.Valid() ||
+					i.Xray.Candidate == i.Xray.Config || p.Sequence <= i.Xray.ConfigRevision {
+					return errXrayInventory
+				}
+				p.Config = i.Xray.Candidate
 			}
 		}
 		if _, _, err := s.taskRuntime.XrayInstallPolicy.PanelEvidence(*p); err != nil {

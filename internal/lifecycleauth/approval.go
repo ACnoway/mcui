@@ -17,6 +17,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/security"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 const (
@@ -32,6 +33,7 @@ const (
 	SignedManifestProposalVersion = 3
 	ControlProposalVersion        = 4
 	ChangeProposalVersion         = 5
+	ConfigProposalVersion         = 6
 )
 
 var (
@@ -43,23 +45,24 @@ var (
 )
 
 type Proposal struct {
-	SchemaVersion   int    `json:"schema_version"`
-	Operation       string `json:"operation"`
-	Core            string `json:"core"`
-	TaskID          string `json:"task_id"`
-	NodeID          string `json:"node_id"`
-	Sequence        int64  `json:"sequence"`
-	Version         string `json:"version"`
-	Architecture    string `json:"architecture"`
-	SHA256          string `json:"sha256"`
-	ManifestVersion int64  `json:"manifest_version,omitempty"`
-	CurrentVersion  string `json:"current_version,omitempty"`
-	CurrentSHA256   string `json:"current_sha256,omitempty"`
-	RequesterID     string `json:"requester_id"`
-	ApproverID      string `json:"approver_id,omitempty"` // Retained for stored V1 proposals.
-	SigningKeyID    string `json:"signing_key_id"`
-	CreatedAt       int64  `json:"created_at"`
-	ExpiresAt       int64  `json:"expires_at"`
+	SchemaVersion   int                  `json:"schema_version"`
+	Operation       string               `json:"operation"`
+	Core            string               `json:"core"`
+	TaskID          string               `json:"task_id"`
+	NodeID          string               `json:"node_id"`
+	Sequence        int64                `json:"sequence"`
+	Version         string               `json:"version"`
+	Architecture    string               `json:"architecture"`
+	SHA256          string               `json:"sha256"`
+	ManifestVersion int64                `json:"manifest_version,omitempty"`
+	CurrentVersion  string               `json:"current_version,omitempty"`
+	CurrentSHA256   string               `json:"current_sha256,omitempty"`
+	RequesterID     string               `json:"requester_id"`
+	ApproverID      string               `json:"approver_id,omitempty"` // Retained for stored V1 proposals.
+	SigningKeyID    string               `json:"signing_key_id"`
+	CreatedAt       int64                `json:"created_at"`
+	ExpiresAt       int64                `json:"expires_at"`
+	Config          xrayconfig.Reference `json:"config,omitzero"`
 }
 
 type Request struct {
@@ -192,6 +195,9 @@ func (p Proposal) valid() bool {
 func (p Proposal) validOperation() bool {
 	noCurrent := p.CurrentVersion == "" && p.CurrentSHA256 == ""
 	validManifest := p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence
+	if p.Operation != xrayconfig.Operation && p.Config != (xrayconfig.Reference{}) {
+		return false
+	}
 	switch p.Operation {
 	case "core.install":
 		return p.SchemaVersion >= 1 && p.SchemaVersion <= SignedManifestProposalVersion && noCurrent && validManifest
@@ -202,13 +208,16 @@ func (p Proposal) validOperation() bool {
 			validVersionChange(p.Operation, p.CurrentVersion, p.CurrentSHA256, p.Version, p.SHA256)
 	case "core.uninstall":
 		return p.SchemaVersion == ChangeProposalVersion && noCurrent && p.ManifestVersion == 0
+	case xrayconfig.Operation:
+		return p.SchemaVersion == ConfigProposalVersion && noCurrent && validManifest &&
+			p.Version == xrayconfig.Version && p.Architecture == xrayconfig.Architecture && p.Config.Valid()
 	default:
 		return false
 	}
 }
 
 func (p Proposal) singleOperator() bool {
-	return p.SchemaVersion >= 2 && p.SchemaVersion <= ChangeProposalVersion
+	return p.SchemaVersion >= 2 && p.SchemaVersion <= ConfigProposalVersion
 }
 
 func (p Proposal) requestDomain() string {
@@ -223,7 +232,7 @@ func (p Proposal) requestDomain() string {
 }
 
 func (policy *Policy) requesterKey(p Proposal) ed25519.PublicKey {
-	if policy == nil || !p.valid() || p.SigningKeyID != policy.keyID {
+	if policy == nil || !p.valid() || p.Operation == xrayconfig.Operation || p.SigningKeyID != policy.keyID {
 		return nil
 	}
 	operator := policy.principals[p.RequesterID]

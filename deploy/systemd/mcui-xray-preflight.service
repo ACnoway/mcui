@@ -9,7 +9,8 @@ User=mcui-xray-preflight
 UMask=0077
 WorkingDirectory=/var/lib/mcui-xray/candidate
 Environment=XRAY_LOCATION_ASSET=/var/lib/mcui-xray/candidate
-ExecStart=/var/lib/mcui-xray/candidate/xray run -test -config /var/lib/mcui-xray/candidate/config.json
+LoadCredential=config.json:/var/lib/mcui-xray/control/candidate-config.json
+ExecStart=/var/lib/mcui-xray/candidate/xray run -test -config %d/config.json
 StandardOutput=null
 StandardError=null
 TimeoutStartSec=12s

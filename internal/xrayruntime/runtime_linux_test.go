@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 func TestXrayArchiveRejectsInvalidInput(t *testing.T) {
@@ -398,15 +400,81 @@ func TestLifecycleRejectsUntrustedArtifactsAndConcurrentWriters(t *testing.T) {
 	}
 }
 
+func TestControlledConfigKeepsLastGoodBytesOnStartFailure(t *testing.T) {
+	if runtime.GOARCH != xrayconfig.Architecture {
+		t.Skip("controlled Xray template is not enabled for this architecture")
+	}
+	ctx := context.Background()
+	svc := &fakeService{}
+	r := newRuntime(t, svc)
+	svc.dir = r.dir
+	release := stageFixture(t, r, xrayconfig.Version)
+	applyFixture(t, r, Install, selection{Release: release, Running: true})
+	path := filepath.Join(t.TempDir(), "controlled-inbound.json")
+	policy := xrayconfig.Policy{
+		ReleaseSHA256: release.SHA256, ListenPort: 1080, Password: strings.Repeat("A", 43),
+		DestinationIP: "93.184.216.34", DestinationPort: 8080,
+	}
+	savePolicy := func() ([]byte, xrayconfig.Reference) {
+		t.Helper()
+		raw, err := json.Marshal(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		data, ref, err := policy.Render(release.SHA256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data, ref
+	}
+	good, first := savePolicy()
+	calls := 0
+	authorize := func(context.Context) error { calls++; return nil }
+	hash := strings.Repeat("a", 64)
+	if err := r.configure(ctx, path, release, first, 2, hash, authorize); err != nil || calls != 2 {
+		t.Fatalf("apply controlled config: %v, authorization calls %d", err, calls)
+	}
+	if state := readState(t, r); state.Current.Config != first || state.Current.Revision != 2 {
+		t.Fatal("first configuration did not commit")
+	}
+	policy.ListenPort++
+	_, second := savePolicy()
+	calls = 0
+	if err := r.configure(ctx, path, release, first, 3, hash, authorize); err == nil || calls != 0 {
+		t.Fatal("policy drift did not prevent preflight")
+	}
+	svc.failedConfig = `"port":1081`
+	hash = strings.Repeat("b", 64)
+	if err := r.configure(ctx, path, release, second, 3, hash, authorize); !errors.Is(err, errRollback) {
+		t.Fatalf("failed configuration did not roll back: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(r.dir, "control", "runtime-config.json"))
+	if state := readState(t, r); err != nil || string(raw) != string(good) || !svc.running ||
+		state.Current.Config != first || state.Current.Revision != 2 || state.ConfigRevision != 3 || state.Pending != nil {
+		t.Fatal("rollback lost the last good configuration, service, or highest revision")
+	}
+	if outcome, err := r.ReconcileTask(ctx, Configure, release, hash); err != nil || outcome != "ROLLED_BACK" {
+		t.Fatalf("reconcile configuration: %s, %v", outcome, err)
+	}
+	if err := r.configure(ctx, path, release, second, 3, hash, authorize); err == nil {
+		t.Fatal("accepted a consumed configuration revision")
+	}
+}
+
 type fakeService struct {
 	dir           string
 	failedRelease string
 	stopError     error
 	running       bool
 	starts        int
+	failedConfig  string
 }
 
-func (s *fakeService) preflight(context.Context) error { return nil }
+func (s *fakeService) preflight(context.Context) error                { return nil }
+func (s *fakeService) checkConfigUnits(context.Context, string) error { return nil }
 
 func (s *fakeService) start(context.Context) error {
 	s.starts++
@@ -416,6 +484,15 @@ func (s *fakeService) start(context.Context) error {
 	}
 	if link == s.failedRelease {
 		return errors.New("candidate failed to start")
+	}
+	if s.failedConfig != "" {
+		raw, err := os.ReadFile(filepath.Join(s.dir, "control", "runtime-config.json"))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(raw), s.failedConfig) {
+			return errors.New("candidate configuration failed to start")
+		}
 	}
 	s.running = true
 	return nil

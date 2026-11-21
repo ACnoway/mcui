@@ -134,7 +134,8 @@ func (r *Runtime) readStatus() (Status, error) {
 		return Status{}, err
 	}
 	current := state.Current
-	if state.Schema != 1 || (current.Release != (Release{}) && !current.Release.valid()) ||
+	if state.Schema != 1 || !current.validConfig() || state.ConfigRevision < current.Revision || state.ConfigRevision > (1<<53)-1 ||
+		(current.Release != (Release{}) && !current.Release.valid()) ||
 		(current.Release == (Release{}) && (current.Running || state.Previous != (Release{}))) ||
 		(state.Previous != (Release{}) && (!state.Previous.valid() || state.Previous == current.Release)) {
 		return Status{}, errors.New("invalid committed Xray state")
@@ -149,6 +150,9 @@ func (r *Runtime) readStatus() (Status, error) {
 		if state.Pending.ControlHash != "" && (!isControlAction(state.Pending.Action) || !validTaskHash(state.Pending.ControlHash)) {
 			return Status{}, errors.New("invalid Xray control intent identity")
 		}
+		if state.Pending.ConfigHash != "" && (state.Pending.Action != Configure || state.Pending.Next.Revision != state.ConfigRevision) {
+			return Status{}, errors.New("invalid Xray configuration intent identity")
+		}
 	}
 	if receipt := state.InstallReceipt; receipt != nil {
 		if !receipt.valid() || (receipt.Action != "" && receipt.Action != Upgrade && receipt.Action != Downgrade) {
@@ -158,6 +162,11 @@ func (r *Runtime) readStatus() (Status, error) {
 	if receipt := state.ControlReceipt; receipt != nil {
 		if !receipt.valid() || !isControlAction(receipt.Action) {
 			return Status{}, errors.New("invalid Xray control receipt")
+		}
+	}
+	if receipt := state.ConfigReceipt; receipt != nil {
+		if !receipt.valid() || receipt.Action != Configure || state.ConfigRevision == 0 {
+			return Status{}, errors.New("invalid Xray configuration receipt")
 		}
 	}
 	return state, nil
@@ -172,8 +181,12 @@ func (r *Runtime) save(state Status) error {
 	if err != nil {
 		return err
 	}
+	return r.writeControl("state.json", data)
+}
+
+func (r *Runtime) writeControl(name string, data []byte) error {
 	dir := filepath.Join(r.dir, "control")
-	file, err := os.CreateTemp(dir, ".state-")
+	file, err := os.CreateTemp(dir, ".write-")
 	if err != nil {
 		return err
 	}
@@ -181,7 +194,7 @@ func (r *Runtime) save(state Status) error {
 	if err := persist(file, data, 0600); err != nil {
 		return err
 	}
-	if err := os.Rename(file.Name(), filepath.Join(dir, "state.json")); err != nil {
+	if err := os.Rename(file.Name(), filepath.Join(dir, name)); err != nil {
 		return err
 	}
 	return syncDir(dir)
@@ -383,7 +396,7 @@ func (r *Runtime) prune(state Status) error {
 			}
 		}
 	}
-	return syncDir(dir)
+	return errors.Join(syncDir(dir), r.pruneConfigs(state))
 }
 
 func managedKey(key string) bool {

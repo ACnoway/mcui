@@ -13,10 +13,13 @@ type RuntimeUpdate = {
   id: string; sequence: number; version: string; architecture: string; expires_at: string; current_pair_sha256?: string
   status: 'QUEUED' | 'DELIVERED' | 'COMMITTED' | 'ROLLED_BACK' | 'REJECTED' | 'EXPIRED'
 }
-type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade' | 'core.downgrade' | 'core.uninstall'
+type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade' | 'core.downgrade' | 'core.uninstall' | 'config.apply'
+type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
+type XrayConfigReference = { port: number; sha256: string; size: number }
 type PanelXrayOptions = {
-  architecture: string; current: { version: string; sha256: string; running: boolean }
-  state: string; versions: string[]; catalog_version: number
+  architecture: string
+  current: { version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number }
+  state: string; versions: string[]; catalog_version: number; config_ready: boolean
 }
 type XrayInstall = {
   proposal: {
@@ -56,14 +59,16 @@ const runtimeProofFields = [
   { name: 'manifest_signature', label: '发布清单签名', limit: 64 },
 ]
 const xrayInstallInput = ref({
-  operation: 'core.install' as XrayOperation,
+  operation: 'core.install' as CoreXrayOperation,
   version: '', architecture: 'amd64', sha256: '', manifest_version: '' as number | '',
   current_version: '', current_sha256: '',
 })
 const xrayOperationLabel: Record<XrayOperation, string> = {
   'core.install': '安装', 'core.start': '启动', 'core.stop': '停止',
   'core.upgrade': '升级', 'core.downgrade': '降级', 'core.uninstall': '卸载',
+  'config.apply': '下发受控 SOCKS5 入站',
 }
+const legacyXrayOperations: CoreXrayOperation[] = ['core.install', 'core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
 const xrayVersionChange = computed(() => xrayInstallInput.value.operation === 'core.upgrade' || xrayInstallInput.value.operation === 'core.downgrade')
 const xrayUsesArtifact = computed(() => xrayInstallInput.value.operation === 'core.install' || xrayVersionChange.value)
 const xrayInstallBusy = ref(false)
@@ -76,9 +81,12 @@ const panelXrayVersion = ref('')
 const panelXrayError = ref('')
 const panelXraySubmitting = ref(false)
 let panelXrayRetry: { intent: string; id: string } | undefined
-const panelXrayOperations = computed<XrayOperation[]>(() => panelXray.value?.current.version
-  ? ['core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
-  : ['core.install'])
+const panelXrayOperations = computed<XrayOperation[]>(() => {
+  if (!panelXray.value?.current.version) return ['core.install']
+  const operations: XrayOperation[] = ['core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
+  if (panelXray.value.config_ready) operations.push('config.apply')
+  return operations
+})
 const panelXrayUsesArtifact = computed(() => ['core.install', 'core.upgrade', 'core.downgrade'].includes(panelXrayOperation.value))
 const panelXrayVersions = computed(() => {
   const options = panelXray.value
@@ -368,11 +376,13 @@ async function submitPanelXray() {
   const options = panelXray.value
   if (!node || !options || panelXraySubmitting.value) return
   const operation = panelXrayOperation.value
-  const version = panelXrayUsesArtifact.value ? panelXrayVersion.value : ''
-  const dangerous = operation === 'core.downgrade' || operation === 'core.uninstall'
-  if (dangerous) {
+  const version = operation === 'config.apply' ? options.current.version : panelXrayUsesArtifact.value ? panelXrayVersion.value : ''
+  const dangerous = operation === 'core.downgrade' || operation === 'core.uninstall' || operation === 'config.apply'
+  const replacesConfig = version !== '' && panelXrayUsesArtifact.value && !!options.current.config
+  if (dangerous || replacesConfig) {
     const target = version ? ` → ${version}` : ''
-    if (!confirm(`确认${xrayOperationLabel[operation]}节点「${node.name}」的 Xray ${options.current.version}${target}？`)) return
+    const note = replacesConfig ? '切换版本会停用已应用的入站。' : ''
+    if (!confirm(`确认${xrayOperationLabel[operation]}节点「${node.name}」的 Xray ${options.current.version}${target}？${note}`)) return
   }
   const fields = { operation, version, state: options.state,
     catalog_version: version ? options.catalog_version : 0, confirm_operation: dangerous ? operation : '' }
@@ -639,6 +649,13 @@ onMounted(async () => {
         </div>
         <p v-if="selectedNode.disabled || selectedNode.pending">节点上线后可管理 Xray。</p>
         <p v-if="panelXray">节点架构 {{ panelXray.architecture }} · {{ panelXray.current.version || '未安装' }}</p>
+        <p v-if="panelXray?.current.config">
+          已应用 SOCKS5 127.0.0.1:{{ panelXray.current.config.port }} · 修订 {{ panelXray.current.config_revision }}
+          · SHA-256 <code>{{ panelXray.current.config.sha256 }}</code>
+        </p>
+        <p v-if="panelXrayOperation === 'config.apply' && panelXray?.current.candidate">
+          候选入站 127.0.0.1:{{ panelXray.current.candidate.port }} · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code>
+        </p>
         <form v-if="panelXray" class="node-row" @submit.prevent="submitPanelXray">
           <label>操作<select v-model="panelXrayOperation">
             <option v-for="operation in panelXrayOperations" :key="operation" :value="operation">{{ xrayOperationLabel[operation] }}</option>
@@ -666,7 +683,7 @@ onMounted(async () => {
         <p>当前账号 ID：{{ admin.id }}。提案预留节点的下一个任务序号，有效期 30 分钟。</p>
         <form v-if="!selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="createXrayInstall">
           <label>操作<select v-model="xrayInstallInput.operation">
-            <option v-for="(label, operation) in xrayOperationLabel" :key="operation" :value="operation">{{ label }}</option>
+            <option v-for="operation in legacyXrayOperations" :key="operation" :value="operation">{{ xrayOperationLabel[operation] }}</option>
           </select></label>
           <label>架构<select v-model="xrayInstallInput.architecture"><option>amd64</option><option>arm64</option></select></label>
           <template v-if="xrayVersionChange">

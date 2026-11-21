@@ -17,6 +17,7 @@ import (
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/taskdispatch"
 	"github.com/ACnoway/mcui/internal/tasksigner"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 const statusTaskLifetime = 5 * time.Minute
@@ -797,6 +798,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		Reconcile:   query.Get("install_reconciliation") == "v1",
 		Control:     query.Get("xray_control") == "v1",
 		Change:      query.Get("xray_change") == "v1",
+		Config:      query.Get("xray_config") == "v1",
 	}
 	delivery, err := runtime.Store.LeaseWithXray(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
 		unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)
@@ -963,7 +965,7 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 	switch envelope.Operation {
 	case "core.status":
 		previous, err = runtime.Store.ValidateLease(envelope.NodeID, envelope.TaskID, envelope.Sequence, in.LeaseID, in.Task, now, runtime.KeyID, runtime.PublicKey)
-	case "core.install", "core.start", "core.stop", "core.upgrade", "core.downgrade", "core.uninstall":
+	case "core.install", "core.start", "core.stop", "core.upgrade", "core.downgrade", "core.uninstall", xrayconfig.Operation:
 		var task lifecycleauth.InstallTask
 		task, err = s.verifyStoredXrayTask(in.Task, true)
 		if err == nil && task.NodeID == envelope.NodeID {

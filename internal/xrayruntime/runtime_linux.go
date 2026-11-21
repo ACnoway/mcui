@@ -15,6 +15,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/corecatalog"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 const StateDir = "/var/lib/mcui-xray"
@@ -32,6 +33,7 @@ const (
 	Start     Action = "start"
 	Stop      Action = "stop"
 	Uninstall Action = "uninstall"
+	Configure Action = "apply_config"
 )
 
 type Release struct {
@@ -40,8 +42,10 @@ type Release struct {
 }
 
 type selection struct {
-	Release Release `json:"release"`
-	Running bool    `json:"running"`
+	Release  Release              `json:"release"`
+	Running  bool                 `json:"running"`
+	Config   xrayconfig.Reference `json:"config,omitzero"`
+	Revision int64                `json:"revision,omitempty"`
 }
 
 type intent struct {
@@ -49,6 +53,7 @@ type intent struct {
 	Next        selection `json:"next"`
 	InstallHash string    `json:"install_hash,omitempty"`
 	ControlHash string    `json:"control_hash,omitempty"`
+	ConfigHash  string    `json:"config_hash,omitempty"`
 }
 
 type taskReceipt struct {
@@ -67,6 +72,8 @@ type Status struct {
 	LastResult     string       `json:"last_result,omitempty"`
 	InstallReceipt *taskReceipt `json:"install_receipt,omitempty"`
 	ControlReceipt *taskReceipt `json:"control_receipt,omitempty"`
+	ConfigReceipt  *taskReceipt `json:"config_receipt,omitempty"`
+	ConfigRevision int64        `json:"config_revision,omitempty"`
 }
 
 type service interface {
@@ -240,7 +247,7 @@ func (r *Runtime) control(ctx context.Context, action Action, expected Release, 
 
 // ReconcileTask reads a receipt or rolls back the exact interrupted transaction.
 func (r *Runtime) ReconcileTask(ctx context.Context, action Action, release Release, hash string) (string, error) {
-	if (!isArtifactAction(action) && !isControlAction(action)) || !release.valid() || !validTaskHash(hash) {
+	if (!isArtifactAction(action) && !isControlAction(action) && action != Configure) || !release.valid() || !validTaskHash(hash) {
 		return "", errUnknown
 	}
 	state, err := r.readStatus()
@@ -252,6 +259,8 @@ func (r *Runtime) ReconcileTask(ctx context.Context, action Action, release Rele
 		pendingHash := pending.InstallHash
 		if isControlAction(action) {
 			pendingHash = pending.ControlHash
+		} else if action == Configure {
+			pendingHash = pending.ConfigHash
 		}
 		if pending.Action != action || pendingHash != hash || pending.receiptRelease(state.Current.Release) != release {
 			return "", errUnknown
@@ -267,6 +276,8 @@ func (r *Runtime) ReconcileTask(ctx context.Context, action Action, release Rele
 	receipt := state.InstallReceipt
 	if isControlAction(action) {
 		receipt = state.ControlReceipt
+	} else if action == Configure {
+		receipt = state.ConfigReceipt
 	}
 	if receipt == nil || receipt.Hash != hash || receipt.Release != release {
 		return "", errUnknown
@@ -317,6 +328,8 @@ func (s *Status) recordReceipt(attempt intent, outcome string) {
 		}
 	} else if attempt.ControlHash != "" {
 		s.ControlReceipt = &taskReceipt{Hash: attempt.ControlHash, Release: release, Outcome: outcome, Action: attempt.Action}
+	} else if attempt.ConfigHash != "" {
+		s.ConfigReceipt = &taskReceipt{Hash: attempt.ConfigHash, Release: release, Outcome: outcome, Action: Configure}
 	}
 }
 
@@ -368,6 +381,9 @@ func (r *Runtime) change(ctx context.Context, state Status, attempt intent) erro
 		return errors.Join(errUnknown, fmt.Errorf("verify committed Xray bundle: %w", err))
 	}
 	state.Pending = &attempt
+	if action == Configure {
+		state.ConfigRevision = next.Revision
+	}
 	if err := r.save(state); err != nil {
 		return errors.Join(errUnknown, fmt.Errorf("persist Xray transaction intent: %w", err))
 	}
@@ -399,10 +415,17 @@ func (r *Runtime) change(ctx context.Context, state Status, attempt intent) erro
 }
 
 func (r *Runtime) applySelection(ctx context.Context, current, next selection) error {
-	if current.Release != next.Release && next.Release != (Release{}) && !next.Running {
+	if current.Config != next.Config {
+		if err := r.service.stop(ctx); err != nil {
+			return err
+		}
+	}
+	if (current.Release != next.Release || current.Config != next.Config) && next.Release != (Release{}) && !next.Running {
 		// A paused installation still needs a startup check before replacing
 		// the committed bundle. Leave it stopped after the bounded check.
-		if err := r.reconcile(ctx, selection{Release: next.Release, Running: true}); err != nil {
+		check := next
+		check.Running = true
+		if err := r.reconcile(ctx, check); err != nil {
 			return err
 		}
 	}
@@ -445,20 +468,35 @@ func (r *Runtime) reconcile(ctx context.Context, next selection) error {
 		}
 	}
 	if next.Running {
+		if err := r.prepareRuntimeConfig(ctx, next); err != nil {
+			return err
+		}
 		return r.service.start(ctx)
 	}
-	return r.service.stop(ctx)
+	if err := r.service.stop(ctx); err != nil {
+		return err
+	}
+	return r.prepareRuntimeConfig(ctx, next)
 }
 
 func (r *Runtime) runPreflight(ctx context.Context, release Release) (err error) {
-	if err := r.point("candidate", release); err != nil {
+	return r.preflightConfig(ctx, release, []byte("{}\n"))
+}
+
+func (r *Runtime) preflightConfig(ctx context.Context, release Release, data []byte) (err error) {
+	if err := r.writeControl("candidate-config.json", data); err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, r.clearCandidate()) }()
+	if err := r.point("candidate", release); err != nil {
+		return err
+	}
 	return r.service.preflight(ctx)
 }
 
-func (r *Runtime) clearCandidate() error { return r.point("candidate", Release{}) }
+func (r *Runtime) clearCandidate() error {
+	return errors.Join(r.point("candidate", Release{}), r.removeControl("candidate-config.json"))
+}
 
 func (r Release) valid() bool {
 	return corecatalog.ValidXrayRelease(r.Version, r.SHA256)
@@ -475,22 +513,27 @@ func (r Release) link() string {
 
 func validateTransition(current selection, pending intent) error {
 	next := pending.Next
-	if (next.Release != (Release{}) && !next.Release.valid()) || (next.Release == (Release{}) && next.Running) {
+	if !next.validConfig() || (next.Release != (Release{}) && !next.Release.valid()) || (next.Release == (Release{}) && next.Running) {
 		return errors.New("invalid target Xray selection")
 	}
 	valid := false
 	switch pending.Action {
 	case Install:
-		valid = current == (selection{}) && next.Release.valid() && next.Running
+		valid = current == (selection{}) && next.Release.valid() && next.Running && next.Revision == 0
 	case Upgrade, Downgrade:
-		if current.Release.valid() && next.Release.valid() && current.Running == next.Running {
+		if current.Release.valid() && next.Release.valid() && current.Running == next.Running && next.Revision == 0 {
 			order := corecatalog.CompareXrayVersions(next.Release.Version, current.Release.Version)
 			valid = (pending.Action == Upgrade && order > 0) || (pending.Action == Downgrade && order < 0)
 		}
 	case Start, Stop:
-		valid = current.Release.valid() && current.Release == next.Release && next.Running == (pending.Action == Start)
+		expected := current
+		expected.Running = pending.Action == Start
+		valid = current.Release.valid() && next == expected
 	case Uninstall:
 		valid = current.Release.valid() && next == (selection{})
+	case Configure:
+		valid = current.Release.valid() && current.Release == next.Release && current.Running == next.Running &&
+			next.Revision > current.Revision && validTaskHash(pending.ConfigHash)
 	}
 	if !valid {
 		return fmt.Errorf("Xray %s conflicts with the committed release", pending.Action)

@@ -20,6 +20,7 @@ import (
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/store"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 func TestPanelXraySelectSignDeliverAndConfirm(t *testing.T) {
@@ -91,7 +92,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			SourceID: "github:XTLS/Xray-core", ArchiveFormat: "zip", BuildOptions: "upstream-prebuilt",
 			Length: 1024, ReviewID: "test-review", SignatureStatus: "not-provided"}
 	}
-	newer := artifact("v26.10.0", "amd64", "b")
+	newer := artifact(xrayconfig.Version, "amd64", "b")
 	older := artifact("v26.9.0", "amd64", "a")
 	other := artifact("v26.11.0", "arm64", "c")
 	rawManifest, err := json.Marshal(artifacttrust.Manifest{SchemaVersion: 1, ManifestVersion: 2, ExpiresAt: now.Add(time.Hour),
@@ -184,7 +185,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -218,6 +219,29 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		CatalogVersion: 2, State: options()}
 	expect(admin(http.MethodPost, upgrade, client.csrf), http.StatusCreated)
 	complete(upgrade.TaskID, 3, newer)
+	config := xrayconfig.Reference{Port: 1080, SHA256: strings.Repeat("d", 64), Size: 350}
+	node := lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256, Running: true, Candidate: config}
+	heartbeat(&node)
+	apply := panelXrayRequest{TaskID: "config-fixture-1234567890", Operation: xrayconfig.Operation, Version: newer.Version,
+		CatalogVersion: 2, State: options(), Confirm: xrayconfig.Operation}
+	expect(admin(http.MethodPost, apply, client.csrf), http.StatusPreconditionRequired)
+	apply.MFACode = fmtCode(totpAt(totpKey, time.Now().Unix()/30))
+	node.Candidate.Port++
+	heartbeat(&node)
+	expect(admin(http.MethodPost, apply, client.csrf), http.StatusConflict)
+	node.Candidate = config
+	heartbeat(&node)
+	expect(admin(http.MethodPost, apply, client.csrf), http.StatusCreated)
+	signed, err := runtime.Store.GetRecord(apply.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = policy.InstallKey().Verify(signed.Raw)
+	if err != nil || task.Sequence != 4 || task.Operation != xrayconfig.Operation || task.Config != config || task.SHA256 != newer.SHA256 {
+		t.Fatalf("incorrect signed configuration: %+v %v", task, err)
+	}
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=4&install=xray-manifest-v1", nil, true), http.StatusNoContent)
+	complete(apply.TaskID, 4, newer)
 	for i, operation := range []string{"core.start", "core.stop", "core.uninstall"} {
 		heartbeat(&lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256})
 		id := fmt.Sprintf("control-fixture-%010d", i)
@@ -226,7 +250,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			control.Confirm, control.MFACode = operation, fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 		}
 		expect(admin(http.MethodPost, control, client.csrf), http.StatusCreated)
-		complete(id, int64(i)+4, newer)
+		complete(id, int64(i)+5, newer)
 	}
 	if err := s.ReconcileTaskRuntime(); err != nil {
 		t.Fatal(err)

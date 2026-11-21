@@ -8,6 +8,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/protocol"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 // InstallKey is provisioned independently of the read-only task signer.
@@ -30,6 +31,7 @@ type InstallTask struct {
 	CurrentVersion, CurrentSHA256            string
 	NotBefore, ExpiresAt                     time.Time
 	SignedManifest                           bool
+	Config                                   xrayconfig.Reference
 }
 
 func IsControlOperation(operation string) bool {
@@ -60,6 +62,7 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 	}
 	payload := wire.Payload
 	var signedManifest bool
+	var config xrayconfig.Reference
 	switch {
 	case wire.Operation == "core.install" || IsVersionChange(wire.Operation):
 		prefix := "xray-"
@@ -77,6 +80,17 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 		}
 	case IsControlOperation(wire.Operation):
 		// Only a release-bound control envelope can pass the lifecycle key.
+	case wire.Operation == xrayconfig.Operation:
+		m := payload.Config
+		config = xrayconfig.Reference{Port: payload.Port, SHA256: m.ContentSHA256, Size: m.ContentSize}
+		configRaw, err := json.Marshal(m)
+		if err != nil || !config.Valid() || payload.Version != xrayconfig.Version || payload.Architecture != xrayconfig.Architecture || m.Core != "xray" ||
+			m.NodeID != wire.NodeID || m.CoreVersion != payload.Version || m.Revision != wire.Sequence ||
+			m.SigningKeyID != key.ID || m.IssuedAt != wire.IssuedAt || m.NotBefore != wire.NotBefore || m.ExpiresAt != wire.ExpiresAt ||
+			protocol.Verify(protocol.Config, configRaw, key.PublicKey) != nil {
+			return InstallTask{}, ErrDenied
+		}
+		signedManifest = true
 	default:
 		return InstallTask{}, ErrDenied
 	}
@@ -96,6 +110,7 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 		Sequence: wire.Sequence, Operation: wire.Operation, Version: payload.Version, ManifestVersion: payload.ManifestVersion,
 		CurrentVersion: payload.CurrentVersion, CurrentSHA256: payload.CurrentSHA256,
 		Architecture: payload.Architecture, SHA256: payload.SHA256, NotBefore: before, ExpiresAt: expires, SignedManifest: signedManifest,
+		Config: config,
 	}, nil
 }
 
@@ -103,7 +118,8 @@ func (t InstallTask) Matches(p Proposal, id string) bool {
 	return id == t.ApprovalID && p.TaskID == t.TaskID && p.NodeID == t.NodeID && p.SigningKeyID == t.KeyID &&
 		p.Sequence == t.Sequence && p.Operation == t.Operation && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
 		p.CurrentVersion == t.CurrentVersion && p.CurrentSHA256 == t.CurrentSHA256 &&
-		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation)) &&
+		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation) || p.Operation == xrayconfig.Operation) &&
+		t.Config == p.Config &&
 		p.Architecture == t.Architecture && p.SHA256 == t.SHA256 &&
 		t.NotBefore.Unix() >= p.CreatedAt && t.ExpiresAt.Unix() <= p.ExpiresAt
 }

@@ -347,6 +347,7 @@ func validateTaskPayload(operation string, value any) error {
 	expected := []string{"core"}
 	releaseControl := (operation == "core.start" || operation == "core.stop" || operation == "core.uninstall") && len(payload) != 1
 	releaseChange := (operation == "core.upgrade" || operation == "core.downgrade") && len(payload) != 4
+	localConfig := operation == "config.apply" && len(payload) != 4
 	if releaseControl {
 		expected = append(expected, "version", "architecture", "sha256")
 	}
@@ -358,7 +359,11 @@ func validateTaskPayload(operation string, value any) error {
 			expected = append(expected, "current_version", "current_sha256")
 		}
 	case "config.apply":
-		expected = append(expected, "revision", "content_sha256", "core_version")
+		if localConfig {
+			expected = append(expected, "version", "architecture", "sha256", "manifest_version", "port", "config")
+		} else {
+			expected = append(expected, "revision", "content_sha256", "core_version")
+		}
 	default:
 		return errors.New("unsupported task operation")
 	}
@@ -395,6 +400,29 @@ func validateTaskPayload(operation string, value any) error {
 		}
 		return validInteger(payload, "manifest_version", 1, maxSafeInteger)
 	case "config.apply":
+		if localConfig {
+			if payload["core"] != "xray" || (payload["architecture"] != "amd64" && payload["architecture"] != "arm64") {
+				return errors.New("invalid Xray configuration release identity")
+			}
+			digest, ok := payload["sha256"].(string)
+			if !ok || !digestPattern.MatchString(digest) {
+				return errors.New("invalid Xray configuration release digest")
+			}
+			if err := validIdentifier(payload, "version"); err != nil {
+				return err
+			}
+			if err := validInteger(payload, "manifest_version", 1, maxSafeInteger); err != nil {
+				return err
+			}
+			if err := validInteger(payload, "port", 1024, 65535); err != nil {
+				return err
+			}
+			config, ok := payload["config"].(map[string]any)
+			if !ok || config["core"] != payload["core"] || config["core_version"] != payload["version"] {
+				return errors.New("invalid signed Xray configuration metadata")
+			}
+			return validateObject(Config, config)
+		}
 		if err := validInteger(payload, "revision", 1, maxSafeInteger); err != nil {
 			return err
 		}

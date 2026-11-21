@@ -26,6 +26,7 @@ import (
 	"github.com/ACnoway/mcui/internal/runtimehealth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/trustedtime"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 	"github.com/ACnoway/mcui/internal/xrayruntime"
 )
 
@@ -161,6 +162,18 @@ func main() {
 				}
 				defer runtime.Close()
 				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
+				if task.Operation == xrayconfig.Operation {
+					return runtime.ConfigureAuthorized(ctx, release, task.Config, task.Sequence, hash, func(ctx context.Context) error {
+						if err := authorize(ctx); err != nil {
+							return err
+						}
+						target, err := artifacts.LookupCoreManifest(ctx, "xray", task.Version, task.ManifestVersion)
+						if err != nil || target.SHA256 != task.SHA256 || target.Architecture != task.Architecture || target.SignatureStatus == "unverified" {
+							return lifecycleauth.ErrDenied
+						}
+						return nil
+					})
+				}
 				action := xrayruntime.Action(strings.TrimPrefix(task.Operation, "core."))
 				if control {
 					return runtime.ControlAuthorized(ctx, action, release, hash, authorize)
@@ -175,6 +188,9 @@ func main() {
 				}
 				defer runtime.Close()
 				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
+				if task.Operation == xrayconfig.Operation {
+					return runtime.ReconcileTask(ctx, xrayruntime.Configure, release, hash)
+				}
 				return runtime.ReconcileTask(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash)
 			},
 		}
@@ -233,6 +249,7 @@ func readXrayInventory() (lifecycleauth.XrayInventory, error) {
 	}
 	return lifecycleauth.XrayInventory{
 		Version: state.Current.Release.Version, SHA256: state.Current.Release.SHA256, Running: state.Current.Running,
+		Candidate: runtime.ConfigCandidate(state), Config: state.Current.Config, ConfigRevision: state.Current.Revision,
 	}, nil
 }
 

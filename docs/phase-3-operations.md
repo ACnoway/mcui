@@ -4,7 +4,7 @@
 
 以下步骤使用 [GitHub Releases 与单签名制品清单](./phase-3-release.md)。旧 TUF 节点按发布手册协调迁移。
 
-`mcui-xray` 在 Linux amd64/arm64 节点上由本地 root 管理独立的 `mcui-xray.service`。服务使用固定空 JSON 引导配置和独立的低权限 systemd 沙箱。远程安装通过显式配置接入同一套事务。指定版本和架构的产品状态见[能力矩阵](./core-compatibility.md)。
+`mcui-xray` 在 Linux amd64/arm64 节点上由本地 root 管理独立的 `mcui-xray.service`。默认用固定空 JSON 引导配置启动，受控入站另行启用。远程安装和配置通过同一套生命周期事务应用。指定版本和架构的产品状态见[能力矩阵](./core-compatibility.md)和[受控入站部署](./phase-4-xray-inbound.md)。
 
 ## 1. 准备验证节点
 

@@ -11,6 +11,7 @@ import (
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/taskledger"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 type InstallExecutor interface {
@@ -201,6 +202,9 @@ func (r *installRuntime) prepare(ctx context.Context, install lifecycleauth.Inst
 	}
 	if backend, ok := r.artifacts.(interface{ UsesSignedManifest() bool }); ok && backend.UsesSignedManifest() != install.SignedManifest {
 		return lifecycleauth.ErrDenied
+	}
+	if install.Operation == xrayconfig.Operation {
+		return nil
 	}
 	target, err := r.artifacts.LookupCoreManifest(ctx, "xray", install.Version, install.ManifestVersion)
 	if err != nil {

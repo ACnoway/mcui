@@ -47,11 +47,13 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 | `core.restart` | 无 |
 | `core.install` | `version`、`artifact_id` 为标识符，`manifest_version` 为正整数 |
 | `core.upgrade`, `core.downgrade` | Xray 同时绑定已安装的 `current_version`、`current_sha256` 和目标的 `version`、`artifact_id`、`manifest_version`。旧信封保留解析兼容。 |
-| `config.apply` | `revision` 正整数、`content_sha256` 摘要、`core_version` 标识符 |
+| `config.apply` | 当前 Xray 模板使用 `version`、`architecture`、`sha256`、`manifest_version`、`port`、`config`。历史 `revision`、`content_sha256`、`core_version` 形态保留解析兼容。 |
 
 任务签名只授权固定动作；制品 ID、版本、架构及摘要须匹配独立受信任且未过期的发布清单，降级须独立授权。任务时间为启动与新步骤授权边界，不是可无限续租的通行证。[Agent/Helper 成对更新](./phase-3-runtime-update.md)使用本地监督器和独立签名授权。节点 Token 轮换按第 2 节接入流程处理。
 
-**配置签名对象**必填字段：`schema_version`、`node_id`、`core`、`core_version`、`revision`、`content_sha256`、`content_size`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`。`revision` 在每 `(node_id, core)` 内正整数单调递增，`content_size` 为 0..4194304 的整数；摘要作用于精确原始配置字节，不做换行或 Unicode 转换。配置通过已认证通道单独取得，校验长度和摘要。应用须同时具备未过期 `config.apply` 任务，其 node/core/version/revision/hash 与配置签名逐字段一致；签名配置本身不是执行授权。主控与 Agent 都须按锁定 Core 版本、节点策略进行语义白名单验证，未知字段拒绝；候选预检低权限隔离运行。完成事务后持久化最高 revision、哈希和 LKG；低 revision 拒绝，同 revision 同 hash 仅可返回既有结果，不得重新触发；同 revision 不同 hash 为冲突。手动回滚生成更高 revision，即便内容与旧配置相同。失败恢复只恢复先前 LKG，不允许以此执行新配置。
+**配置签名对象**必填字段：`schema_version`、`node_id`、`core`、`core_version`、`revision`、`content_sha256`、`content_size`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`。通用 `content_size` 上限为 4194304 字节，当前 Xray 模板只接受 1..4096 字节。摘要覆盖精确原始配置字节。
+
+Xray 任务的 `payload.config` 是独立签名的配置元数据。它与任务共用独立 Xray 运维公钥，分别使用 `MCUI-CONFIG-V1` 与 `MCUI-TASK-V1` 签名域。两份签名的节点、Core、精确版本、时间窗与密钥必须一致，配置 `revision` 等于任务 `sequence`。支持 `xray_config=v1` 且使用签名发布清单的 Agent 才能领取此形态。配置正文按节点 root 策略确定性生成，摘要、长度与监听端口均须匹配。Helper 持久化已进入切换的最高修订，配置失败恢复上一次已提交的精确内容和运行意图。通过原任务凭证对账，重复投递不重新应用。要恢复更早的配置需发起更高修订。 [受控入站部署](./phase-4-xray-inbound.md)
 
 **取消对象**字段：`schema_version`、`node_id`、`task_id`、`sequence`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`，使用任务用途密钥和取消域。取消须目标精确匹配；可独立于顺序任务领取并持久化。取消先于开始则任务消费为 CANCELED；已开始只在操作定义的安全点停止并回滚，无法安全中止时继续完成既有已授权步骤或安全恢复，返回 `CANCEL_TOO_LATE`，不能虚报取消成功。取消与开始由本地同一事务/锁线性化。
 

@@ -9,7 +9,8 @@ User=mcui-xray
 UMask=0077
 WorkingDirectory=/var/lib/mcui-xray/current
 Environment=XRAY_LOCATION_ASSET=/var/lib/mcui-xray/current
-ExecStart=/var/lib/mcui-xray/current/xray run -config /var/lib/mcui-xray/current/config.json
+LoadCredential=config.json:/var/lib/mcui-xray/control/runtime-config.json
+ExecStart=/var/lib/mcui-xray/current/xray run -config %d/config.json
 Restart=no
 TimeoutStartSec=15s
 TimeoutStopSec=10s
