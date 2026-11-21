@@ -21,6 +21,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/runtimehealth"
+	"golang.org/x/sys/unix"
 )
 
 type testServices struct {
@@ -86,6 +87,13 @@ func newUpdateFixture(t *testing.T) updateFixture {
 }
 
 func (f updateFixture) clock() (time.Time, error) { return f.now, nil }
+
+func TestBootstrapUnderPrivateUmask(t *testing.T) {
+	mask := unix.Umask(0077)
+	defer unix.Umask(mask)
+	f := newUpdateFixture(t)
+	requireStatus(t, f.manager, "v1.0.0", "initialized", 0, 0)
+}
 
 func (f updateFixture) provision(t *testing.T, version string, sequence, manifestVersion int64) {
 	t.Helper()

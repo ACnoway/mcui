@@ -95,7 +95,10 @@ func (m *Manager) bootstrap(ctx context.Context, node, version string, releaseKe
 	if err := m.save(state); err != nil {
 		return err
 	}
-	return m.point(pair)
+	if err := m.point(pair); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(m.dir))
 }
 
 func (m *Manager) Apply(ctx context.Context, clock func() (time.Time, error)) error {

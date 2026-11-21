@@ -192,7 +192,11 @@ func ReadPublicKey(path string) (ed25519.PublicKey, error) {
 
 func ownedDir(path string, mode os.FileMode, create bool) error {
 	if create {
-		if err := os.Mkdir(path, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := os.Mkdir(path, mode); err == nil {
+			if err := os.Chmod(path, mode); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrExist) {
 			return err
 		}
 	}
