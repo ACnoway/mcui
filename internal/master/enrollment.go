@@ -1,12 +1,16 @@
 package master
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +24,9 @@ type agentInstaller struct {
 	masterURL string
 	url       string
 	sha256    string
+	taskKeyID string
+	taskKey   ed25519.PublicKey
+	caPEM     []byte
 }
 
 // ConfigureAgentInstaller takes release metadata verified by the panel operator.
@@ -40,6 +47,28 @@ func (s *Server) ConfigureAgentInstaller(masterURL, installerURL, digest string)
 	return nil
 }
 
+var installerKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+func (s *Server) ConfigureAgentInstallerTrust(keyID string, key ed25519.PublicKey, caPEM []byte) error {
+	if s.installer == nil || !installerKeyIDPattern.MatchString(keyID) || len(key) != ed25519.PublicKeySize {
+		return errors.New("Agent installer trust requires approved installer metadata and a valid task key")
+	}
+	if runtime := s.taskRuntime; runtime != nil && (runtime.KeyID != keyID || !bytes.Equal(runtime.PublicKey, key)) {
+		return errors.New("Agent installer task key differs from the Master task runtime key")
+	}
+	if len(caPEM) > 0 {
+		canonical, err := security.CanonicalEnrollmentCA(caPEM)
+		if err != nil {
+			return err
+		}
+		caPEM = canonical
+	}
+	s.installer.taskKeyID = keyID
+	s.installer.taskKey = append(ed25519.PublicKey(nil), key...)
+	s.installer.caPEM = caPEM
+	return nil
+}
+
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
@@ -49,16 +78,38 @@ func (i agentInstaller) command(nodeID, installCode string, preserve bool) strin
 	if preserve {
 		stateFlag = " --preserve-state"
 	}
+	trustFlags := ""
+	if i.taskKeyID != "" {
+		trustFlags = " --task-key-id " + shellQuote(i.taskKeyID) + " --task-public-key " + shellQuote(base64.StdEncoding.EncodeToString(i.taskKey))
+		if len(i.caPEM) > 0 {
+			trustFlags += " --master-ca-base64 " + shellQuote(base64.StdEncoding.EncodeToString(i.caPEM))
+		}
+	}
 	return fmt.Sprintf(`(
   set +x
   set -eu
   umask 077
+  as_root() {
+    if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -- "$@"; fi
+  }
+  if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+    printf 'Run this command as root or install sudo.\n' >&2
+    exit 1
+  fi
+  if ! command -v curl >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
+    if [ ! -f /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1; then
+      printf 'Install curl and the system CA certificates first.\n' >&2
+      exit 1
+    fi
+    as_root apt-get update
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+  fi
   tmp=$(mktemp -d)
   trap 'rm -rf -- "$tmp"' EXIT
   curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --output "$tmp/install.sh" -- %s
   printf '%%s  %%s\n' %s "$tmp/install.sh" | sha256sum --check --status
-  printf '%%s\n' %s | sudo -- /bin/bash "$tmp/install.sh" --master %s --node-id %s%s
-)`, shellQuote(i.url), shellQuote(i.sha256), shellQuote(installCode), shellQuote(i.masterURL), shellQuote(nodeID), stateFlag)
+  printf '%%s\n' %s | as_root /bin/bash "$tmp/install.sh" --master %s --node-id %s%s%s
+)`, shellQuote(i.url), shellQuote(i.sha256), shellQuote(installCode), shellQuote(i.masterURL), shellQuote(nodeID), stateFlag, trustFlags)
 }
 
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {

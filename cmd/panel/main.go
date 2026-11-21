@@ -40,6 +40,9 @@ func main() {
 	recoverAdmin := flag.Bool("recover-initial-admin", false, "rotate the initial password of a pending administrator locally and exit")
 	installerURL := flag.String("agent-installer-url", os.Getenv("MCUI_AGENT_INSTALLER_URL"), "approved Agent installer HTTPS URL")
 	installerDigest := flag.String("agent-installer-sha256", os.Getenv("MCUI_AGENT_INSTALLER_SHA256"), "approved Agent installer SHA-256 digest")
+	installerKeyID := flag.String("agent-installer-task-key-id", os.Getenv("MCUI_AGENT_INSTALLER_TASK_KEY_ID"), "status-task signing key ID to provision with the approved Agent installer")
+	installerKeyPath := flag.String("agent-installer-task-public-key", os.Getenv("MCUI_AGENT_INSTALLER_TASK_PUBLIC_KEY"), "status-task public key to provision with the approved Agent installer")
+	installerCAPath := flag.String("agent-installer-master-ca", os.Getenv("MCUI_AGENT_INSTALLER_MASTER_CA"), "optional private Master CA bundle to provision with the approved Agent installer")
 	coreBackupDir := flag.String("core-backup-dir", "./data/core-backups", "directory for one latest stable Core backup per official project")
 	taskDBPath := flag.String("task-db", "", "durable status-task database; task APIs stay disabled when omitted")
 	taskKeyID := flag.String("task-key-id", "", "trusted status-task signing key identifier")
@@ -144,6 +147,11 @@ func main() {
 			log.Fatalf("configure Agent installer: %v", err)
 		}
 	}
+	if *installerKeyID != "" || *installerKeyPath != "" || *installerCAPath != "" {
+		if err := configureAgentInstallerTrust(srv, *installerKeyID, *installerKeyPath, *installerCAPath); err != nil {
+			log.Fatalf("configure Agent installer trust: %v", err)
+		}
+	}
 	catalog := corecatalog.NewClient()
 	srv.ConfigureCoreCatalog(catalog)
 	backupStore, backupErr := corecatalog.NewBackupStore(*coreBackupDir, catalog)
@@ -221,6 +229,28 @@ func main() {
 		log.Printf("mcui Master listening on local HTTP %s; Agent enrollment is unavailable", *addr)
 	}
 	log.Fatal(httpServer.Serve(listener))
+}
+
+func configureAgentInstallerTrust(srv *master.Server, keyID, publicKeyPath, caPath string) error {
+	if keyID == "" || publicKeyPath == "" {
+		return fmt.Errorf("Agent installer trust requires both -agent-installer-task-key-id and -agent-installer-task-public-key")
+	}
+	raw, err := os.ReadFile(publicKeyPath)
+	if err != nil {
+		return fmt.Errorf("read installer task public key: %w", err)
+	}
+	key, err := security.ParseEd25519PublicKey(raw)
+	if err != nil {
+		return fmt.Errorf("parse installer task public key: %w", err)
+	}
+	var ca []byte
+	if caPath != "" {
+		ca, err = security.ReadEnrollmentCA(caPath)
+		if err != nil {
+			return fmt.Errorf("read installer Master CA: %w", err)
+		}
+	}
+	return srv.ConfigureAgentInstallerTrust(keyID, key, ca)
 }
 
 func notifyReady() error {

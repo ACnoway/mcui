@@ -45,6 +45,9 @@ func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
 	if s == nil || runtime.Store == nil || runtime.Signer == nil || runtime.KeyID == "" || len(runtime.PublicKey) != ed25519.PublicKeySize || (runtime.Now == nil && runtime.TrustedNow == nil) {
 		return errors.New("incomplete task runtime configuration")
 	}
+	if i := s.installer; i != nil && i.taskKeyID != "" && (i.taskKeyID != runtime.KeyID || !bytes.Equal(i.taskKey, runtime.PublicKey)) {
+		return errors.New("Master task runtime key differs from the Agent installer task key")
+	}
 	copy := runtime
 	copy.PublicKey = append(ed25519.PublicKey(nil), runtime.PublicKey...)
 	if runtime.Checkpoint != nil && (runtime.Checkpoint.Journal == nil || runtime.Checkpoint.Authority == nil) {

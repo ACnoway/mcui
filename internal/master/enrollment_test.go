@@ -1,7 +1,10 @@
 package master
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +16,42 @@ import (
 
 	"github.com/ACnoway/mcui/internal/store"
 )
+
+func TestAgentInstallCommandIncludesExplicitTaskTrust(t *testing.T) {
+	s, _ := testServer(t)
+	key, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfigureAgentInstallerTrust("status-1", key, nil); err == nil {
+		t.Fatal("trust configuration accepted without an approved installer")
+	}
+	if err := s.ConfigureAgentInstaller("https://master.example.com", "https://releases.example.com/install.sh", strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(s.installer.command("node-1", "test-install-code", false), "--task-key-id") {
+		t.Fatal("the command for a legacy installer included unsupported trust flags")
+	}
+	if err := s.ConfigureAgentInstallerTrust("bad\nkey-id", key, nil); err == nil {
+		t.Fatal("accepted an invalid key ID")
+	}
+	if err := s.ConfigureAgentInstallerTrust("status-1", key, []byte("not a CA certificate")); err == nil {
+		t.Fatal("accepted an invalid Master CA")
+	}
+	if err := s.ConfigureAgentInstallerTrust("status-1", key, nil); err != nil {
+		t.Fatal(err)
+	}
+	cmd := s.installer.command("node-1", "test-install-code", true)
+	opts := "--preserve-state --task-key-id 'status-1' --task-public-key '" + base64.StdEncoding.EncodeToString(key) + "'"
+	verifyAt, executeAt := strings.Index(cmd, "sha256sum --check"), strings.Index(cmd, "as_root /bin/bash")
+	if !strings.Contains(cmd, opts) || strings.Contains(cmd, "--master-ca-base64") || verifyAt < 0 || executeAt < verifyAt {
+		t.Fatal("installation command did not verify the release before using configured trust")
+	}
+	s.taskRuntime = &TaskRuntime{KeyID: "another-signer", PublicKey: key}
+	if err := s.ConfigureAgentInstallerTrust("status-1", key, nil); err == nil {
+		t.Fatal("accepted installer trust different from the Master task runtime")
+	}
+}
 
 func TestNodeInstallationCodeLifecycle(t *testing.T) {
 	s, st := testServer(t)

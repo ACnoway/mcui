@@ -77,7 +77,7 @@ Master 核对连接 IP、Host 和协议头，按配置的外部 HTTPS 地址校�
 
 将完整证书链和服务账号可读的私钥路径分别配置为 `MCUI_TLS_CERT` 和 `MCUI_TLS_KEY`，并用 `MCUI_LISTEN` 显式选择监听地址。私钥仅授予服务账号读权限。原生部署重启服务后生效。Compose 直连 TLS 通过部署覆盖文件将证书只读挂载进容器，设置这两个变量，并按需要显式配置宿主机监听地址。直连与反代各选一个。
 
-生成 Agent 安装命令仍需提供已批准的安装程序 HTTPS URL、SHA-256 摘要及节点任务信任材料。[Agent 安装与迁移](./phase-1-operations.md)
+配置经核验的 Agent 安装程序 URL 和 SHA-256，以及要分发的任务公钥、key ID 和可选私有 CA。原生部署通过 `panel.env` 配置，Compose 通过只读文件挂载和环境变量配置。配置完成后，面板生成的命令可在节点上安装空 Agent 并配置所需信任材料。[Agent 安装与迁移](./phase-1-operations.md)
 
 ## 验证记录
 

@@ -50,9 +50,17 @@ func main() {
 	socketGroup := flag.String("socket-group", "mcui-agent", "group permitted to connect to the socket")
 	initialize := flag.Bool("initialize-ledger", false, "explicitly initialize a new helper ledger and exit")
 	check := flag.Bool("check-ledger", false, "verify an existing Helper ledger and exit")
+	enrollmentKey := flag.String("expected-enrollment-key", "", "verify the existing or staged task public key against this key file and exit")
+	enrollmentCA := flag.String("expected-enrollment-ca", "", "also verify the existing or staged Master CA against this CA bundle")
 	flag.Parse()
 	if os.Geteuid() != 0 {
 		log.Fatal("mcui-helper must run as root")
+	}
+	if *enrollmentKey != "" || *enrollmentCA != "" {
+		if err := checkEnrollmentTrust(*taskPublicKeyPath, *enrollmentKey, *masterCAPath, *enrollmentCA); err != nil {
+			log.Fatalf("check enrollment trust: %v", err)
+		}
+		return
 	}
 	if *nodeID == "" || *masterURL == "" || *taskKeyID == "" || *taskPublicKeyPath == "" {
 		log.Fatal("-node-id, -master, -task-key-id, and -task-public-key are required")

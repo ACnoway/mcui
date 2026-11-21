@@ -1,14 +1,14 @@
 # 主控与 Agent 接入运维
 
-本文记录当前手工部署与迁移流程。Agent 主动连接主控的 TLS 1.3 API，通过一次性安装码换取节点 Token。现有构建脚本打包 Linux amd64 和 arm64 的 Agent、只读状态 Helper 及其 systemd 单元。任务签名和 NTS 时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
+Agent 主动连接主控的 TLS 1.3 API，通过一次性安装码换取节点 Token。构建脚本打包 Linux amd64 和 arm64 的 Agent、只读状态 Helper 及其 systemd 单元。任务签名和 NTS 时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
 
-单管理员 Master 的 systemd、Compose、首次登录和 HTTPS 配置见[主控部署](./master-deployment.md)。Agent 当前按下文预置证书与公钥，自动准备依赖和信任材料属于[Agent 一键部署目标](./project-overview-and-development-workflow.md#41-首次部署流程)。
+单管理员 Master 的 systemd、Compose、首次登录和 HTTPS 配置见[主控部署](./master-deployment.md)。
 
 ## 主控和批准的安装包
 
-1. 为主控配置完整的 HTTPS 证书链和匹配的服务端私钥。示例 [mcui-panel.service](../deploy/systemd/mcui-panel.service) 使用专用 `mcui` 账号，私钥应由该账号独占读取（`0600`）。
+1. 为主控启用直连 TLS 或可信的 HTTPS 反代，确保节点可以访问配置的外部 HTTPS 地址。[HTTPS 接入](./master-deployment.md#https-接入)
 2. 从经审核的提交构建安装程序，再通过批准的发布渠道发布。构建脚本输出安装程序的 SHA-256。通过独立可信渠道审核并取得发布清单中的 HTTPS 地址和摘要。
-3. 将以下内容写入主控的 `/etc/mcui/panel.env`，然后重启面板。也可使用同名功能的 `-public-url`、`-agent-installer-url` 和 `-agent-installer-sha256` 参数。
+3. 将以下内容写入原生部署的 `/etc/mcui-master/panel.env`，然后重启面板。手工部署使用其现有环境文件。Compose 通过部署环境传入变量，用覆盖文件将公钥和可选 CA 只读挂载到容器中，变量中的路径须为容器内路径。
 
 ```sh
 bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh
@@ -18,22 +18,28 @@ bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh
 MCUI_PUBLIC_URL=https://master.example.net:8443
 MCUI_AGENT_INSTALLER_URL=https://releases.example.net/mcui/v1/mcui-agent-install.sh
 MCUI_AGENT_INSTALLER_SHA256=<批准发布清单中的 SHA-256>
+MCUI_AGENT_INSTALLER_TASK_KEY_ID=<状态任务签名 key ID>
+MCUI_AGENT_INSTALLER_TASK_PUBLIC_KEY=/etc/mcui-master/task-signing.pub
+# 私有 PKI 使用证书形式的 CA PEM。公有 CA 可省略此行。
+MCUI_AGENT_INSTALLER_MASTER_CA=/etc/mcui-master/agent-trust-ca.pem
 ```
 
-主控直接提供 HTTPS；Agent 会校验证书链和主机名。面板使用显式配置的主控地址和批准制品信息生成命令。部署时可通过既有本地方式使用 `MCUI_BOOTSTRAP_TOKEN` 初始化安全管理员。
+使用支持自动配置信任的新安装包时设置任务公钥及 key ID，两者须与启用的状态任务签发器一致。CA 文件只包含经核对的 CA 证书，大小上限为 16 KiB。发布下载使用节点系统 CA；可选的私有 CA 专用于验证 Master，Agent 仍校验证书链和主机名。
+
+沿用旧安装包时仅设置安装包地址和摘要，并经可信渠道预置 `/etc/mcui-agent/task-signing.pub`、`/etc/mcui-agent/task-key-id` 及可选的 `/etc/mcui-agent/master-ca.pem`。目录使用 `root:root 0755`，信任文件使用 `root:root 0644`。
 
 ## 节点首次接入
 
-1. 在目标 Linux 节点准备 systemd、CA 证书、curl、sudo 和基本 GNU 工具。Debian 可安装 `ca-certificates curl sudo passwd util-linux coreutils tar gzip`。使用任务查询前按阶段 2 说明配置 chrony。
-2. 经独立可信渠道分发任务签名公钥和对应 key ID 至 `/etc/mcui-agent/task-signing.pub` 与 `/etc/mcui-agent/task-key-id`（单行文本）。目录应为 `root:root 0755`，公钥文件应为 `root:root 0644`。公有 CA 证书使用系统信任库。私有证书部署通过可信渠道将 CA 放在 `/etc/mcui-agent/master-ca.pem`（`root:root 0644`），供 Agent 与 Helper 使用。
-3. 安全管理员在「节点管理」填写名称和分组，创建待接入的节点。选择「生成安装命令」，按提示完成 MFA 复验。在 10 分钟内把命令粘贴到该节点的可信终端。命令会在提权执行安装程序前校验下载文件的 SHA-256。
-4. 安装程序核对本地节点身份，验证或初始化 Agent/Helper 账本，兑换安装码并核对响应节点 ID。凭据原子写入 `/var/lib/mcui-agent/identity.json`（`0600`）。服务启动后刷新面板，首次心跳会使原记录上线。在干净节点上三种 Core 均未安装。
+1. 目标为运行 systemd 的 Linux amd64 或 arm64 节点。以 root 或有 sudo 权限的账号执行。在有 APT 的 Debian 系节点上，命令按需安装 curl、系统 CA 和缺失的基础工具。其他发行版使用本地包管理器准备依赖。使用任务查询前按阶段 2 说明配置 chrony。
+2. 安全管理员在「节点管理」创建待接入的节点，选择「生成安装命令」并完成 MFA 复验。在 10 分钟内把命令粘贴到该节点的可信终端。命令先核验下载文件的 SHA-256，再以 root 运行安装程序。
+3. 安装程序核对本地身份、Agent/Helper 账本和候选信任，再通过已验证的 HTTPS 兑换安装码。核对响应节点 ID 后，凭据原子写入 `/var/lib/mcui-agent/identity.json`（`0600`），安装程序补齐缺失的信任文件并启动服务。首次心跳使原记录上线，节点仍为空 Agent。
 
 生成、替换和撤销只操作所选节点。安装命令包含一次性安装码，应通过可信途径交付，避免写入共享终端历史、工单和日志。长期 Token 只由 Agent 从 HTTPS 响应取得。安装码兑换响应丢失或凭据保存失败时，为原节点生成新命令。
 
 ## 轮换、禁用与旧节点迁移
 
 - 轮换时为原节点补发命令。补发作废之前未兑换的码，成功兑换立即作废原 Token。禁用节点会同时撤销 Token 和未兑换的安装码，并终止新的任务签发和投递。
+- 安装命令沿用相同的已有任务公钥、key ID 和 CA。已有文件与命令携带的信任不一致时会在兑换前中止。更换密钥或 CA 使用本地受保护的信任轮换流程，再为原节点补发命令。
 - 升级前保护性备份 Master 数据库和任务库，并保留节点上的原 Agent 身份、Agent 账本与 Helper 账本。升级面板时更新 systemd unit 和任务 drop-in，移除旧的 `-node-ca-cert`、`-node-ca-key`。Master schema 迁移保留节点 ID 和管理数据，升级后旧 mTLS Agent 会暂停通信，直至用原节点的命令兑换 Token。
 - 检查原先使用自定义路径的部署。安装程序预期 Agent 状态在 `/var/lib/mcui-agent`，Helper 状态在 `/var/lib/mcui-helper`。先以原有权限和属主恢复至这些位置，保留账本、WAL 和快照的一致性。安装程序验证两份原账本，继续沿用原节点 ID 和序号。
 - 原节点缺少任一账本时，先冻结任务并核对主控历史。只有能证实该组件从未处理任务时，才按经确认的本地初始化流程创建对应账本。原 Agent 可用 `-initialize-task-ledger`，Helper 可用 `-initialize-ledger`，参数示例见[阶段 2 操作说明](./phase-2-operations.md)。存在不确定历史时按[Agent 协议恢复规则](./agent-protocol.md#6-防回退与灾难恢复)处理。

@@ -8,11 +8,17 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 master=
 node_id=
 preserve=false
+provided_key_id=
+provided_key=
+provided_ca=
 while (($#)); do
   case "$1" in
     --master) (($# >= 2)) || die 'Missing Master address'; master=$2; shift 2 ;;
     --node-id) (($# >= 2)) || die 'Missing node ID'; node_id=$2; shift 2 ;;
     --preserve-state) preserve=true; shift ;;
+    --task-key-id) (($# >= 2)) || die 'Missing task key ID'; provided_key_id=$2; shift 2 ;;
+    --task-public-key) (($# >= 2)) || die 'Missing task public key'; provided_key=$2; shift 2 ;;
+    --master-ca-base64) (($# >= 2)) || die 'Missing Master CA'; provided_ca=$2; shift 2 ;;
     *) die 'Unknown installer option' ;;
   esac
 done
@@ -20,17 +26,36 @@ done
 [[ $(id -u) == 0 ]] || die 'Run the verified installer with sudo'
 [[ $master == https://* && ! $master =~ [[:space:]] ]] || die 'Invalid Master origin'
 [[ $node_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || die 'Invalid node ID'
+if [[ $provided_key_id || $provided_key || $provided_ca ]]; then
+  [[ $provided_key_id =~ ^[A-Za-z0-9._:-]{1,128}$ && $provided_key =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
+    die 'Automatic trust setup requires a valid task key ID and Base64 Ed25519 public key'
+  (( ${#provided_ca} <= 21848 )) || die 'Master CA exceeds the enrollment limit'
+fi
 [[ $(uname -s) == Linux ]] || die 'Linux with systemd is required'
 case "$(uname -m)" in
   x86_64) arch=amd64 ;;
   aarch64) arch=arm64 ;;
   *) die 'Unsupported Linux architecture' ;;
 esac
-for tool in systemctl runuser groupadd useradd getent install flock stat awk tar tail; do
+command -v systemctl >/dev/null || die 'A running systemd instance is required'
+systemctl show --property=Version --value >/dev/null || die 'A running systemd instance is required'
+
+required_tools=(runuser groupadd useradd getent install flock stat awk tar tail gzip base64 ln mktemp)
+missing=()
+for tool in "${required_tools[@]}"; do
+  command -v "$tool" >/dev/null || missing+=("$tool")
+done
+if (( ${#missing[@]} )) || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+  [[ -f /etc/debian_version ]] && command -v apt-get >/dev/null ||
+    die "Install system CA certificates and required commands first: ${missing[*]}"
+  apt-get update </dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates passwd util-linux coreutils tar gzip mawk </dev/null
+fi
+for tool in "${required_tools[@]}"; do
   command -v "$tool" >/dev/null || die "Missing required command: $tool"
 done
-systemctl show --property=Version --value >/dev/null || die 'A running systemd instance is required'
-[[ -r /etc/ssl/certs/ca-certificates.crt ]] || die 'Install ca-certificates first'
+[[ -s /etc/ssl/certs/ca-certificates.crt ]] || die 'Install ca-certificates first'
 
 exec 9>/run/mcui-agent-install.lock
 flock -n 9 || die 'Another Agent installation is in progress'
@@ -39,31 +64,31 @@ config=/etc/mcui-agent
 agent_state=/var/lib/mcui-agent
 helper_state=/var/lib/mcui-helper
 key_file=$config/task-signing.pub
+key_id_file=$config/task-key-id
 ca_file=
+pending_trust=
+file_exists() { [[ -e $1 || -L $1 ]]; }
 check_config() {
   local mode
   [[ -f $1 && ! -L $1 ]] || die "Missing or invalid trusted configuration: $1"
   mode=$(stat -c '%u:%a' -- "$1")
   [[ $mode == 0:644 || $mode == 0:640 || $mode == 0:600 ]] || die "Insecure trusted configuration: $1"
 }
+if ! file_exists "$config" && [[ $provided_key_id ]]; then
+  install -d -o root -g root -m 0755 "$config"
+fi
 [[ -d $config && ! -L $config ]] || die "Provision trusted configuration in $config"
 config_mode=$(stat -c '%u:%a' -- "$config")
 [[ $config_mode == 0:755 || $config_mode == 0:750 ]] || die 'Insecure Agent configuration directory'
-check_config "$key_file"
-check_config "$config/task-key-id"
-key_id=$(<"$config/task-key-id")
-[[ $key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || die 'Invalid task signing key ID'
-if [[ -e $config/master-ca.pem || -L $config/master-ca.pem ]]; then
-  ca_file=$config/master-ca.pem
-  check_config "$ca_file"
-fi
-
 stage=$(mktemp -d /var/tmp/mcui-install.XXXXXXXX)
 restart_agent=false
 cleanup() {
   local result=$?
   if [[ $restart_agent == true && $result != 0 ]]; then
     systemctl start mcui-agent.service >/dev/null 2>&1 || true
+  fi
+  if [[ $pending_trust ]]; then
+    rm -f -- "$pending_trust"
   fi
   rm -rf -- "$stage"
 }
@@ -78,12 +103,59 @@ helper=$stage/$arch/mcui-helper
 [[ -x $agent && -x $helper ]] || die 'Installer is missing the required binaries'
 chmod 0755 "$stage/$arch" "$agent"
 
+install_trust() {
+  pending_trust=$(mktemp "$config/.mcui-trust.XXXXXXXX")
+  install -o root -g root -m 0644 "$1" "$pending_trust"
+  ln -T -- "$pending_trust" "$2"
+  rm -f -- "$pending_trust"
+  pending_trust=
+}
+
+if file_exists "$config/master-ca.pem"; then
+  ca_file=$config/master-ca.pem
+  check_config "$ca_file"
+fi
+effective_key=$key_file
+effective_ca=$ca_file
+if [[ $provided_key_id ]]; then
+  printf '%s\n' "$provided_key" >"$stage/task-signing.pub"
+  printf '%s\n' "$provided_key_id" >"$stage/task-key-id"
+  if file_exists "$key_file"; then
+    check_config "$key_file"
+  else
+    chmod 0644 "$stage/task-signing.pub"
+    effective_key=$stage/task-signing.pub
+  fi
+  if file_exists "$key_id_file"; then
+    check_config "$key_id_file"
+    [[ $(<"$key_id_file") == "$provided_key_id" ]] ||
+      die 'Task key ID differs from the installed trust; use the local trust rotation workflow'
+  fi
+  trust_check=(-task-public-key "$effective_key" -expected-enrollment-key "$stage/task-signing.pub")
+  if [[ $provided_ca ]]; then
+    printf '%s' "$provided_ca" | base64 --decode >"$stage/master-ca.pem" || die 'Invalid Master CA encoding'
+    if [[ -z $ca_file ]]; then
+      chmod 0644 "$stage/master-ca.pem"
+      effective_ca=$stage/master-ca.pem
+      ca_file=$config/master-ca.pem
+    fi
+    trust_check+=(-master-ca "$effective_ca" -expected-enrollment-ca "$stage/master-ca.pem")
+  fi
+  "$helper" "${trust_check[@]}"
+  key_id=$provided_key_id
+else
+  check_config "$key_file"
+  check_config "$key_id_file"
+  key_id=$(<"$key_id_file")
+  [[ $key_id =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || die 'Invalid task signing key ID'
+fi
+
 getent group mcui-agent >/dev/null || groupadd --system mcui-agent
 id mcui-agent >/dev/null 2>&1 || useradd --system --gid mcui-agent --no-create-home --home-dir "$agent_state" --shell /usr/sbin/nologin mcui-agent
 [[ $(id -u mcui-agent) != 0 && $(id -gn mcui-agent) == mcui-agent ]] || die 'Invalid existing Agent account'
-runuser -u mcui-agent -- test -r "$key_file" || die 'The Agent cannot read the task signing public key'
-if [[ $ca_file ]]; then
-  runuser -u mcui-agent -- test -r "$ca_file" || die 'The Agent cannot read the private Master CA'
+runuser -u mcui-agent -- test -r "$effective_key" || die 'The Agent cannot read the task signing public key'
+if [[ $effective_ca ]]; then
+  runuser -u mcui-agent -- test -r "$effective_ca" || die 'The Agent cannot read the private Master CA'
 fi
 
 if [[ $preserve == true ]]; then
@@ -93,8 +165,8 @@ fi
 [[ -d $agent_state ]] || install -d -o mcui-agent -g mcui-agent -m 0700 "$agent_state"
 [[ -d $helper_state ]] || install -d -o root -g mcui-agent -m 0700 "$helper_state"
 
-agent_args=(-master "$master" -node-id "$node_id" "-server-ca=$ca_file")
-helper_args=(-master "$master" -node-id "$node_id" "-master-ca=$ca_file" -task-key-id "$key_id" -task-public-key "$key_file")
+agent_args=(-master "$master" -node-id "$node_id" "-server-ca=$effective_ca")
+helper_args=(-master "$master" -node-id "$node_id" "-master-ca=$effective_ca" -task-key-id "$key_id" -task-public-key "$effective_key")
 if systemctl is-active --quiet mcui-agent.service; then
   systemctl stop mcui-agent.service
   restart_agent=true
@@ -113,6 +185,14 @@ runuser -u mcui-agent -- env "MCUI_AGENT_STATE=$agent_state/identity.json" "$age
 # Redeem only after local prerequisites and both ledgers have been checked.
 runuser -u mcui-agent -- env "MCUI_AGENT_STATE=$agent_state/identity.json" "$agent" "${agent_args[@]}" -enroll
 restart_agent=false
+
+if [[ $provided_key_id ]]; then
+  file_exists "$key_file" || install_trust "$stage/task-signing.pub" "$key_file"
+  file_exists "$key_id_file" || install_trust "$stage/task-key-id" "$key_id_file"
+  if [[ $provided_ca ]] && ! file_exists "$ca_file"; then
+    install_trust "$stage/master-ca.pem" "$ca_file"
+  fi
+fi
 
 install -o root -g root -m 0755 "$agent" /usr/local/bin/mcui-agent
 install -o root -g root -m 0755 "$helper" /usr/local/bin/mcui-helper
