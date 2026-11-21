@@ -4,7 +4,6 @@ package xrayruntime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -43,17 +42,17 @@ func (systemdService) checkConfigUnits(ctx context.Context, destination string) 
 func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace, destination string) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	cmd := systemctlCommand(ctx, "show", "--property=ExecStart,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow", unit)
+	cmd := systemctlCommand(ctx, "show", "--property=ExecStart,StandardInput,NeedDaemonReload,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow", unit)
 	raw, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("read Xray configuration sandbox for %s: %w", unit, err)
 	}
 	values := systemdProperties(raw)
-	argv := "argv[]=" + StateDir + "/" + bundle + "/xray run " + flag + "-config /run/credentials/" + unit + "/config.json ;"
+	argv := "argv[]=" + StateDir + "/" + bundle + "/xray run " + flag + "-config stdin: ;"
 	deny := strings.Fields(values["IPAddressDeny"])
 	if values["PrivateNetwork"] != "yes" || values["NetworkNamespacePath"] != namespace ||
 		values["DynamicUser"] != "yes" || values["NoNewPrivileges"] != "yes" ||
-		!strings.Contains(values["ExecStart"], argv) ||
+		values["StandardInput"] != "file" || values["NeedDaemonReload"] != "no" || !strings.Contains(values["ExecStart"], argv) ||
 		len(deny) != 2 || !strings.Contains(values["IPAddressDeny"], "0.0.0.0/0") || !strings.Contains(values["IPAddressDeny"], "::/0") ||
 		(namespace == "" && values["IPAddressAllow"] != "") {
 		return fmt.Errorf("Xray configuration sandbox does not match the required settings for %s", unit)
@@ -73,18 +72,27 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace,
 			return errors.New("Xray service lacks IP allowances for the approved route")
 		}
 	}
-	object := "/org/freedesktop/systemd1/unit/" + strings.NewReplacer("-", "_2d", ".", "_2e").Replace(unit)
-	cmd = exec.CommandContext(ctx, "/usr/bin/busctl", "--json=short", "get-property", "org.freedesktop.systemd1", object, "org.freedesktop.systemd1.Service", "LoadCredential")
-	raw, err = cmd.Output()
-	var credential struct {
-		Data [][]string `json:"data"`
-	}
-	if err != nil || json.Unmarshal(raw, &credential) != nil || len(credential.Data) != 1 ||
-		len(credential.Data[0]) != 2 || credential.Data[0][0] != "config.json" ||
-		credential.Data[0][1] != StateDir+"/control/"+config {
-		return fmt.Errorf("Xray unit %s does not load the required private configuration", unit)
+	// systemd exposes the input type through D-Bus, but omits the file path.
+	// Read the unit and its drop-ins after checking that they match the loaded unit.
+	raw, err = systemctlCommand(ctx, "cat", unit).Output()
+	if err != nil || unitStandardInput(raw) != "file:"+StateDir+"/control/"+config {
+		return fmt.Errorf("Xray unit %s does not use the required private configuration", unit)
 	}
 	return nil
+}
+
+func unitStandardInput(raw []byte) string {
+	var section, input string
+	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\\\n", " "), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line
+		}
+		if name, value, ok := strings.Cut(line, "="); ok && section == "[Service]" && strings.TrimSpace(name) == "StandardInput" {
+			input = strings.TrimSpace(value)
+		}
+	}
+	return input
 }
 
 func (systemdService) preflight(ctx context.Context) error {

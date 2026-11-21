@@ -479,8 +479,8 @@ func (r *Runtime) reconcile(ctx context.Context, next selection) error {
 	return r.prepareRuntimeConfig(ctx, next)
 }
 
-func (r *Runtime) runPreflight(ctx context.Context, release Release) (err error) {
-	return r.preflightConfig(ctx, release, []byte("{}\n"))
+func (r *Runtime) runPreflight(ctx context.Context, release Release) error {
+	return r.preflightConfig(ctx, release, []byte(bootstrapConfig))
 }
 
 func (r *Runtime) preflightConfig(ctx context.Context, release Release, data []byte) (err error) {

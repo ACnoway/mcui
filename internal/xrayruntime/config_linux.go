@@ -114,7 +114,7 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) erro
 	if next.Release == (Release{}) {
 		return r.removeControl("runtime-config.json")
 	}
-	data := []byte("{}\n")
+	data := []byte(bootstrapConfig)
 	if next.Revision != 0 {
 		file, err := checkedFile(filepath.Join(r.dir, "control", configName(next.Config)), 0600, xrayconfig.MaxSize)
 		if err != nil {

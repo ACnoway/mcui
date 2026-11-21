@@ -410,7 +410,11 @@ func TestControlledConfigKeepsLastGoodBytesOnStartFailure(t *testing.T) {
 	svc.dir = r.dir
 	release := stageFixture(t, r, xrayconfig.Version)
 	applyFixture(t, r, Install, selection{Release: release, Running: true})
-	path := filepath.Join(t.TempDir(), "controlled-inbound.json")
+	policyDir := t.TempDir()
+	if err := os.Chmod(policyDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(policyDir, "controlled-inbound.json")
 	policy := xrayconfig.Policy{
 		ReleaseSHA256: release.SHA256, ListenPort: 1080, Password: strings.Repeat("A", 43),
 		DestinationIP: "93.184.216.34", DestinationPort: 8080,
