@@ -27,6 +27,7 @@ type socketRequest struct {
 	Task             json.RawMessage `json:"task,omitempty"`
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 	Probe            bool            `json:"probe,omitempty"`
+	XrayInventory    bool            `json:"xray_inventory,omitempty"`
 }
 
 type socketResponse struct {
@@ -136,11 +137,28 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 	if decoder.Decode(&trailing) != io.EOF {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
-	if request.Probe {
-		if !h.cfg.RuntimeManaged || len(request.Task) != 0 || request.LeaseID != "" || request.ReconcileInstall || h.authorizePeer(conn) != nil {
+	if request.Probe || request.XrayInventory {
+		if (request.Probe && request.XrayInventory) || len(request.Task) != 0 || request.LeaseID != "" || request.ReconcileInstall || h.authorizePeer(conn) != nil {
 			return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 		}
-		result, err := json.Marshal(map[string]any{"node_id": h.cfg.NodeID, "protocol": runtimehealth.Protocol})
+		var value any
+		if request.XrayInventory {
+			install := h.cfg.XrayInstall
+			if install == nil || install.Inventory == nil {
+				return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+			}
+			inventory, err := install.Inventory()
+			if err != nil || !inventory.Valid() {
+				return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+			}
+			value = map[string]any{"node_id": h.cfg.NodeID, "xray": inventory}
+		} else {
+			if !h.cfg.RuntimeManaged {
+				return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+			}
+			value = map[string]any{"node_id": h.cfg.NodeID, "protocol": runtimehealth.Protocol}
+		}
+		result, err := json.Marshal(value)
 		if err != nil {
 			return err
 		}

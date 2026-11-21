@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/runtimeupdate"
 	"modernc.org/sqlite"
 )
@@ -75,6 +76,9 @@ type XrayInstall struct {
 	Proposal   json.RawMessage `json:"proposal"`
 	ApprovalID string          `json:"approval_id,omitempty"` // Existing storage key for the authorization digest.
 	SignedTask json.RawMessage `json:"signed_task,omitempty"`
+	Panel      bool            `json:"panel,omitempty"`
+	Intent     string          `json:"panel_intent,omitempty"`
+	Dispatched bool            `json:"panel_dispatched,omitempty"`
 }
 
 type Admin struct {
@@ -91,15 +95,16 @@ type Admin struct {
 }
 
 type Node struct {
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	Group                string `json:"group"`
-	LastSeen             int64  `json:"last_seen"`
-	Disabled             bool   `json:"disabled"`
-	Enrolled             bool   `json:"enrolled,omitempty"`
-	TokenHash            string `json:"node_token_hash,omitempty"`
-	InstallCodeHash      string `json:"install_code_hash,omitempty"`
-	InstallCodeExpiresAt int64  `json:"install_code_expires_at,omitempty"`
+	ID                   string                       `json:"id"`
+	Name                 string                       `json:"name"`
+	Group                string                       `json:"group"`
+	LastSeen             int64                        `json:"last_seen"`
+	Disabled             bool                         `json:"disabled"`
+	Enrolled             bool                         `json:"enrolled,omitempty"`
+	TokenHash            string                       `json:"node_token_hash,omitempty"`
+	InstallCodeHash      string                       `json:"install_code_hash,omitempty"`
+	InstallCodeExpiresAt int64                        `json:"install_code_expires_at,omitempty"`
+	Inventory            *lifecycleauth.NodeInventory `json:"inventory,omitempty"`
 }
 
 type Session struct {

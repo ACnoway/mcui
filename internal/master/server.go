@@ -49,6 +49,7 @@ type Server struct {
 	nodeAccess     sync.RWMutex
 	taskState      sync.Mutex
 	taskRuntime    *TaskRuntime
+	xrayPanel      panelXraySigner
 	taskCheckpoint *taskCheckpoint
 	runtimeUpdates *RuntimeUpdatePolicy
 	coreCatalog    corecatalog.Source
@@ -103,6 +104,8 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.handleAPI("GET /api/v1/admin/tasks", x.listTasks)
 	x.handleAPI("GET /api/v1/admin/tasks/{id}", x.taskDetail)
 	x.handleAPI("GET /api/v1/admin/xray-installs", x.listXrayInstalls)
+	x.mux.HandleFunc("GET /api/v1/admin/nodes/{node}/xray", x.panelXrayOptions)
+	x.mux.HandleFunc("POST /api/v1/admin/nodes/{node}/xray", x.panelXrayOperation)
 	x.handleAPI("POST /api/v1/admin/nodes/{node}/runtime-updates", x.createRuntimeUpdate)
 	x.handleAPI("GET /api/v1/admin/nodes/{node}/runtime-updates", x.listRuntimeUpdates)
 	x.handleAPI("POST /api/v1/runtime/nodes/{node}/poll", x.pollRuntimeUpdate)
@@ -491,6 +494,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": ctx.Admin.ID, "username": ctx.Admin.Username, "role": ctx.Admin.Role,
 		"can_prepare_xray_installs": secureRequest(r) && s.taskRuntime != nil && s.taskRuntime.XrayInstallPolicy != nil && ctx.Admin.Role == "operator",
+		"can_manage_xray":           secureRequest(r) && s.canManagePanelXray(ctx.Admin),
 		"can_update_runtime":        secureRequest(r) && s.runtimeUpdates != nil && ctx.Admin.Role == "security_admin",
 		"can_manage_admins":         !s.singleAdmin && ctx.Admin.Role == "security_admin",
 		"all_nodes":                 ctx.Admin.AllNodes, "node_ids": ctx.Admin.NodeIDs, "node_groups": ctx.Admin.NodeGroups,

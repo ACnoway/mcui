@@ -29,7 +29,7 @@ func main() {
 
 func run(args []string, output io.Writer, trustedNow func() (time.Time, error)) error {
 	if len(args) == 0 {
-		return errors.New("usage: mcui-lifecycle <request|init-ledger|issue> [flags]")
+		return errors.New("usage: mcui-lifecycle <request|init-ledger|issue|serve> [flags]")
 	}
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -45,8 +45,10 @@ func run(args []string, output io.Writer, trustedNow func() (time.Time, error)) 
 		return lifecycleauth.InitLedger(*path)
 	case "request", "issue":
 		return signCommand(command, flags, args[1:], output, trustedNow)
+	case "serve":
+		return servePanelSigner(flags, args[1:], trustedNow)
 	default:
-		return errors.New("expected request, init-ledger or issue")
+		return errors.New("expected request, init-ledger, issue or serve")
 	}
 }
 

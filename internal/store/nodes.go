@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 )
 
 const nodeTokenHashSQL = `json_extract(CAST(payload AS TEXT), '$.node_token_hash')`
@@ -47,15 +49,22 @@ func (s *Store) NodeByTokenHash(ctx context.Context, digest string) (Node, error
 	return node, nil
 }
 
-func (s *Store) RecordNodeHeartbeat(ctx context.Context, id, digest string, seen int64) error {
+func (s *Store) RecordNodeHeartbeat(ctx context.Context, id, digest string, seen int64, inventory *lifecycleauth.NodeInventory) error {
 	if id == "" || digest == "" {
 		return ErrNotFound
+	}
+	raw, err := json.Marshal(inventory)
+	if err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result, err := s.db.ExecContext(ctx, `UPDATE nodes
-		SET last_seen = MAX(last_seen, ?), payload = CAST(json_set(CAST(payload AS TEXT), '$.last_seen', MAX(last_seen, ?)) AS BLOB)
-		WHERE id = ? AND disabled = 0 AND `+nodeTokenHashSQL+` = ?`, seen, seen, id, digest)
+		SET last_seen = MAX(last_seen, ?),
+		    payload = CAST(json_set(CAST(payload AS TEXT), '$.last_seen', MAX(last_seen, ?),
+		        '$.inventory', json(CASE WHEN ? >= last_seen THEN ? ELSE
+		          COALESCE(json_extract(CAST(payload AS TEXT), '$.inventory'), 'null') END)) AS BLOB)
+		WHERE id = ? AND disabled = 0 AND `+nodeTokenHashSQL+` = ?`, seen, seen, seen, string(raw), id, digest)
 	if err != nil {
 		return err
 	}

@@ -62,7 +62,7 @@ func (s *Server) xrayInstallAccess(w http.ResponseWriter, r *http.Request) (admi
 			return ctx, nil, false
 		}
 	}
-	if ctx.Admin.Role != "operator" {
+	if ctx.Admin.Role != "operator" && !(r.Method == http.MethodGet && s.canManagePanelXray(ctx.Admin)) {
 		http.NotFound(w, r)
 		return ctx, nil, false
 	}
@@ -132,6 +132,9 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 			return errXrayInstallScope
 		}
 		if prior, exists := st.XrayInstalls[in.TaskID]; exists {
+			if prior.Panel {
+				return errXrayInstallReserved
+			}
 			old, err := lifecycleauth.ParseProposal(prior.Proposal)
 			if err != nil {
 				return err
@@ -239,7 +242,7 @@ func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request)
 	err = s.store.Update(func(st *store.State) error {
 		var exists bool
 		record, exists = st.XrayInstalls[p.TaskID]
-		if !exists || !canPrepareXrayInstall(st, p) {
+		if !exists || record.Panel || !canPrepareXrayInstall(st, p) {
 			return errXrayInstallScope
 		}
 		saved, err := lifecycleauth.ParseProposal(record.Proposal)
@@ -353,7 +356,7 @@ func (s *Server) readXrayDispatch(id, requester string, policy *lifecycleauth.Po
 	err := s.store.View(func(st store.State) error {
 		var ok bool
 		record, ok = st.XrayInstalls[id]
-		if !ok {
+		if !ok || record.Panel {
 			return errXrayInstallScope
 		}
 		p, err := lifecycleauth.ParseProposal(record.Proposal)
@@ -385,6 +388,15 @@ func (s *Server) verifyStoredXrayTask(raw []byte, requireCurrentScope bool) (lif
 		p, err := lifecycleauth.ParseProposal(record.Proposal)
 		if err != nil || !task.Matches(p, record.ApprovalID) {
 			return errXrayInstallReserved
+		}
+		if record.Panel {
+			if _, err := policy.VerifyPanelTask(p, raw); err != nil {
+				return err
+			}
+			if requireCurrentScope && !s.panelXrayScope(&st, p) {
+				return errXrayInstallScope
+			}
+			return nil
 		}
 		if requireCurrentScope && (!policy.AllowsProposal(p) || !canPrepareXrayInstall(&st, p)) {
 			return errXrayInstallScope
@@ -477,6 +489,9 @@ func checkXrayInstallReservation(st *store.State, taskID, nodeID string, now int
 		return errXrayInstallReserved
 	}
 	for _, record := range st.XrayInstalls {
+		if record.Panel && record.Dispatched {
+			continue
+		}
 		p, err := lifecycleauth.ParseProposal(record.Proposal)
 		if err != nil {
 			return err

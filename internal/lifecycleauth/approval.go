@@ -85,6 +85,12 @@ type policyDocument struct {
 	SigningKeyID     string      `json:"signing_key_id"`
 	SigningPublicKey string      `json:"signing_public_key"`
 	Principals       []Principal `json:"principals"`
+	Panel            *PanelScope `json:"panel,omitempty"`
+}
+
+type PanelScope struct {
+	AllNodes bool     `json:"all_nodes"`
+	NodeIDs  []string `json:"node_ids,omitempty"`
 }
 
 type principal struct {
@@ -98,19 +104,30 @@ type Policy struct {
 	keyID      string
 	signingKey ed25519.PublicKey
 	principals map[string]principal
+	panel      *PanelScope
 }
 
 func ParsePolicy(raw []byte) (*Policy, error) {
 	var doc policyDocument
 	if len(raw) > maxPolicySize || jsonv2.Unmarshal(raw, &doc, jsonv2.RejectUnknownMembers(true)) != nil ||
-		doc.SchemaVersion != 1 || !identifier.MatchString(doc.SigningKeyID) || len(doc.Principals) == 0 {
+		doc.SchemaVersion != 1 || !identifier.MatchString(doc.SigningKeyID) || (len(doc.Principals) == 0 && doc.Panel == nil) {
 		return nil, errors.New("invalid Xray install authorization policy")
 	}
 	signingKey, err := publicKey(doc.SigningPublicKey)
 	if err != nil {
 		return nil, err
 	}
-	policy := &Policy{keyID: doc.SigningKeyID, signingKey: signingKey, principals: make(map[string]principal)}
+	if doc.Panel != nil {
+		if doc.Panel.AllNodes == (len(doc.Panel.NodeIDs) != 0) {
+			return nil, errors.New("panel policy requires either all_nodes or an explicit node list")
+		}
+		for i, id := range doc.Panel.NodeIDs {
+			if !security.ValidNodeID(id) || slices.Contains(doc.Panel.NodeIDs[:i], id) {
+				return nil, errors.New("invalid or duplicate panel node ID")
+			}
+		}
+	}
+	policy := &Policy{keyID: doc.SigningKeyID, signingKey: signingKey, principals: make(map[string]principal), panel: doc.Panel}
 	keys := map[string]bool{string(signingKey): true}
 	for _, actor := range doc.Principals {
 		key, err := publicKey(actor.PublicKey)

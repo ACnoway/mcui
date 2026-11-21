@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/store"
 )
@@ -260,6 +261,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		node.InstallCodeHash, node.InstallCodeExpiresAt = "", 0
 		node.Enrolled = true
 		node.TokenHash, node.LastSeen = hash(token), 0
+		node.Inventory = nil
 		nodeID = node.ID
 		st.Nodes[nodeID] = node
 		s.appendAudit(st, store.Audit{At: now, Actor: nodeID, Action: action, ResourceType: "node", Resource: nodeID, Outcome: "success"})
@@ -297,9 +299,10 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		NodeID string `json:"node_id"`
+		NodeID    string                       `json:"node_id"`
+		Inventory *lifecycleauth.NodeInventory `json:"inventory"`
 	}
-	if readJSON(r, &in) != nil {
+	if readJSON(r, &in) != nil || (in.Inventory != nil && !in.Inventory.Valid()) {
 		http.Error(w, "invalid heartbeat", http.StatusBadRequest)
 		return
 	}
@@ -307,10 +310,10 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "heartbeat target rejected", http.StatusForbidden)
 		return
 	}
-	err := s.store.RecordNodeHeartbeat(r.Context(), node.ID, node.TokenHash, time.Now().Unix())
+	err := s.store.RecordNodeHeartbeat(r.Context(), node.ID, node.TokenHash, time.Now().Unix(), in.Inventory)
 	if err != nil {
 		http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "node_id": node.ID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "node_id": node.ID, "inventory": "v1"})
 }

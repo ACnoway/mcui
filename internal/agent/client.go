@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/security"
 )
 
@@ -29,6 +31,12 @@ type Client struct {
 	taskHandlerFactory   StatusTaskHandlerFactory
 	taskSequenceProvider func() (int64, error)
 	xrayInstallMode      string
+	inventorySupported   bool
+	readXrayInventory    func(context.Context, string) (*lifecycleauth.XrayInventory, error)
+}
+
+func (c *Client) SetXrayInventory(reader func(context.Context, string) (*lifecycleauth.XrayInventory, error)) {
+	c.readXrayInventory = reader
 }
 
 type localState struct {
@@ -241,7 +249,19 @@ func (c *Client) heartbeat() (localState, error) {
 	if state.NodeToken == "" {
 		return localState{}, errors.New("Agent must redeem an installation code before connecting")
 	}
-	raw, status, err := c.post(state, "/api/v1/agent/heartbeat", map[string]string{"node_id": state.NodeID})
+	body := map[string]any{"node_id": state.NodeID}
+	if c.inventorySupported && runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") {
+		inventory := lifecycleauth.NodeInventory{Architecture: runtime.GOARCH}
+		if c.readXrayInventory != nil {
+			inventory.Xray, _ = c.readXrayInventory(context.Background(), state.NodeID)
+		}
+		body["inventory"] = inventory
+	}
+	raw, status, err := c.post(state, "/api/v1/agent/heartbeat", body)
+	if err == nil && status == http.StatusBadRequest && body["inventory"] != nil {
+		delete(body, "inventory")
+		raw, status, err = c.post(state, "/api/v1/agent/heartbeat", body)
+	}
 	if err != nil {
 		return localState{}, err
 	}
@@ -249,11 +269,13 @@ func (c *Client) heartbeat() (localState, error) {
 		return localState{}, fmt.Errorf("heartbeat rejected (HTTP %d)", status)
 	}
 	var reply struct {
-		NodeID string `json:"node_id"`
+		NodeID    string `json:"node_id"`
+		Inventory string `json:"inventory"`
 	}
 	if json.Unmarshal(raw, &reply) != nil || reply.NodeID != state.NodeID {
 		return localState{}, errors.New("Master returned a mismatched heartbeat identity")
 	}
+	c.inventorySupported = reply.Inventory == "v1"
 	return state, nil
 }
 

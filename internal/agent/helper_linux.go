@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/runtimehealth"
 	"golang.org/x/sys/unix"
 )
@@ -27,6 +28,22 @@ type helperSocketRequest struct {
 	Task             json.RawMessage `json:"task,omitempty"`
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 	Probe            bool            `json:"probe,omitempty"`
+	XrayInventory    bool            `json:"xray_inventory,omitempty"`
+}
+
+func (e *unixStatusExecutor) ReadXrayInventory(ctx context.Context, node string) (*lifecycleauth.XrayInventory, error) {
+	result, err := e.execute(ctx, helperSocketRequest{XrayInventory: true}, time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		NodeID string                       `json:"node_id"`
+		Xray   *lifecycleauth.XrayInventory `json:"xray"`
+	}
+	if json.Unmarshal(result, &response) != nil || response.NodeID != node || response.Xray == nil || !response.Xray.Valid() {
+		return nil, errors.New("invalid Helper Xray inventory")
+	}
+	return response.Xray, nil
 }
 
 type helperSocketResponse struct {
@@ -74,7 +91,8 @@ func (e *unixStatusExecutor) ProbeRuntime(ctx context.Context, node string) erro
 }
 
 func (e *unixStatusExecutor) execute(ctx context.Context, request helperSocketRequest, timeout time.Duration) (json.RawMessage, error) {
-	if e == nil || ctx == nil || !request.Probe && (len(request.Task) == 0 || len(request.Task) > maxHelperFrame || request.ReconcileInstall == (request.LeaseID != "")) {
+	query := request.Probe || request.XrayInventory
+	if e == nil || ctx == nil || !query && (len(request.Task) == 0 || len(request.Task) > maxHelperFrame || request.ReconcileInstall == (request.LeaseID != "")) {
 		return nil, errors.New("invalid Helper request")
 	}
 	body, err := json.Marshal(request)
@@ -91,7 +109,7 @@ func (e *unixStatusExecutor) execute(ctx context.Context, request helperSocketRe
 		return nil, err
 	}
 	defer connection.Close()
-	if request.Probe {
+	if query {
 		if err := requireRootHelper(connection.(*net.UnixConn)); err != nil {
 			return nil, err
 		}

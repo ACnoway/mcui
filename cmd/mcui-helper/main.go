@@ -178,6 +178,9 @@ func main() {
 				return runtime.ReconcileTask(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash)
 			},
 		}
+		if signedManifest {
+			config.XrayInstall.Inventory = readXrayInventory
+		}
 	}
 	if *initialize {
 		if err = ensureStateDirectory(*stateDir); err != nil {
@@ -213,6 +216,24 @@ func main() {
 	if err = instance.RunSocket(ctx, *socketPath, uint32(groupID)); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
 	}
+}
+
+func readXrayInventory() (lifecycleauth.XrayInventory, error) {
+	runtime, err := xrayruntime.Open(false)
+	if err != nil {
+		return lifecycleauth.XrayInventory{}, err
+	}
+	defer runtime.Close()
+	state, err := runtime.Status()
+	if err != nil {
+		return lifecycleauth.XrayInventory{}, err
+	}
+	if state.Pending != nil {
+		return lifecycleauth.XrayInventory{}, errors.New("Xray lifecycle requires reconciliation")
+	}
+	return lifecycleauth.XrayInventory{
+		Version: state.Current.Release.Version, SHA256: state.Current.Release.SHA256, Running: state.Current.Running,
+	}, nil
 }
 
 func ensureStateDirectory(path string) error {

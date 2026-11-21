@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; pending: boolean }
 type Audit = { at: number; actor: string; action: string; resource: string; outcome: string }
@@ -7,13 +7,17 @@ type StatusResult = { core?: string; load_state?: string; active_state?: string;
 type TaskAck = { status_version: number; status: string; result?: StatusResult }
 type StatusTask = { task_id: string; node_id: string; sequence: number; created_by?: string; created_at?: string; approval: string; control?: string; operation: string; core: string; issued_at: string; expires_at: string; active: boolean; lease_deadline?: string; status: string; acks: TaskAck[] }
 type ManagedAdmin = { id: string; username: string; role: string; node_ids: string[]; node_groups: string[]; disabled: boolean }
-type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_manage_admins: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean; can_update_runtime: boolean }
+type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_manage_admins: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean; can_manage_xray: boolean; can_update_runtime: boolean }
 type LoginResult = { status: 'ok'; csrf_token: string } | { status: 'setup_required'; totp_secret: string }
 type RuntimeUpdate = {
   id: string; sequence: number; version: string; architecture: string; expires_at: string; current_pair_sha256?: string
   status: 'QUEUED' | 'DELIVERED' | 'COMMITTED' | 'ROLLED_BACK' | 'REJECTED' | 'EXPIRED'
 }
 type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade' | 'core.downgrade' | 'core.uninstall'
+type PanelXrayOptions = {
+  architecture: string; current: { version: string; sha256: string; running: boolean }
+  state: string; versions: string[]; catalog_version: number
+}
 type XrayInstall = {
   proposal: {
     task_id: string; node_id: string; sequence: number; operation: XrayOperation
@@ -66,6 +70,32 @@ const xrayInstallBusy = ref(false)
 const xrayInstallError = ref('')
 const xrayInstallStatus = { AWAITING_SIGNATURE: '待签发', SIGNED_TASK_VERIFIED: '已核验签发任务', EXPIRED: '已过期', LEGACY: '旧版记录' }
 let xrayInstallRetry: { intent: string; id: string } | undefined
+const panelXray = ref<PanelXrayOptions | null>(null)
+const panelXrayOperation = ref<XrayOperation>('core.install')
+const panelXrayVersion = ref('')
+const panelXrayError = ref('')
+const panelXraySubmitting = ref(false)
+let panelXrayRetry: { intent: string; id: string } | undefined
+const panelXrayOperations = computed<XrayOperation[]>(() => panelXray.value?.current.version
+  ? ['core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
+  : ['core.install'])
+const panelXrayUsesArtifact = computed(() => ['core.install', 'core.upgrade', 'core.downgrade'].includes(panelXrayOperation.value))
+const panelXrayVersions = computed(() => {
+  const options = panelXray.value
+  if (!options) return []
+  return options.versions.filter((version) => {
+    const order = version.localeCompare(options.current.version, 'en', { numeric: true })
+    if (panelXrayOperation.value === 'core.upgrade') return order > 0
+    if (panelXrayOperation.value === 'core.downgrade') return order < 0
+    return true
+  })
+})
+watch(panelXrayOperations, (operations) => {
+  if (!operations.includes(panelXrayOperation.value)) panelXrayOperation.value = operations[0]
+})
+watch(panelXrayVersions, (versions) => {
+  if (!versions.includes(panelXrayVersion.value)) panelXrayVersion.value = versions[0] ?? ''
+})
 const coreCatalog = ref<CoreCatalog | null>(null)
 const coreCatalogCore = ref('xray')
 const coreCatalogPage = ref(1)
@@ -296,7 +326,7 @@ async function disableAdmin(id: string) {
 }
 async function loadTasks(nodeID: string) { try { tasks.value = await api<StatusTask[]>(`/api/v1/admin/tasks?node_id=${encodeURIComponent(nodeID)}`) } catch (e) { tasks.value = []; error.value = e instanceof Error ? e.message : '读取任务失败' } }
 async function loadXrayInstalls(nodeID: string) {
-  if (!admin.value?.can_prepare_xray_installs) return
+  if (!admin.value?.can_prepare_xray_installs && !admin.value?.can_manage_xray) return
   xrayInstallError.value = ''
   try {
     const records = await api<XrayInstall[]>(`/api/v1/admin/xray-installs?node_id=${encodeURIComponent(nodeID)}`)
@@ -308,9 +338,58 @@ async function loadXrayInstalls(nodeID: string) {
   }
 }
 async function refreshNodeTasks(nodeID: string) {
-  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadRuntimeUpdates(nodeID)])
+  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadPanelXray(nodeID), loadRuntimeUpdates(nodeID)])
 }
-async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); xrayInstalls.value = []; runtimeUpdates.value = []; await refreshNodeTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
+async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); xrayInstalls.value = []; panelXray.value = null; runtimeUpdates.value = []; await refreshNodeTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
+
+function panelXrayPath(nodeID: string) {
+  return `/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/xray`
+}
+
+async function loadPanelXray(nodeID: string) {
+  if (!admin.value?.can_manage_xray) return
+  panelXrayError.value = ''
+  if (selectedNode.value?.disabled || selectedNode.value?.pending) {
+    panelXray.value = null
+    return
+  }
+  try {
+    const options = await api<PanelXrayOptions>(panelXrayPath(nodeID))
+    if (selectedNode.value?.id === nodeID) panelXray.value = options
+  } catch (e) {
+    if (selectedNode.value?.id !== nodeID) return
+    panelXray.value = null
+    panelXrayError.value = e instanceof Error ? e.message : '读取节点 Xray 状态失败'
+  }
+}
+
+async function submitPanelXray() {
+  const node = selectedNode.value
+  const options = panelXray.value
+  if (!node || !options || panelXraySubmitting.value) return
+  const operation = panelXrayOperation.value
+  const version = panelXrayUsesArtifact.value ? panelXrayVersion.value : ''
+  const dangerous = operation === 'core.downgrade' || operation === 'core.uninstall'
+  if (dangerous) {
+    const target = version ? ` → ${version}` : ''
+    if (!confirm(`确认${xrayOperationLabel[operation]}节点「${node.name}」的 Xray ${options.current.version}${target}？`)) return
+  }
+  const fields = { operation, version, state: options.state,
+    catalog_version: version ? options.catalog_version : 0, confirm_operation: dangerous ? operation : '' }
+  const intent = JSON.stringify({ node_id: node.id, ...fields })
+  if (panelXrayRetry?.intent !== intent) panelXrayRetry = { intent, id: crypto.randomUUID().replaceAll('-', '') }
+  panelXraySubmitting.value = true
+  panelXrayError.value = ''
+  try {
+    await apiWithStepUp<StatusTask>(panelXrayPath(node.id), { ...fields, task_id: panelXrayRetry.id })
+    panelXrayRetry = undefined
+    if (selectedNode.value?.id === node.id) await refreshNodeTasks(node.id)
+  } catch (e) {
+    if (selectedNode.value?.id === node.id) panelXrayError.value = e instanceof Error ? e.message : '提交 Xray 任务失败'
+  } finally {
+    panelXraySubmitting.value = false
+  }
+}
 
 function runtimeUpdatePath(nodeID: string) {
   return `/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/runtime-updates`
@@ -515,7 +594,7 @@ onMounted(async () => {
     <template v-else>
       <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => nodeStatus(n) === '在线').length }}</strong></div><div class="metric"><span>当前阶段</span><strong>03 / CORE LIFECYCLE</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
       <section class="card core-catalog"><div class="section-head"><div><span class="eyebrow">MASTER BACKUP ARTIFACTS</span><h2>主控备用制品</h2></div><button class="outline" @click="loadCoreBackups">刷新状态</button></div><p>主控从官方 Releases 同步每种 Core 最新稳定版的 amd64/arm64 制品，每种 Core 只保留一版。远程 Xray 安装优先访问官方源。官方源不可用时，只有与签名清单完全匹配的缓存才能用于安装。</p><p v-if="coreBackupError" class="catalog-error">{{ coreBackupError }}</p><p v-if="coreBackups?.updated_at" class="catalog-stale">最近更新：{{ new Date(coreBackups.updated_at).toLocaleString() }}</p><div v-if="coreBackups?.cores.length" class="release-list"><article v-for="core in coreBackups.cores" :key="core.id" class="release-row"><div class="release-heading"><div><strong>{{ core.name }} {{ core.version }}</strong><small>{{ core.repository }} · 缓存于 {{ new Date(core.cached_at).toLocaleString() }}</small></div><a :href="core.release_url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><div v-for="asset in core.assets" :key="asset.architecture" class="release-asset"><span>{{ asset.architecture }} · {{ asset.name }}</span><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest }}</small></div></article></div><div v-else-if="!coreBackupError" class="empty">主控尚未缓存备用制品；后台会在启动后从官方源同步。</div></section>
-      <section class="card core-catalog"><div class="section-head"><div><span class="eyebrow">OFFICIAL RELEASE CATALOG</span><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="refreshCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases，每页 10 个、最多浏览最近 100 个版本。官方版本列表用于发现版本，尚不代表制品已获安装授权；安装任务与 Helper 安装事务仍未开放。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div><button v-if="selectedCoreCatalog?.has_more" class="outline load-older" :disabled="coreCatalogLoading" @click="loadOlderCoreReleases">{{ coreCatalogLoading ? '读取中…' : '加载较早版本' }}</button></div></div></section>
+      <section class="card core-catalog"><div class="section-head"><div><span class="eyebrow">OFFICIAL RELEASE CATALOG</span><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="refreshCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases，每页 10 个、最多浏览最近 100 个版本。此目录用于发现版本。面板安装可选版本来自已验签的 Xray 发布清单。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div><button v-if="selectedCoreCatalog?.has_more" class="outline load-older" :disabled="coreCatalogLoading" @click="loadOlderCoreReleases">{{ coreCatalogLoading ? '读取中…' : '加载较早版本' }}</button></div></div></section>
       <section class="card">
         <div class="section-head">
           <h2>节点管理</h2>
@@ -553,6 +632,32 @@ onMounted(async () => {
         </div>
       </section>
       <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!statusTasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in statusTasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small><small v-if="task.control">控制消息：{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() < Date.parse(task.expires_at) && task.control !== 'cancel'" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button><button v-if="task.active && task.status === 'QUEUED' && !task.lease_deadline && !task.control && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() >= Date.parse(task.expires_at) && task.control !== 'skip'" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
+      <section v-if="selectedNode && admin?.can_manage_xray" class="card">
+        <div class="section-head">
+          <h2>Xray 远程管理</h2>
+          <button class="outline" @click="refreshNodeTasks(selectedNode.id)">刷新状态和任务</button>
+        </div>
+        <p v-if="selectedNode.disabled || selectedNode.pending">节点上线后可管理 Xray。</p>
+        <p v-if="panelXray">节点架构 {{ panelXray.architecture }} · {{ panelXray.current.version || '未安装' }}</p>
+        <form v-if="panelXray" class="node-row" @submit.prevent="submitPanelXray">
+          <label>操作<select v-model="panelXrayOperation">
+            <option v-for="operation in panelXrayOperations" :key="operation" :value="operation">{{ xrayOperationLabel[operation] }}</option>
+          </select></label>
+          <label v-if="panelXrayUsesArtifact">目标版本<select v-model="panelXrayVersion" required>
+            <option v-if="!panelXrayVersions.length" value="" disabled>暂无可用版本</option>
+            <option v-for="version in panelXrayVersions" :key="version" :value="version">{{ version }}</option>
+          </select></label>
+          <button :disabled="panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion)">提交任务</button>
+        </form>
+        <p v-if="panelXrayError || xrayInstallError" class="error" role="alert">{{ panelXrayError || xrayInstallError }}</p>
+        <div v-for="install in xrayInstalls" :key="install.proposal.task_id" class="audit-row">
+          <div>
+            <strong>#{{ install.proposal.sequence }} · {{ xrayOperationLabel[install.proposal.operation] }} Xray {{ install.proposal.version }}</strong>
+            <span v-if="xrayTask(install.proposal.task_id)">{{ xrayTaskResult(install) }}</span>
+            <span v-else>{{ xrayInstallStatus[install.status] }}</span>
+          </div>
+        </div>
+      </section>
       <section v-if="selectedNode && admin?.can_prepare_xray_installs" class="card">
         <div class="section-head">
           <h2>Xray 远程管理</h2>

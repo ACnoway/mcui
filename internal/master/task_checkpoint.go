@@ -38,6 +38,7 @@ func TaskCheckpointDigest(ctx context.Context, stateStore *store.Store, tasks *t
 	err = stateStore.View(func(state store.State) error {
 		for id, node := range state.Nodes {
 			node.LastSeen = 0
+			node.Inventory = nil
 			state.Nodes[id] = node
 		}
 		return json.NewEncoder(hash).Encode(state)
@@ -123,25 +124,32 @@ func (s *Server) handleAPI(pattern string, handler http.HandlerFunc) {
 			handler(w, r)
 			return
 		}
-		response := w
-		if s.taskCheckpoint != nil {
-			response = &checkpointResponse{header: make(http.Header)}
-		}
-		err := s.runWithTaskState(r.Context(), func() error {
-			handler(response, r)
-			return nil
-		})
-		if err != nil {
-			if r.Context().Err() == nil {
-				log.Printf("Master task checkpoint blocked %s: %v", pattern, err)
-			}
-			http.Error(w, "Master task checkpoint unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if buffered, ok := response.(*checkpointResponse); ok {
-			buffered.send(w)
-		}
+		s.withTaskHTTP(w, r, func(w http.ResponseWriter) { handler(w, r) })
 	})
+}
+
+func (s *Server) withTaskHTTP(w http.ResponseWriter, r *http.Request, operation func(http.ResponseWriter)) bool {
+	response := w
+	var buffered *checkpointResponse
+	if s.taskCheckpoint != nil {
+		buffered = &checkpointResponse{header: make(http.Header)}
+		response = buffered
+	}
+	err := s.runWithTaskState(r.Context(), func() error {
+		operation(response)
+		return nil
+	})
+	if err != nil {
+		if r.Context().Err() == nil {
+			log.Printf("Master task checkpoint blocked %s: %v", r.URL.Path, err)
+		}
+		http.Error(w, "Master task checkpoint unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if buffered != nil && buffered.status != 0 {
+		buffered.send(w)
+	}
+	return true
 }
 
 // Buffer the response so credentials, leases and success acknowledgments

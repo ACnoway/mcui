@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	json "encoding/json/v2"
@@ -50,6 +51,8 @@ func main() {
 	taskSignerURL := flag.String("task-signer-url", "", "loopback URL of the isolated task signer")
 	taskSignerTokenPath := flag.String("task-signer-token-file", "", "shared token file for the isolated task signer")
 	xrayInstallPolicyPath := flag.String("xray-install-policy", os.Getenv("MCUI_XRAY_INSTALL_POLICY"), "independently provisioned Xray install authorization policy JSON")
+	xrayPanelURL := flag.String("xray-panel-signer-url", os.Getenv("MCUI_XRAY_PANEL_SIGNER_URL"), "loopback URL of the dedicated Xray panel signer")
+	xrayPanelToken := flag.String("xray-panel-signer-token-file", os.Getenv("MCUI_XRAY_PANEL_SIGNER_TOKEN_FILE"), "shared bearer token file for the dedicated Xray panel signer")
 	runtimeUpdatePolicyPath := flag.String("runtime-update-policy", os.Getenv("MCUI_RUNTIME_UPDATE_POLICY"), "independently provisioned Agent/Helper remote update policy JSON")
 	checkpointConfig := registerTaskCheckpointFlags()
 	flag.Parse()
@@ -197,6 +200,19 @@ func main() {
 			log.Fatalf("reconcile task/audit history: %v", err)
 		}
 		log.Printf("read-only status-task runtime enabled with signing key %s", *taskKeyID)
+	}
+	if *xrayPanelURL != "" || *xrayPanelToken != "" {
+		token, err := readSharedToken(*xrayPanelToken)
+		if err != nil {
+			log.Fatalf("read Xray signer token: %v", err)
+		}
+		signer, err := lifecycleauth.NewPanelSignerClient(*xrayPanelURL, bytes.TrimSpace(token))
+		if err == nil {
+			err = srv.ConfigurePanelXray(signer)
+		}
+		if err != nil {
+			log.Fatalf("configure panel Xray signer: %v", err)
+		}
 	}
 	if *runtimeUpdatePolicyPath != "" {
 		policy, err := readRuntimeUpdatePolicy(*runtimeUpdatePolicyPath)

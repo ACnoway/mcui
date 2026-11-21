@@ -49,7 +49,7 @@ func TestVersionFourMigrationIndexesActiveNodeTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, seen := range []int64{30, 25} {
-		if err := s.RecordNodeHeartbeat(ctx, "node-a", "digest-a", seen); err != nil {
+		if err := s.RecordNodeHeartbeat(ctx, "node-a", "digest-a", seen, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -69,7 +69,7 @@ func TestVersionFourMigrationIndexesActiveNodeTokens(t *testing.T) {
 	if _, err := s.NodeByTokenHash(ctx, "digest-b"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ambiguous token was accepted: %v", err)
 	}
-	if err := s.RecordNodeHeartbeat(ctx, "node-a", "digest-a", 40); !errors.Is(err, ErrNotFound) {
+	if err := s.RecordNodeHeartbeat(ctx, "node-a", "digest-a", 40, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotated token updated heartbeat: %v", err)
 	}
 	if err := s.Update(func(st *State) error {
@@ -81,7 +81,7 @@ func TestVersionFourMigrationIndexesActiveNodeTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNodeSeen(t, s, ctx, "digest-b", "node-b", 20)
-	if err := s.RecordNodeHeartbeat(ctx, "node-a", "digest-b", 40); !errors.Is(err, ErrNotFound) {
+	if err := s.RecordNodeHeartbeat(ctx, "node-a", "digest-b", 40, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("disabled node updated heartbeat: %v", err)
 	}
 }

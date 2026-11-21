@@ -179,6 +179,11 @@ func main() {
 				log.Fatalf("open Agent Xray artifact trust: %v", err)
 			}
 			client.EnableXrayInstalls(signedManifest)
+			if reader, ok := executor.(interface {
+				ReadXrayInventory(context.Context, string) (*lifecycleauth.XrayInventory, error)
+			}); signedManifest && ok {
+				client.SetXrayInventory(reader.ReadXrayInventory)
+			}
 		}
 		if err = client.SetTaskHandlerFactory(func(node string) (agent.TaskHandler, error) {
 			processor, e := agenttasks.New(agenttasks.Config{

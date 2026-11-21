@@ -1,8 +1,44 @@
 # Xray 远程生命周期的运维授权与独立签发
 
-本文记录当前远程生命周期流程。由同一名具备节点范围的运维员发起、上传签发任务并投递。面板对这些写操作要求 MFA 复验和 CSRF 校验。独立签发工具校验运维员对精确参数的签名和节点范围，并在受保护的账本中记录签发。安装提案使用格式 3，启停使用格式 4，升级、降级和卸载使用格式 5。历史 TUF 任务按原清单收尾。[制品发布](./phase-3-release.md)
+安装提案使用格式 3，启停使用格式 4，升级、降级和卸载使用格式 5。节点继续用专用生命周期公钥核验任务、租约和精确参数。历史 TUF 任务按原清单收尾。[制品发布](./phase-3-release.md)
 
-V1 目标是由单管理员在面板直接管理 Xray。版本选择、当前安装状态和签名清单提供精确参数，后台签发和投递受限任务，降级及卸载保留明确确认。下文的运维账号、CLI 签名和文件上传适用于现有实现。[V1 授权目标](./panel-authz.md#v1-单管理员)
+## 单管理员面板签发
+
+启用单管理员部署和现有状态任务运行时，并按[节点部署步骤](./phase-3-operations.md#5-启用远程-xray-安装)配置节点的生命周期公钥、发布公钥、NTS 时间和 Xray 状态目录。升级 Agent 及 Helper 后，面板从已认证心跳取得节点架构和 Helper 读出的已提交版本。状态缺失、过期或等待对账时，面板暂停操作。
+
+面板与独立的生命周期签发进程都读取受保护的策略文件。举例，以下策略允许列出的节点使用后台签发。需要允许新建节点时，显式配置 `"panel": {"all_nodes": true}`。
+
+```json
+{
+  "schema_version": 1,
+  "signing_key_id": "xray-lifecycle",
+  "signing_public_key": "<Xray 签发公钥的标准 Base64>",
+  "panel": {"node_ids": ["node-00000000000000000000000000000000"]}
+}
+```
+
+从同一发布提交构建 `mcui-lifecycle`。签发进程使用独立账号，保管 `0600` 的生命周期签发私钥和私有账本。配置经过校验的发布清单及其分离签名，并以签发账号使用 `mcui-manifest init-state` 预置[防回滚状态](./phase-3-release.md)。签发端使用 Cloudflare NTS 认证时间。面板与签发进程共用一份高熵 API Token，文件使用 `0600` 或 `0640`。
+
+```sh
+mcui-lifecycle init-ledger -ledger /var/lib/mcui-xray-signer/issuance.db
+mcui-lifecycle serve -listen 127.0.0.1:9232 \
+  -policy /etc/mcui-xray-signer/policy.json \
+  -key /etc/mcui-xray-signer/signing.pem \
+  -ledger /var/lib/mcui-xray-signer/issuance.db \
+  -token-file /etc/mcui-xray-signer/token \
+  -release-key /etc/mcui-xray-signer/release.pub \
+  -manifest-state /var/lib/mcui-xray-signer/manifest \
+  -manifest /etc/mcui-xray-signer/manifest.json \
+  -manifest-signature /etc/mcui-xray-signer/manifest.json.sig
+```
+
+面板配置 `MCUI_XRAY_INSTALL_POLICY`、`MCUI_XRAY_PANEL_SIGNER_URL=http://127.0.0.1:9232` 和 `MCUI_XRAY_PANEL_SIGNER_TOKEN_FILE`。也可使用同名功能的命令行参数。Compose 部署通过覆盖文件挂载配置并传入任务运行时参数，签发进程与 Master 共享容器网络的回环接口。签发器依赖 Master 核验会话和 MFA，并独立核对签发策略、任务参数、期限和制品清单。节点继续独立校验签名和制品。
+
+在面板节点详情选择操作。安装、升级和降级只显示该节点架构可用的稳定版本，默认选中当前操作下的最新版本。降级和卸载显示目标版本并单独确认，要求输入 TOTP 验证码。签发或投递遇到暂时错误时，在有效期内使用同一请求重试。已到期且未投递的预留序号可通过只读状态任务收尾。
+
+## 范围运维员手工签发
+
+手工流程由具备节点范围的同一运维员发起、上传签发任务并投递。面板对写操作校验 MFA 和 CSRF。独立签发工具核验运维员对精确参数的签名和节点范围，并记录签发。[V1 授权](./panel-authz.md#v1-单管理员)
 
 ## 1. 配置授权策略
 
