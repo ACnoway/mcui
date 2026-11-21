@@ -388,7 +388,9 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
           <div>
             <strong>#{{ install.proposal.sequence }} · Xray {{ install.proposal.version }} · {{ install.proposal.architecture }}</strong>
             <span>{{ xrayInstallStatus[install.status] }} · {{ new Date(install.proposal.expires_at * 1000).toLocaleString() }} 过期</span>
-            <small v-if="xrayTask(install.proposal.task_id)" aria-live="polite">任务结果 {{ xrayTask(install.proposal.task_id)?.status }}</small>
+            <small v-if="xrayTask(install.proposal.task_id)" aria-live="polite">
+              任务结果 {{ xrayTask(install.proposal.task_id)?.status === 'NEEDS_RECONCILIATION' ? '待对账' : xrayTask(install.proposal.task_id)?.status }}
+            </small>
           </div>
           <button v-if="install.status === 'AWAITING_SIGNATURE'" class="outline" @click="downloadXrayProposal(install)">下载提案 JSON</button>
           <form v-if="install.status === 'AWAITING_SIGNATURE'" class="node-row" @submit.prevent="uploadSignedXrayInstall(install, $event)">

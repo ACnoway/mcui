@@ -17,6 +17,10 @@ type InstallExecutor interface {
 	ExecuteInstall(context.Context, []byte, string) (json.RawMessage, error)
 }
 
+type installReconciler interface {
+	ReconcileInstall(context.Context, []byte) (json.RawMessage, error)
+}
+
 type InstallArtifacts interface {
 	LookupCoreManifest(context.Context, string, string, int64) (artifacttrust.Target, error)
 	Download(context.Context, artifacttrust.Target) (string, error)
@@ -74,6 +78,12 @@ func (r *Runner) ProcessXrayInstall(ctx context.Context, raw []byte, leaseID str
 		}
 		return installAcknowledgments(task, lastVersion), nil
 	}
+	if task.State == taskledger.Reconciliation {
+		task, err = r.reconcileXrayInstall(ctx, task, install)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if task.State != taskledger.Pending || now.Before(install.NotBefore) {
 		return installAcknowledgments(task, lastVersion), nil
 	}
@@ -120,6 +130,66 @@ func (r *Runner) ProcessXrayInstall(ctx context.Context, raw []byte, leaseID str
 		}
 	}
 	return installAcknowledgments(task, lastVersion), nil
+}
+
+// ReconcileXrayInstall handles a Master delivery for a fenced sequence. It
+// requires an existing exact local envelope and has no path to start a task.
+func (r *Runner) ReconcileXrayInstall(ctx context.Context, raw []byte, lastVersion int64) ([]Ack, error) {
+	if r.xrayInstall == nil || lastVersion < 1 {
+		return nil, lifecycleauth.ErrDenied
+	}
+	install, err := r.xrayInstall.key.Verify(raw)
+	if err != nil || install.NodeID != r.processor.node {
+		return nil, lifecycleauth.ErrDenied
+	}
+	task, err := r.ledger.Get(install.Sequence)
+	if err != nil || task.ID != install.TaskID || !bytes.Equal(task.Envelope, raw) {
+		return nil, lifecycleauth.ErrDenied
+	}
+	if task.State == taskledger.Reconciliation {
+		task, err = r.reconcileXrayInstall(ctx, task, install)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var result lifecycleauth.InstallResult
+	if (task.State != taskledger.Succeeded && task.State != taskledger.Failed) ||
+		json.Unmarshal(task.Result, &result) != nil || result.Version != install.Version || result.SHA256 != install.SHA256 ||
+		(task.State == taskledger.Succeeded && result.Outcome != "SUCCEEDED") ||
+		(task.State == taskledger.Failed && result.Outcome != "ROLLED_BACK") {
+		return nil, nil
+	}
+	return []Ack{{StatusVersion: lastVersion + 1, Status: result.Outcome, Result: task.Result}}, nil
+}
+
+func (r *Runner) reconcileXrayInstall(ctx context.Context, task taskledger.Task, install lifecycleauth.InstallTask) (taskledger.Task, error) {
+	reconciler, ok := r.xrayInstall.executor.(installReconciler)
+	if !ok {
+		return task, nil
+	}
+	raw, err := reconciler.ReconcileInstall(ctx, task.Envelope)
+	var result lifecycleauth.InstallResult
+	if err != nil || json.Unmarshal(raw, &result) != nil || result.Version != install.Version || result.SHA256 != install.SHA256 {
+		return task, nil
+	}
+	var state taskledger.State
+	switch result.Outcome {
+	case "SUCCEEDED":
+		state = taskledger.Succeeded
+	case "ROLLED_BACK":
+		state = taskledger.Failed
+	default:
+		return task, nil
+	}
+	canonical, err := json.Marshal(result)
+	if err != nil {
+		return task, err
+	}
+	if err := r.ledger.FinishReconciled(task.Sequence, state, canonical); err != nil {
+		return task, err
+	}
+	task.State, task.Result = state, canonical
+	return task, nil
 }
 
 func (r *installRuntime) prepare(ctx context.Context, install lifecycleauth.InstallTask) error {

@@ -1,7 +1,7 @@
 //go:build linux
 
-// Package helper implements the Linux-only status authorization boundary.
-// Its runtime permits only fixed, read-only systemd status queries.
+// Package helper implements the Linux-only authorization boundary for fixed
+// service status queries and opt-in Xray installation.
 package helper
 
 import (
@@ -52,8 +52,9 @@ type Config struct {
 }
 
 type XrayInstallConfig struct {
-	Key   lifecycleauth.InstallKey
-	Apply func(context.Context, lifecycleauth.InstallTask, func(context.Context) error) (string, error)
+	Key       lifecycleauth.InstallKey
+	Apply     func(context.Context, lifecycleauth.InstallTask, string, func(context.Context) error) (string, error)
+	Reconcile func(context.Context, lifecycleauth.InstallTask, string) (string, error)
 }
 type Helper struct {
 	dir *os.File
@@ -231,21 +232,8 @@ func (h *Helper) save(l ledger) error {
 
 // Execute authenticates the peer from the connected Unix socket, not request data.
 func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (string, error) {
-	if conn == nil {
-		return "", ErrDenied
-	}
-	rc, e := conn.SyscallConn()
-	if e != nil {
-		return "", e
-	}
-	var cred *unix.Ucred
-	var ce error
-	e = rc.Control(func(fd uintptr) { cred, ce = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) })
-	if e != nil {
-		return "", e
-	}
-	if ce != nil || cred == nil || cred.Uid != h.cfg.AllowedUID {
-		return "", ErrDenied
+	if err := h.authorizePeer(conn); err != nil {
+		return "", err
 	}
 	if h.cfg.Checkpoint == nil || len(leaseIDs) != 1 || leaseIDs[0] == "" {
 		return "", ErrReconciliation
@@ -266,7 +254,7 @@ func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (st
 			return h.executeAuthorized(raw, t, install.NotBefore, install.NotBefore, install.ExpiresAt, serverTime, previousSequence, true, false, func(now time.Time) (string, error) {
 				ctx, cancel := context.WithDeadline(context.Background(), install.ExpiresAt)
 				defer cancel()
-				outcome, err := h.cfg.XrayInstall.Apply(artifacttrust.WithInstallLease(ctx, raw, leaseIDs[0]), install, func(ctx context.Context) error {
+				outcome, err := h.cfg.XrayInstall.Apply(artifacttrust.WithInstallLease(ctx, raw, leaseIDs[0]), install, taskHash(raw), func(ctx context.Context) error {
 					server, previous, err := h.cfg.Checkpoint.AuthorizeStatus(ctx, raw, leaseIDs[0])
 					if err != nil || previous != install.Sequence-1 || !h.cfg.TrustedTimeHealthy() {
 						return ErrDenied
@@ -285,7 +273,80 @@ func (h *Helper) Execute(conn *net.UnixConn, raw []byte, leaseIDs ...string) (st
 			})
 		}
 	}
-	return h.executeUIDAt(cred.Uid, raw, serverTime, previousSequence, true)
+	return h.executeUIDAt(h.cfg.AllowedUID, raw, serverTime, previousSequence, true)
+}
+
+func (h *Helper) authorizePeer(conn *net.UnixConn) error {
+	if conn == nil {
+		return ErrDenied
+	}
+	rc, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var cred *unix.Ucred
+	var peerErr error
+	if err := rc.Control(func(fd uintptr) { cred, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil {
+		return err
+	}
+	if peerErr != nil || cred == nil || cred.Uid != h.cfg.AllowedUID {
+		return ErrDenied
+	}
+	return nil
+}
+
+// reconcileInstall can return a terminal receipt or roll back a matching
+// recorded installation. It never calls the installation or checkpoint path.
+func (h *Helper) reconcileInstall(ctx context.Context, conn *net.UnixConn, raw []byte) (string, error) {
+	if err := h.authorizePeer(conn); err != nil {
+		return "", err
+	}
+	config := h.cfg.XrayInstall
+	if config == nil || config.Reconcile == nil {
+		return "", ErrDenied
+	}
+	install, err := config.Key.Verify(raw)
+	if err != nil || install.NodeID != h.cfg.NodeID || install.Architecture != runtime.GOARCH || install.Sequence < 1 {
+		return "", ErrDenied
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := unix.Flock(int(h.dir.Fd()), unix.LOCK_EX); err != nil {
+		return "", err
+	}
+	defer unix.Flock(int(h.dir.Fd()), unix.LOCK_UN)
+	l, err := h.load()
+	if err != nil || int64(len(l.Records)) < install.Sequence {
+		return "", ErrReconciliation
+	}
+	record := &l.Records[install.Sequence-1]
+	if record.TaskID != install.TaskID || record.Hash != taskHash(raw) {
+		return "", ErrDenied
+	}
+	if !record.Pending {
+		if err := h.dir.Sync(); err != nil {
+			return "", err
+		}
+		return record.Result, nil
+	}
+	outcome, err := config.Reconcile(ctx, install, record.Hash)
+	if err != nil || (outcome != "SUCCEEDED" && outcome != "ROLLED_BACK") {
+		return "", ErrReconciliation
+	}
+	result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: outcome, Version: install.Version, SHA256: install.SHA256})
+	if err != nil {
+		return "", err
+	}
+	record.Pending, record.Result = false, string(result)
+	if err := h.save(l); err != nil {
+		return "", err
+	}
+	return record.Result, nil
+}
+
+func taskHash(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 func (h *Helper) executeUID(uid uint32, raw []byte) (string, error) {
 	return h.executeUIDAt(uid, raw, time.Time{}, -1, false)
@@ -377,8 +438,7 @@ func (h *Helper) executeAuthorized(raw []byte, t task, issued, before, expires, 
 			return "", ErrReconciliation
 		}
 	}
-	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
+	hash := taskHash(raw)
 	for i, r := range l.Records {
 		if r.Pending && (!checkpointed || int64(i+1) != t.Sequence || r.TaskID != t.ID || r.Hash != hash) {
 			return "", ErrReconciliation

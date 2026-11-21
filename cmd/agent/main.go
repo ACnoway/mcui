@@ -208,6 +208,10 @@ func (h agentTaskHandler) ProcessXrayInstall(ctx context.Context, raw []byte, le
 	return convertTaskAcks(h.runner.ProcessXrayInstall(ctx, raw, leaseID, skip, lastStatusVersion, serverNow))
 }
 
+func (h agentTaskHandler) ReconcileXrayInstall(ctx context.Context, raw []byte, lastStatusVersion int64) ([]agent.TaskAck, error) {
+	return convertTaskAcks(h.runner.ReconcileXrayInstall(ctx, raw, lastStatusVersion))
+}
+
 func (h agentTaskHandler) ProcessStatusTask(ctx context.Context, raw []byte, leaseID string, lastStatusVersion int64, serverNow time.Time) ([]agent.TaskAck, error) {
 	acks, err := h.runner.ProcessStatusTaskAt(ctx, raw, leaseID, lastStatusVersion, serverNow)
 	return convertTaskAcks(acks, err)

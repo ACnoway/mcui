@@ -20,8 +20,9 @@ const maxHelperFrame = 72 * 1024
 type unixStatusExecutor struct{ socketPath string }
 
 type helperSocketRequest struct {
-	LeaseID string          `json:"lease_id"`
-	Task    json.RawMessage `json:"task"`
+	LeaseID          string          `json:"lease_id,omitempty"`
+	Task             json.RawMessage `json:"task"`
+	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 }
 
 type helperSocketResponse struct {
@@ -42,18 +43,22 @@ func NewUnixStatusExecutor(socketPath string) (StatusExecutor, error) {
 }
 
 func (e *unixStatusExecutor) ExecuteStatus(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error) {
-	return e.execute(ctx, raw, leaseID, 15*time.Second)
+	return e.execute(ctx, helperSocketRequest{LeaseID: leaseID, Task: raw}, 15*time.Second)
 }
 
 func (e *unixStatusExecutor) ExecuteInstall(ctx context.Context, raw []byte, leaseID string) (json.RawMessage, error) {
-	return e.execute(ctx, raw, leaseID, 8*time.Minute)
+	return e.execute(ctx, helperSocketRequest{LeaseID: leaseID, Task: raw}, 8*time.Minute)
 }
 
-func (e *unixStatusExecutor) execute(ctx context.Context, raw []byte, leaseID string, timeout time.Duration) (json.RawMessage, error) {
-	if e == nil || ctx == nil || len(raw) == 0 || len(raw) > maxHelperFrame || leaseID == "" {
+func (e *unixStatusExecutor) ReconcileInstall(ctx context.Context, raw []byte) (json.RawMessage, error) {
+	return e.execute(ctx, helperSocketRequest{Task: raw, ReconcileInstall: true}, 95*time.Second)
+}
+
+func (e *unixStatusExecutor) execute(ctx context.Context, request helperSocketRequest, timeout time.Duration) (json.RawMessage, error) {
+	if e == nil || ctx == nil || len(request.Task) == 0 || len(request.Task) > maxHelperFrame || request.ReconcileInstall == (request.LeaseID != "") {
 		return nil, errors.New("invalid Helper request")
 	}
-	body, err := json.Marshal(helperSocketRequest{LeaseID: leaseID, Task: append(json.RawMessage(nil), raw...)})
+	body, err := json.Marshal(request)
 	if err != nil || len(body) > maxHelperFrame {
 		return nil, errors.New("Helper request too large")
 	}

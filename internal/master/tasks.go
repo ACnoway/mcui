@@ -787,7 +787,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 			return nil, buildErr
 		}
 		return runtime.Signer.SignControl(protocol.Skip, unsigned)
-	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install"))
+	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install"), r.URL.Query().Get("install_reconciliation") == "v1")
 	if errors.Is(err, taskdispatch.ErrNotFound) || errors.Is(err, taskdispatch.ErrLeaseActive) {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -821,6 +821,9 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if delivery.SequenceSkip {
 		response["sequence_skip"] = true
+	}
+	if delivery.ReconcileInstall {
+		response["reconcile_install"] = true
 	}
 	writeJSON(w, http.StatusOK, response)
 }

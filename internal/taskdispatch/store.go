@@ -56,6 +56,7 @@ type Delivery struct {
 	LastStatusVersion int64
 	SequenceRecovery  bool
 	SequenceSkip      bool
+	ReconcileInstall  bool
 }
 
 // Ack is a persisted observation from an externally authenticated node. Result
@@ -402,7 +403,7 @@ SELECT
 	if oversized != 0 {
 		return errors.New("invalid task delivery ACK history limit")
 	}
-	ackRows, err := db.Query(`SELECT task_id,status_version,status FROM acks ORDER BY task_id,status_version`)
+	ackRows, err := db.Query(`SELECT a.task_id,a.status_version,a.status,COALESCE((` + installTaskSQL + `),0) FROM acks a JOIN tasks t ON t.task_id=a.task_id ORDER BY a.task_id,a.status_version`)
 	if err != nil {
 		return err
 	}
@@ -413,14 +414,15 @@ SELECT
 	for ackRows.Next() {
 		var current, status string
 		var n int64
-		if err := ackRows.Scan(&current, &n, &status); err != nil {
+		var install bool
+		if err := ackRows.Scan(&current, &n, &status, &install); err != nil {
 			return err
 		}
 		if current != task {
 			task, ackVersion, previous = current, 0, ""
 			rolledBack = false
 		}
-		if n != ackVersion+1 || (ackVersion != 0 && !validTransition(previous, status)) || (status == "ROLLING_BACK" && rolledBack) {
+		if n != ackVersion+1 || (ackVersion != 0 && !validTransition(previous, status, install)) || (status == "ROLLING_BACK" && rolledBack) {
 			return fmt.Errorf("invalid task delivery ACK history for task %q", current)
 		}
 		rolledBack = rolledBack || status == "ROLLING_BACK"
@@ -551,7 +553,7 @@ func (s *Store) provision(body taskEnvelope, raw []byte) error {
 // of the same task again and never creates a replacement task. The key ID and
 // key must be supplied from trusted local configuration for every delivery.
 func (s *Store) Lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey) (Delivery, error) {
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, "")
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, 0, nil, lifecycleauth.InstallKey{}, "", false)
 }
 
 // LeaseExpected reconciles the Agent's durable next sequence before leasing
@@ -561,17 +563,17 @@ func (s *Store) LeaseExpected(authenticatedNodeID string, now time.Time, configu
 	if expectedSequence < 1 || expectedSequence > MaxSequence || buildSkip == nil {
 		return Delivery{}, fmt.Errorf("%w: invalid expected sequence recovery", ErrInvalid)
 	}
-	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, "")
+	return s.lease(authenticatedNodeID, now, configuredKeyID, configuredKey, expectedSequence, buildSkip, lifecycleauth.InstallKey{}, "", false)
 }
 
-func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string) (Delivery, error) {
+func (s *Store) LeaseWithInstall(nodeID string, now time.Time, statusKeyID string, statusKey ed25519.PublicKey, expected int64, buildSkip func(int64, string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string, reconcileInstall bool) (Delivery, error) {
 	if expected < 0 || expected > MaxSequence || expected > 0 && buildSkip == nil {
 		return Delivery{}, ErrInvalid
 	}
-	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, mode)
+	return s.lease(nodeID, now, statusKeyID, statusKey, expected, buildSkip, installKey, mode, reconcileInstall)
 }
 
-func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string) (Delivery, error) {
+func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID string, configuredKey ed25519.PublicKey, expectedSequence int64, buildSkip func(sequence int64, reason string) ([]byte, error), installKey lifecycleauth.InstallKey, mode string, reconcileInstall bool) (Delivery, error) {
 	var zero Delivery
 	if s == nil || s.db == nil || authenticatedNodeID == "" || now.IsZero() || configuredKeyID == "" || len(configuredKey) != ed25519.PublicKeySize {
 		return zero, fmt.Errorf("%w: invalid lease arguments", ErrInvalid)
@@ -618,12 +620,9 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	if err != nil {
 		return zero, err
 	}
-	var lastStatusVersion sql.NullInt64
-	if err = tx.QueryRow(`SELECT MAX(status_version) FROM acks WHERE task_id=?`, d.TaskID).Scan(&lastStatusVersion); err != nil {
+	var lastStatus string
+	if err = tx.QueryRow(`SELECT status_version,status FROM acks WHERE task_id=? ORDER BY status_version DESC LIMIT 1`, d.TaskID).Scan(&d.LastStatusVersion, &lastStatus); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return zero, err
-	}
-	if lastStatusVersion.Valid {
-		d.LastStatusVersion = lastStatusVersion.Int64
 	}
 	if controlKind.Valid {
 		d.ControlKind = controlKind.String
@@ -659,11 +658,17 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 			return zero, fmt.Errorf("%w: stored control message", ErrInvalid)
 		}
 	}
-	var reconciliation int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM acks WHERE task_id=? AND status IN ('FAILED','ROLLING_BACK','NEEDS_RECONCILIATION')`, d.TaskID).Scan(&reconciliation); err != nil {
-		return zero, err
+	if lastStatus == "NEEDS_RECONCILIATION" && isInstallTask(body) && reconcileInstall && !controlKind.Valid {
+		// The fenced envelope is delivered without any execution lease.
+		if lease.Valid || leaseDeadline.Valid {
+			if _, err = tx.Exec(`UPDATE tasks SET lease_id=NULL,lease_deadline=NULL WHERE task_id=?`, d.TaskID); err != nil {
+				return zero, err
+			}
+		}
+		d.ReconcileInstall = true
+		return d, tx.Commit()
 	}
-	if reconciliation != 0 {
+	if lastStatus == "FAILED" || lastStatus == "ROLLING_BACK" || lastStatus == "NEEDS_RECONCILIATION" {
 		return zero, ErrConflict
 	}
 	if lease.Valid && leaseDeadline.Valid && leaseDeadline.Int64 > now.UnixNano() {
@@ -928,7 +933,7 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 		if err = tx.QueryRow(`SELECT status FROM acks WHERE task_id=? AND status_version=?`, ack.TaskID, maxVersion.Int64).Scan(&previous); err != nil {
 			return err
 		}
-		if !validTransition(previous, ack.Status) {
+		if !validTransition(previous, ack.Status, isInstallTask(operation)) {
 			return ErrConflict
 		}
 	}
@@ -950,6 +955,11 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 			return err
 		}
 	}
+	if ack.Status == "NEEDS_RECONCILIATION" && isInstallTask(operation) {
+		if _, err = tx.Exec(`UPDATE tasks SET lease_id=NULL,lease_deadline=NULL WHERE task_id=?`, ack.TaskID); err != nil {
+			return err
+		}
+	}
 	if ack.Status == "RUNNING" || ack.Status == "NEEDS_RECONCILIATION" || terminal {
 		if _, err = tx.Exec(`DELETE FROM task_controls WHERE task_id=?`, ack.TaskID); err != nil {
 			return err
@@ -961,11 +971,15 @@ func (s *Store) Acknowledge(authenticatedNodeID string, ack Ack) error {
 // An Xray install reports FAILED only before activation. A rollback has its
 // own terminal state and an uncertain outcome fences the sequence.
 func isTerminalFailure(task taskEnvelope) bool {
-	return task.Operation == "core.status" || (task.SchemaVersion == 1 && task.Operation == "core.install")
+	return task.Operation == "core.status" || isInstallTask(task)
 }
 
-const terminalFailureSQL = `json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status' OR
-  (json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.install')`
+func isInstallTask(task taskEnvelope) bool {
+	return task.SchemaVersion == 1 && task.Operation == "core.install"
+}
+
+const installTaskSQL = `json_extract(CAST(t.raw AS TEXT),'$.schema_version')=1 AND json_extract(CAST(t.raw AS TEXT),'$.operation')='core.install'`
+const terminalFailureSQL = `json_extract(CAST(t.raw AS TEXT),'$.operation')='core.status' OR (` + installTaskSQL + `)`
 
 func newLeaseID() (string, error) {
 	var b [16]byte
@@ -975,10 +989,12 @@ func newLeaseID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// Observations may skip intermediate states, but cannot move backwards. Once
-// reconciliation is needed, this storage boundary cannot authorize resolution.
-func validTransition(from, to string) bool {
-	if from == "NEEDS_RECONCILIATION" || terminalStatuses[from] {
+// Only Xray installation has a protocol for resolving a fenced observation.
+func validTransition(from, to string, install bool) bool {
+	if from == "NEEDS_RECONCILIATION" {
+		return install && (to == "SUCCEEDED" || to == "ROLLED_BACK")
+	}
+	if terminalStatuses[from] {
 		return false
 	}
 	if to == "NEEDS_RECONCILIATION" {

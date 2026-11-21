@@ -143,6 +143,14 @@ func (r *Runtime) readStatus() (Status, error) {
 		if err := validateTransition(current, *state.Pending); err != nil {
 			return Status{}, err
 		}
+		if state.Pending.InstallHash != "" && (state.Pending.Action != Install || !validInstallHash(state.Pending.InstallHash)) {
+			return Status{}, errors.New("invalid Xray install intent identity")
+		}
+	}
+	if receipt := state.InstallReceipt; receipt != nil {
+		if !validInstallHash(receipt.Hash) || !receipt.Release.valid() || (receipt.Outcome != "SUCCEEDED" && receipt.Outcome != "ROLLED_BACK") {
+			return Status{}, errors.New("invalid Xray install receipt")
+		}
 	}
 	return state, nil
 }

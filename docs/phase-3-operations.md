@@ -103,4 +103,11 @@ runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xra
 
 使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 仅为 Helper 开放固定的 Xray 运行目录。Helper 从本地 chrony Unix 套接字读取认证时间。Master 和 Agent 仍须通过阶段 2 文档所述的受控认证时间查询。
 
-原发起运维员上传签名请求和独立签发任务，经面板核验及 MFA 复验后投递，并通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 表示结果无法证明。该状态会拦住后续序号。按第 3 节检查节点本地状态并保留 Master、Agent 和 Helper 账本。自动对账仍待实现。
+原发起运维员上传签名请求和独立签发任务，经面板核验及 MFA 复验后投递，并通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 在面板显示为「待对账」，后续序号暂时阻塞。
+
+### 远程安装对账
+
+1. Master、Agent、Helper 和节点端 `mcui-xray` 使用支持对账的同版构建。节点替换 Helper 与本地工具时一起部署，确保两者均能读取含安装事务凭证的状态文件。保留现有状态目录和账本。
+2. 安装被中断后，等待 Agent 重新轮询，并在节点详情刷新任务结果。Helper 核对原签名任务、节点、序号和信封摘要。已有完成记录时直接返回。若激活事务仍未决且能绑定原任务，Helper 恢复上次提交状态，再记录回滚完成。开机恢复也会保留相同凭证。
+3. Agent 先保存结果，再向 Master 补报 `SUCCEEDED` 或 `ROLLED_BACK`。原任务过期后仍能补报。待对账投递不会续发安装租约，也不会下载制品或开始新的安装。Master 收到终态后开放下一序号。
+4. 一直待对账时，按第 3 节检查节点本地状态并保留 Master、Agent、Helper 账本和 Xray 状态目录。旧版未决记录可能没有签名任务凭证。凭证缺失、不匹配或回滚仍失败时保留阻塞，供运维核验。

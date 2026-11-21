@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -236,16 +237,26 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	defer func() { _ = nodeLedger.Close() }()
 	trustedClock := func() (time.Time, error) { return clock(), nil }
 	var calls atomic.Int32
-	var executor agenttasks.InstallExecutor = testInstallExecutor{install: func(raw []byte, lease string) (json.RawMessage, error) {
-		calls.Add(1)
-		assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", helperAuthorizationRequest{LeaseID: lease, Task: raw}, true), http.StatusOK)
-		return json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: in.Version, SHA256: in.SHA256})
-	}}
+	var durableResult json.RawMessage
+	var executor agenttasks.InstallExecutor = testInstallExecutor{
+		install: func(raw []byte, lease string) (json.RawMessage, error) {
+			calls.Add(1)
+			assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", helperAuthorizationRequest{LeaseID: lease, Task: raw}, true), http.StatusOK)
+			durableResult, err = json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: in.Version, SHA256: in.SHA256})
+			return durableResult, err
+		},
+		reconcile: func(raw []byte) (json.RawMessage, error) {
+			if !bytes.Equal(raw, leased.Task) {
+				return nil, lifecycleauth.ErrDenied
+			}
+			return durableResult, nil
+		},
+	}
 	if os.Geteuid() == 0 {
 		executor = rootInstallTestExecutor(t, client.server, client.nodeID, policy.InstallKey(), clock, &calls)
 	}
 	artifacts := testInstallArtifacts{target: artifacttrust.Target{Core: "xray", Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, SignatureStatus: "not-provided"}}
-	newRunner := func(ledger *taskledger.Ledger) *agenttasks.Runner {
+	newRunner := func(ledger *taskledger.Ledger, executor agenttasks.InstallExecutor) *agenttasks.Runner {
 		t.Helper()
 		proc, err := agenttasks.New(agenttasks.Config{NodeID: client.nodeID, Now: clock, Ledger: ledger, Keys: map[string]taskauth.Key{
 			runtime.KeyID: {PublicKey: runtime.PublicKey, Active: true, Purpose: taskauth.PurposeTask},
@@ -265,10 +276,16 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		}
 		return runner
 	}
-	runner := newRunner(nodeLedger)
+	lostHelperResponse := testInstallExecutor{install: func(raw []byte, lease string) (json.RawMessage, error) {
+		if _, err := executor.ExecuteInstall(t.Context(), raw, lease); err != nil {
+			t.Fatalf("Helper execution failed: %v", err)
+		}
+		return nil, errors.New("lost Helper response after durable completion")
+	}}
+	runner := newRunner(nodeLedger, lostHelperResponse)
 	acks, err := runner.ProcessXrayInstall(t.Context(), leased.Task, leased.LeaseID, nil, 0, now)
-	if err != nil || len(acks) != 4 || acks[3].Status != "SUCCEEDED" {
-		t.Fatalf("Agent installation result = %+v, %v", acks, err)
+	if err != nil || len(acks) != 1 || acks[0].Status != "NEEDS_RECONCILIATION" {
+		t.Fatalf("Agent uncertain installation result = %+v, %v", acks, err)
 	}
 	if err := nodeLedger.Close(); err != nil {
 		t.Fatal(err)
@@ -278,9 +295,9 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodeLedger = reopened
-	runner = newRunner(nodeLedger)
+	runner = newRunner(nodeLedger, lostHelperResponse)
 	advance(61 * time.Second)
-	recovered := download("2")
+	recovered := download("1")
 	if recovered.LeaseID == leased.LeaseID {
 		t.Fatal("expired delivery reused the old lease")
 	}
@@ -288,12 +305,57 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	assertStatus(client.request(http.MethodPost, artifacttrust.BackupEndpoint, backupReq, true), http.StatusForbidden)
 	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", recovered, true), http.StatusOK)
 	acks, err = runner.ProcessXrayInstall(t.Context(), recovered.Task, recovered.LeaseID, nil, 0, now)
-	if err != nil || calls.Load() != 1 || len(acks) != 4 || acks[3].Status != "SUCCEEDED" {
-		t.Fatalf("Agent did not replay the durable result: calls=%d %+v %v", calls.Load(), acks, err)
+	if err != nil || calls.Load() != 1 || len(acks) != 1 || acks[0].Status != "NEEDS_RECONCILIATION" {
+		t.Fatalf("Agent retried the install or lost its pending state: calls=%d %+v %v", calls.Load(), acks, err)
 	}
-	for _, ack := range acks {
-		in := taskAckRequest{TaskID: in.TaskID, Sequence: 1, StatusVersion: ack.StatusVersion, Status: ack.Status, Result: ack.Result}
-		assertStatus(client.request(http.MethodPost, "/api/v1/agent/tasks/ack", in, true), http.StatusNoContent)
+	const ackPath = "/api/v1/agent/tasks/ack"
+	report := func(ack agenttasks.Ack) *httptest.ResponseRecorder {
+		return client.request(http.MethodPost, ackPath, taskAckRequest{TaskID: in.TaskID, Sequence: 1, StatusVersion: ack.StatusVersion, Status: ack.Status, Result: ack.Result}, true)
+	}
+	assertStatus(report(acks[0]), http.StatusNoContent)
+	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", recovered, true), http.StatusForbidden)
+	assertStatus(client.request(http.MethodPost, "/api/v1/admin/tasks", status, false), http.StatusConflict)
+	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=1", nil, true), http.StatusConflict)
+	advance(11 * time.Minute)
+	const reconcilePath = "/api/v1/agent/tasks/next?install=xray-manifest-v1&install_reconciliation=v1&next_sequence="
+	getRecovery := func(expected string) {
+		t.Helper()
+		response := client.request(http.MethodGet, reconcilePath+expected, nil, true)
+		assertStatus(response, http.StatusOK)
+		var recovery struct {
+			helperAuthorizationRequest
+			ReconcileInstall  bool  `json:"reconcile_install"`
+			LastStatusVersion int64 `json:"last_status_version"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &recovery); err != nil || recovery.LeaseID != "" ||
+			!recovery.ReconcileInstall || recovery.LastStatusVersion != 1 || !bytes.Equal(recovery.Task, task) {
+			t.Fatalf("unexpected reconciliation delivery: %s (%v)", response.Body, err)
+		}
+	}
+	getRecovery("1")
+	if acks, err := runner.ReconcileXrayInstall(t.Context(), task, 1); err != nil || len(acks) != 0 {
+		t.Fatalf("reconciled without proof: %+v, %v", acks, err)
+	}
+	runner = newRunner(nodeLedger, executor)
+	acks, err = runner.ReconcileXrayInstall(t.Context(), task, 1)
+	if err != nil || calls.Load() != 1 || len(acks) != 1 || acks[0].Status != "SUCCEEDED" || acks[0].StatusVersion != 2 {
+		t.Fatalf("Agent did not recover the durable result: calls=%d %+v %v", calls.Load(), acks, err)
+	}
+	if err := nodeLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	nodeLedger, err = taskledger.Open(agentLedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getRecovery("2")
+	runner = newRunner(nodeLedger, executor)
+	replayed, err := runner.ReconcileXrayInstall(t.Context(), task, 1)
+	if err != nil || len(replayed) != 1 || replayed[0].StatusVersion != acks[0].StatusVersion || !bytes.Equal(replayed[0].Result, acks[0].Result) {
+		t.Fatalf("result replay after Agent reopen: %+v, %v", replayed, err)
+	}
+	for range 2 {
+		assertStatus(report(replayed[0]), http.StatusNoContent)
 	}
 	if err := client.server.ReconcileTaskRuntime(); err != nil {
 		t.Fatalf("reconcile recorded installation: %v", err)
@@ -308,6 +370,11 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	changed.TaskID = "xray-install-0000000000003"
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, changed), http.StatusConflict)
 	assertStatus(client.request(http.MethodPost, "/api/v1/admin/tasks", status, false), http.StatusCreated)
+	res = client.request(http.MethodGet, reconcilePath+"2", nil, true)
+	assertStatus(res, http.StatusOK)
+	if !strings.Contains(res.Body.String(), status.RequestID) || strings.Contains(res.Body.String(), "reconcile_install") {
+		t.Fatalf("next sequence did not resume normal delivery: %s", res.Body)
+	}
 }
 
 type installTestCache func(string, string, string, string, int64) (*os.File, error)
@@ -345,7 +412,7 @@ func rootInstallTestExecutor(t *testing.T, master *Server, node string, key life
 		Keys:               map[string]helper.TrustedKey{master.taskRuntime.KeyID: {PublicKey: master.taskRuntime.PublicKey, Purpose: "task"}},
 		ReadStatus:         func(string) (string, error) { return "", lifecycleauth.ErrDenied },
 		Checkpoint:         cp,
-		XrayInstall: &helper.XrayInstallConfig{Key: key, Apply: func(ctx context.Context, _ lifecycleauth.InstallTask, authorize func(context.Context) error) (string, error) {
+		XrayInstall: &helper.XrayInstallConfig{Key: key, Apply: func(ctx context.Context, _ lifecycleauth.InstallTask, _ string, authorize func(context.Context) error) (string, error) {
 			for range 2 {
 				if err := authorize(ctx); err != nil {
 					return "", err
@@ -353,6 +420,8 @@ func rootInstallTestExecutor(t *testing.T, master *Server, node string, key life
 			}
 			calls.Add(1)
 			return "SUCCEEDED", nil
+		}, Reconcile: func(context.Context, lifecycleauth.InstallTask, string) (string, error) {
+			return "", errors.New("Helper should replay its durable result")
 		}},
 	})
 	if err != nil {
@@ -388,7 +457,8 @@ func rootInstallTestExecutor(t *testing.T, master *Server, node string, key life
 }
 
 type testInstallExecutor struct {
-	install func([]byte, string) (json.RawMessage, error)
+	install   func([]byte, string) (json.RawMessage, error)
+	reconcile func([]byte) (json.RawMessage, error)
 }
 
 func (e testInstallExecutor) ExecuteStatus(context.Context, []byte, string) (json.RawMessage, error) {
@@ -397,6 +467,13 @@ func (e testInstallExecutor) ExecuteStatus(context.Context, []byte, string) (jso
 
 func (e testInstallExecutor) ExecuteInstall(_ context.Context, raw []byte, lease string) (json.RawMessage, error) {
 	return e.install(raw, lease)
+}
+
+func (e testInstallExecutor) ReconcileInstall(_ context.Context, raw []byte) (json.RawMessage, error) {
+	if e.reconcile == nil {
+		return nil, lifecycleauth.ErrDenied
+	}
+	return e.reconcile(raw)
 }
 
 type testInstallArtifacts struct{ target artifacttrust.Target }

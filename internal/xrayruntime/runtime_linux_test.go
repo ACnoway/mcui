@@ -91,7 +91,7 @@ func TestLifecycleRollsBackAndRecoversPendingIntent(t *testing.T) {
 	applyFixture(t, r, Install, selection{Release: first, Running: true})
 	second := stageFixture(t, r, "v26.11.9")
 	svc.failedRelease = second.link()
-	if err := r.change(ctx, readState(t, r), Upgrade, selection{Release: second, Running: true}); err == nil {
+	if err := r.change(ctx, readState(t, r), intent{Action: Upgrade, Next: selection{Release: second, Running: true}}); err == nil {
 		t.Fatal("accepted a candidate that failed startup")
 	}
 	state := readState(t, r)
@@ -134,6 +134,65 @@ func TestLifecycleRollsBackAndRecoversPendingIntent(t *testing.T) {
 	}
 }
 
+func TestRemoteInstallReceiptsAfterReopen(t *testing.T) {
+	for _, outcome := range []string{"SUCCEEDED", "ROLLED_BACK"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx := t.Context()
+			svc := &fakeService{}
+			r := newRuntime(t, svc)
+			svc.dir = r.dir
+			release := stageFixture(t, r, "v26.10.31")
+			hash := strings.Repeat("a", 64)
+			attempt := intent{Action: Install, Next: selection{Release: release, Running: true}, InstallHash: hash}
+			state := readState(t, r)
+			if outcome == "SUCCEEDED" {
+				if err := r.change(ctx, state, attempt); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				state.Pending = &attempt
+				if err := r.save(state); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.point("current", release); err != nil {
+					t.Fatal(err)
+				}
+				svc.running = true
+			}
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := openRuntime(r.dir, svc, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			starts := svc.starts
+			if got, err := reopened.ReconcileInstall(ctx, release, strings.Repeat("b", 64)); err == nil || got != "" {
+				t.Fatalf("different task got %q, %v", got, err)
+			}
+			if outcome == "ROLLED_BACK" {
+				if readState(t, reopened).Pending == nil || !svc.running {
+					t.Fatal("different task modified pending activation")
+				}
+				svc.stopError = errors.New("stop failed")
+				if _, err := reopened.ReconcileInstall(ctx, release, hash); err == nil || readState(t, reopened).Pending == nil {
+					t.Fatal("failed rollback produced a terminal receipt")
+				}
+				svc.stopError = nil
+			}
+			for range 2 {
+				if got, err := reopened.ReconcileInstall(ctx, release, hash); err != nil || got != outcome {
+					t.Fatalf("reconciliation = %q, %v, want %q", got, err, outcome)
+				}
+			}
+			if state := readState(t, reopened); state.Pending != nil || svc.running != (outcome == "SUCCEEDED") || svc.starts != starts {
+				t.Fatalf("reconciliation changed activation: %+v, starts=%d", state, svc.starts)
+			}
+		})
+	}
+}
+
 func TestLifecycleControlsAndRequiresExplicitDowngrade(t *testing.T) {
 	ctx := context.Background()
 	svc := &fakeService{}
@@ -154,7 +213,7 @@ func TestLifecycleControlsAndRequiresExplicitDowngrade(t *testing.T) {
 	if svc.running || svc.starts != starts+1 || readState(t, r).Previous != first {
 		t.Fatal("stopped upgrade did not check the candidate and preserve stopped state")
 	}
-	if err := r.change(ctx, readState(t, r), Upgrade, selection{Release: first}); err == nil {
+	if err := r.change(ctx, readState(t, r), intent{Action: Upgrade, Next: selection{Release: first}}); err == nil {
 		t.Fatal("accepted an implicit downgrade")
 	}
 	applyFixture(t, r, Downgrade, selection{Release: first})
@@ -241,7 +300,7 @@ func readState(t *testing.T, r *Runtime) Status {
 
 func applyFixture(t *testing.T, r *Runtime, action Action, next selection) {
 	t.Helper()
-	if err := r.change(context.Background(), readState(t, r), action, next); err != nil {
+	if err := r.change(context.Background(), readState(t, r), intent{Action: action, Next: next}); err != nil {
 		t.Fatal(err)
 	}
 }

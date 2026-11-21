@@ -22,8 +22,9 @@ import (
 const maxSocketFrame = 72 * 1024
 
 type socketRequest struct {
-	LeaseID string          `json:"lease_id"`
-	Task    json.RawMessage `json:"task"`
+	LeaseID          string          `json:"lease_id,omitempty"`
+	Task             json.RawMessage `json:"task"`
+	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 }
 
 type socketResponse struct {
@@ -121,19 +122,29 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var request socketRequest
-	if err := decoder.Decode(&request); err != nil || len(request.Task) == 0 || request.LeaseID == "" {
+	if err := decoder.Decode(&request); err != nil || len(request.Task) == 0 || request.ReconcileInstall == (request.LeaseID != "") {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
 	var trailing any
 	if decoder.Decode(&trailing) != io.EOF {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
-	if h.cfg.XrayInstall != nil {
-		if install, err := h.cfg.XrayInstall.Key.Verify(request.Task); err == nil {
-			_ = conn.SetWriteDeadline(minTime(time.Now().Add(10*time.Minute), install.ExpiresAt.Add(70*time.Second)))
+	var result string
+	var err error
+	if request.ReconcileInstall {
+		deadline := time.Now().Add(90 * time.Second)
+		_ = conn.SetWriteDeadline(deadline)
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+		result, err = h.reconcileInstall(ctx, conn, request.Task)
+	} else {
+		if h.cfg.XrayInstall != nil {
+			if install, err := h.cfg.XrayInstall.Key.Verify(request.Task); err == nil {
+				_ = conn.SetWriteDeadline(minTime(time.Now().Add(10*time.Minute), install.ExpiresAt.Add(70*time.Second)))
+			}
 		}
+		result, err = h.Execute(conn, request.Task, request.LeaseID)
 	}
-	result, err := h.Execute(conn, request.Task, request.LeaseID)
 	if err != nil {
 		code := "helper_unavailable"
 		if errors.Is(err, ErrDenied) {

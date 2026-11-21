@@ -295,9 +295,18 @@ func (l *Ledger) Get(seq int64) (out Task, err error) {
 	return
 }
 
-// Finish records the result and advances the slot atomically. It cannot resolve
-// uncertain outcomes after restart; that requires an external recovery protocol.
+// Finish records the result of a live execution and advances the slot atomically.
 func (l *Ledger) Finish(seq int64, state State, result []byte) error {
+	return l.finish(seq, Running, state, result)
+}
+
+// FinishReconciled requires the caller to verify the result against independent
+// durable evidence for the same task. It cannot finish a pending or running task.
+func (l *Ledger) FinishReconciled(seq int64, state State, result []byte) error {
+	return l.finish(seq, Reconciliation, state, result)
+}
+
+func (l *Ledger) finish(seq int64, from, state State, result []byte) error {
 	if state != Succeeded && state != Failed {
 		return ErrState
 	}
@@ -312,7 +321,7 @@ func (l *Ledger) Finish(seq int64, state State, result []byte) error {
 		if t.State == state && bytes.Equal(t.Result, result) {
 			return nil
 		}
-		if t.State != Running {
+		if t.State != from {
 			return ErrState
 		}
 		_, e = c.ExecContext(context.Background(), `UPDATE tasks SET state=?, result=? WHERE seq=?`, state, result, seq)
@@ -324,8 +333,7 @@ func (l *Ledger) Finish(seq int64, state State, result []byte) error {
 }
 
 // RequireReconciliation persists an uncertain Helper outcome without advancing
-// the sequence. The node remains fenced until an operator-authorized recovery
-// procedure is implemented; subsequent tasks cannot pass this slot.
+// the sequence. Subsequent tasks cannot pass this slot while it is uncertain.
 func (l *Ledger) RequireReconciliation(seq int64, result []byte) error {
 	if seq < 1 || len(result) > 65536 {
 		return ErrState

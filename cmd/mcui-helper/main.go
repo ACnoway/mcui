@@ -140,7 +140,7 @@ func main() {
 		}
 		config.XrayInstall = &helper.XrayInstallConfig{
 			Key: lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key},
-			Apply: func(ctx context.Context, task lifecycleauth.InstallTask, authorize func(context.Context) error) (string, error) {
+			Apply: func(ctx context.Context, task lifecycleauth.InstallTask, hash string, authorize func(context.Context) error) (string, error) {
 				if task.SignedManifest != signedManifest {
 					return "FAILED", nil
 				}
@@ -149,7 +149,15 @@ func main() {
 					return "", err
 				}
 				defer runtime.Close()
-				return runtime.InstallAuthorized(ctx, xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}, artifacts, task.ManifestVersion, authorize)
+				return runtime.InstallAuthorized(ctx, xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}, artifacts, task.ManifestVersion, hash, authorize)
+			},
+			Reconcile: func(ctx context.Context, task lifecycleauth.InstallTask, hash string) (string, error) {
+				runtime, err := xrayruntime.Open(false)
+				if err != nil {
+					return "", err
+				}
+				defer runtime.Close()
+				return runtime.ReconcileInstall(ctx, xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}, hash)
 			},
 		}
 	}

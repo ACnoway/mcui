@@ -5,6 +5,7 @@ package xrayruntime
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -45,17 +46,25 @@ type selection struct {
 }
 
 type intent struct {
-	Action Action    `json:"action"`
-	Next   selection `json:"next"`
+	Action      Action    `json:"action"`
+	Next        selection `json:"next"`
+	InstallHash string    `json:"install_hash,omitempty"`
+}
+
+type installReceipt struct {
+	Hash    string  `json:"hash"`
+	Release Release `json:"release"`
+	Outcome string  `json:"outcome"`
 }
 
 type Status struct {
-	Schema     int       `json:"schema"`
-	Current    selection `json:"current"`
-	Previous   Release   `json:"previous"`
-	Pending    *intent   `json:"pending,omitempty"`
-	LastAction Action    `json:"last_action,omitempty"`
-	LastResult string    `json:"last_result,omitempty"`
+	Schema         int             `json:"schema"`
+	Current        selection       `json:"current"`
+	Previous       Release         `json:"previous"`
+	Pending        *intent         `json:"pending,omitempty"`
+	LastAction     Action          `json:"last_action,omitempty"`
+	LastResult     string          `json:"last_result,omitempty"`
+	InstallReceipt *installReceipt `json:"install_receipt,omitempty"`
 }
 
 type service interface {
@@ -84,7 +93,7 @@ func (r *Runtime) Status() (Status, error) { return r.readStatus() }
 
 // Apply fetches only the exact operator-selected and authorized release.
 func (r *Runtime) Apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client) error {
-	return r.apply(ctx, action, release, trust, 0, nil)
+	return r.apply(ctx, action, release, trust, 0, "", nil)
 }
 
 // ApplyWithManifest pins the approved manifest version across lookup,
@@ -93,16 +102,16 @@ func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release 
 	if manifestVersion <= 0 {
 		return artifacttrust.ErrUntrustedTarget
 	}
-	return r.apply(ctx, action, release, trust, manifestVersion, nil)
+	return r.apply(ctx, action, release, trust, manifestVersion, "", nil)
 }
 
 // InstallAuthorized rechecks the remote authorization before candidate
 // execution and immediately before recording any activation intent.
-func (r *Runtime) InstallAuthorized(ctx context.Context, release Release, trust *artifacttrust.Client, manifestVersion int64, authorize func(context.Context) error) (string, error) {
-	if manifestVersion <= 0 || authorize == nil {
+func (r *Runtime) InstallAuthorized(ctx context.Context, release Release, trust *artifacttrust.Client, manifestVersion int64, hash string, authorize func(context.Context) error) (string, error) {
+	if manifestVersion <= 0 || !validInstallHash(hash) || authorize == nil {
 		return "FAILED", nil
 	}
-	err := r.apply(ctx, Install, release, trust, manifestVersion, authorize)
+	err := r.apply(ctx, Install, release, trust, manifestVersion, hash, authorize)
 	switch {
 	case err == nil || errors.Is(err, errCommitted):
 		return "SUCCEEDED", nil
@@ -115,7 +124,7 @@ func (r *Runtime) InstallAuthorized(ctx context.Context, release Release, trust 
 	}
 }
 
-func (r *Runtime) apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64, authorize func(context.Context) error) error {
+func (r *Runtime) apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64, hash string, authorize func(context.Context) error) error {
 	state, err := r.ready()
 	if err != nil {
 		return errors.Join(errUnknown, err)
@@ -160,7 +169,7 @@ func (r *Runtime) apply(ctx context.Context, action Action, release Release, tru
 			return err
 		}
 	}
-	return r.change(ctx, state, action, next)
+	return r.change(ctx, state, intent{Action: action, Next: next, InstallHash: hash})
 }
 
 func (r *Runtime) Control(ctx context.Context, action Action, expected Release) error {
@@ -182,7 +191,47 @@ func (r *Runtime) Control(ctx context.Context, action Action, expected Release) 
 	default:
 		return errors.New("invalid Xray control action")
 	}
-	return r.change(ctx, state, action, next)
+	return r.change(ctx, state, intent{Action: action, Next: next})
+}
+
+// ReconcileInstall returns a persisted result for the exact signed task. A
+// matching interrupted activation can only be rolled back by this method.
+func (r *Runtime) ReconcileInstall(ctx context.Context, release Release, hash string) (string, error) {
+	if !release.valid() || !validInstallHash(hash) {
+		return "", errUnknown
+	}
+	state, err := r.readStatus()
+	if err != nil {
+		return "", err
+	}
+	if state.Pending != nil {
+		if state.Pending.InstallHash != hash || state.Pending.Next.Release != release {
+			return "", errUnknown
+		}
+		if err := r.rollback(ctx, state); err != nil {
+			return "", err
+		}
+		state, err = r.readStatus()
+		if err != nil {
+			return "", err
+		}
+	}
+	receipt := state.InstallReceipt
+	if receipt == nil || receipt.Hash != hash || receipt.Release != release {
+		return "", errUnknown
+	}
+	if err := syncDir(filepath.Join(r.dir, "control")); err != nil {
+		return "", err
+	}
+	return receipt.Outcome, nil
+}
+
+func validInstallHash(hash string) bool {
+	if len(hash) != 64 || hash != strings.ToLower(hash) {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil
 }
 
 // Recover is also called on boot. A pending transaction always rolls back to
@@ -221,11 +270,11 @@ func (r *Runtime) ready() (Status, error) {
 	return state, nil
 }
 
-func (r *Runtime) change(ctx context.Context, state Status, action Action, next selection) error {
-	attempt := intent{Action: action, Next: next}
+func (r *Runtime) change(ctx context.Context, state Status, attempt intent) error {
 	if err := validateTransition(state.Current, attempt); err != nil {
 		return err
 	}
+	action, next := attempt.Action, attempt.Next
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -252,6 +301,9 @@ func (r *Runtime) change(ctx context.Context, state Status, action Action, next 
 	}
 	state.Current, state.Pending = next, nil
 	state.LastAction, state.LastResult = action, "committed"
+	if attempt.InstallHash != "" {
+		state.InstallReceipt = &installReceipt{Hash: attempt.InstallHash, Release: next.Release, Outcome: "SUCCEEDED"}
+	}
 	if err := r.save(state); err != nil {
 		// A rename may already have completed even when directory fsync fails.
 		return errors.Join(errUnknown, fmt.Errorf("persist Xray commit; run recover before continuing: %w", err))
@@ -284,6 +336,9 @@ func (r *Runtime) rollback(ctx context.Context, state Status) error {
 		return fmt.Errorf("ROLLBACK_FAILED: restore committed Xray selection: %w", err)
 	}
 	state.LastAction, state.LastResult = state.Pending.Action, "rolled_back"
+	if state.Pending.InstallHash != "" {
+		state.InstallReceipt = &installReceipt{Hash: state.Pending.InstallHash, Release: state.Pending.Next.Release, Outcome: "ROLLED_BACK"}
+	}
 	state.Pending = nil
 	if err := r.save(state); err != nil {
 		return fmt.Errorf("ROLLBACK_FAILED: persist Xray recovery: %w", err)

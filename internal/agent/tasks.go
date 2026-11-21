@@ -31,6 +31,10 @@ type InstallTaskHandler interface {
 	ProcessXrayInstall(context.Context, []byte, string, []byte, int64, time.Time) ([]TaskAck, error)
 }
 
+type installReconciliationHandler interface {
+	ReconcileXrayInstall(context.Context, []byte, int64) ([]TaskAck, error)
+}
+
 func (c *Client) EnableXrayInstalls(signedManifest bool) {
 	c.xrayInstallMode = "xray-v1"
 	if signedManifest {
@@ -61,6 +65,7 @@ type taskDelivery struct {
 	Control           json.RawMessage `json:"control,omitempty"`
 	SequenceRecovery  bool            `json:"sequence_recovery,omitempty"`
 	SequenceSkip      bool            `json:"sequence_skip,omitempty"`
+	ReconcileInstall  bool            `json:"reconcile_install,omitempty"`
 }
 
 type taskDeliveryIdentity struct {
@@ -97,6 +102,9 @@ func (c *Client) processStatusTask(state localState) error {
 		endpoint += "?next_sequence=" + strconv.FormatInt(next, 10)
 		if c.xrayInstallMode != "" {
 			endpoint += "&install=" + c.xrayInstallMode
+			if _, ok := c.taskHandler.(installReconciliationHandler); ok {
+				endpoint += "&install_reconciliation=v1"
+			}
 		}
 	}
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
@@ -124,8 +132,18 @@ func (c *Client) processStatusTask(state localState) error {
 	var delivery taskDelivery
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&delivery); err != nil || delivery.TaskID == "" || delivery.Sequence < 1 || !leaseIDPattern.MatchString(delivery.LeaseID) || delivery.LastStatusVersion < 0 || (len(delivery.Task) == 0 && !delivery.SequenceSkip) || (delivery.SequenceSkip && (len(delivery.Task) != 0 || delivery.ControlKind != string(protocol.Skip))) || (delivery.SequenceRecovery && (len(delivery.Task) == 0 || delivery.ControlKind != string(protocol.Skip))) {
+	if err = decoder.Decode(&delivery); err != nil || delivery.TaskID == "" || delivery.Sequence < 1 || delivery.LastStatusVersion < 0 ||
+		(len(delivery.Task) == 0 && !delivery.SequenceSkip) ||
+		(delivery.SequenceSkip && (len(delivery.Task) != 0 || delivery.ControlKind != string(protocol.Skip))) ||
+		(delivery.SequenceRecovery && (len(delivery.Task) == 0 || delivery.ControlKind != string(protocol.Skip))) {
 		return errors.New("invalid task delivery")
+	}
+	if delivery.ReconcileInstall {
+		if delivery.LeaseID != "" || delivery.LeaseDeadline != "" || delivery.ControlKind != "" || delivery.LastStatusVersion < 1 {
+			return errors.New("invalid Xray reconciliation delivery")
+		}
+	} else if !leaseIDPattern.MatchString(delivery.LeaseID) {
+		return errors.New("invalid task lease")
 	}
 	var trailing any
 	if decoder.Decode(&trailing) != io.EOF {
@@ -167,7 +185,13 @@ func (c *Client) processStatusTask(state localState) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var acks []TaskAck
-	if delivery.SequenceSkip {
+	if delivery.ReconcileInstall {
+		handler, ok := c.taskHandler.(installReconciliationHandler)
+		if !install || !ok {
+			return errors.New("unsupported Xray reconciliation delivery")
+		}
+		acks, err = handler.ReconcileXrayInstall(ctx, delivery.Task, delivery.LastStatusVersion)
+	} else if delivery.SequenceSkip {
 		acks, err = c.taskHandler.ProcessSequenceSkip(ctx, append([]byte(nil), delivery.Control...), delivery.Sequence, delivery.LastStatusVersion, serverNow)
 	} else if install {
 		handler, ok := c.taskHandler.(InstallTaskHandler)
@@ -192,6 +216,9 @@ func (c *Client) processStatusTask(state localState) error {
 	if err != nil {
 		return fmt.Errorf("status-task processing failed: %w", err)
 	}
+	if delivery.ReconcileInstall && len(acks) == 0 {
+		return nil
+	}
 	if len(acks) == 0 || len(acks) > 9 {
 		return errors.New("status-task processor returned invalid ACK history")
 	}
@@ -201,7 +228,12 @@ func (c *Client) processStatusTask(state localState) error {
 		return nil
 	}
 	baseVersion := int64(0)
-	if len(acks) == 1 && acks[0].StatusVersion > 1 && (acks[0].Status == "EXPIRED" || acks[0].Status == "CANCELED" || acks[0].Status == "NEEDS_RECONCILIATION") {
+	if delivery.ReconcileInstall {
+		if len(acks) != 1 || (acks[0].Status != "SUCCEEDED" && acks[0].Status != "ROLLED_BACK") {
+			return errors.New("invalid Xray reconciliation result")
+		}
+		baseVersion = delivery.LastStatusVersion
+	} else if len(acks) == 1 && acks[0].StatusVersion > 1 && (acks[0].Status == "EXPIRED" || acks[0].Status == "CANCELED" || acks[0].Status == "NEEDS_RECONCILIATION") {
 		baseVersion = delivery.LastStatusVersion
 	}
 	for i, ack := range acks {
