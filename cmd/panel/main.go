@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	json "encoding/json/v2"
 	"flag"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ func main() {
 	taskSignerURL := flag.String("task-signer-url", "", "loopback URL of the isolated task signer")
 	taskSignerTokenPath := flag.String("task-signer-token-file", "", "shared token file for the isolated task signer")
 	xrayInstallPolicyPath := flag.String("xray-install-policy", os.Getenv("MCUI_XRAY_INSTALL_POLICY"), "independently provisioned Xray install authorization policy JSON")
+	runtimeUpdatePolicyPath := flag.String("runtime-update-policy", os.Getenv("MCUI_RUNTIME_UPDATE_POLICY"), "independently provisioned Agent/Helper remote update policy JSON")
 	checkpointConfig := registerTaskCheckpointFlags()
 	flag.Parse()
 	usingTLS := *tlsCertPath != "" || *tlsKeyPath != ""
@@ -156,6 +158,15 @@ func main() {
 		}
 		log.Printf("read-only status-task runtime enabled with signing key %s", *taskKeyID)
 	}
+	if *runtimeUpdatePolicyPath != "" {
+		policy, err := readRuntimeUpdatePolicy(*runtimeUpdatePolicyPath)
+		if err == nil {
+			err = srv.ConfigureRuntimeUpdates(policy)
+		}
+		if err != nil {
+			log.Fatalf("configure remote runtime update: %v", err)
+		}
+	}
 	httpServer := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, TLSConfig: tlsConfig}
 	if usingTLS {
 		log.Printf("mcui Master listening with TLS 1.3 on %s", *addr)
@@ -163,6 +174,33 @@ func main() {
 	}
 	log.Printf("mcui development Master listening on loopback HTTP %s; Agent enrollment is unavailable", *addr)
 	log.Fatal(httpServer.ListenAndServe())
+}
+
+func readRuntimeUpdatePolicy(path string) (master.RuntimeUpdatePolicy, error) {
+	var policy master.RuntimeUpdatePolicy
+	const limit = 1 << 20
+	info, err := os.Lstat(path)
+	if err != nil {
+		return policy, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit || runtime.GOOS != "windows" && info.Mode().Perm()&0022 != 0 {
+		return policy, fmt.Errorf("runtime update policy must be a bounded regular file without group or other write access")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return policy, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return policy, fmt.Errorf("runtime update policy changed during open")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || len(raw) > limit {
+		return policy, fmt.Errorf("read runtime update policy")
+	}
+	err = json.Unmarshal(raw, &policy, json.RejectUnknownMembers(true))
+	return policy, err
 }
 
 func readXrayInstallPolicy(path string) (*lifecycleauth.Policy, error) {

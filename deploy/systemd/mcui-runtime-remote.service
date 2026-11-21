@@ -1,0 +1,19 @@
+[Unit]
+Description=Poll Master for independently authorized MCUI runtime updates
+Requires=mcui-runtime-recover.service
+Wants=network-online.target
+After=network-online.target mcui-runtime-recover.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/mcui-runtime/remote.env
+UMask=0077
+ExecStart=/usr/local/bin/mcui-runtime poll -master ${MCUI_MASTER_URL} -server-ca=${MCUI_SERVER_CA}
+ExecStopPost=/usr/local/bin/mcui-runtime repair-pending
+TimeoutStartSec=7min
+TimeoutStopSec=2min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mcui-runtime
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

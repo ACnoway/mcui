@@ -19,10 +19,14 @@ import (
 )
 
 func (m *Manager) stageArchive(ctx context.Context, artifact artifacttrust.Artifact) (Pair, error) {
-	if artifact.Architecture != runtime.GOARCH || artifact.Length > maxArchive {
+	return m.stageArchiveFile(ctx, artifact, filepath.Join(m.dir, "incoming", artifact.Filename))
+}
+
+func (m *Manager) stageArchiveFile(ctx context.Context, artifact artifacttrust.Artifact, path string) (Pair, error) {
+	if artifact.Architecture != runtime.GOARCH || artifact.Length > MaxArchive {
 		return Pair{}, errors.New("runtime archive architecture or size rejected")
 	}
-	file, size, err := openTrusted(filepath.Join(m.dir, "incoming", artifact.Filename), maxArchive)
+	file, size, err := openTrusted(path, MaxArchive)
 	if err != nil {
 		return Pair{}, err
 	}

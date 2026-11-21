@@ -13,13 +13,15 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/ACnoway/mcui/internal/runtimeupdate"
 	"modernc.org/sqlite"
 )
 
 var ErrNotFound = errors.New("record not found")
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const driverName = "mcui-master-sqlite"
 
@@ -47,8 +49,24 @@ type State struct {
 	Nodes    map[string]Node    `json:"nodes"`
 	Sessions map[string]Session `json:"sessions"`
 
-	Audits       []Audit                `json:"audits"`
-	XrayInstalls map[string]XrayInstall `json:"xray_installs,omitempty"`
+	Audits         []Audit                  `json:"audits"`
+	XrayInstalls   map[string]XrayInstall   `json:"xray_installs,omitempty"`
+	RuntimeUpdates map[string]RuntimeUpdate `json:"runtime_updates,omitempty"`
+}
+
+type RuntimeUpdate struct {
+	ID            string                 `json:"id"`
+	NodeID        string                 `json:"node_id"`
+	Sequence      int64                  `json:"sequence"`
+	Version       string                 `json:"version"`
+	Architecture  string                 `json:"architecture"`
+	ArchiveSHA256 string                 `json:"archive_sha256"`
+	ArchiveLength int64                  `json:"archive_length"`
+	ExpectedPair  string                 `json:"expected_pair_sha256"`
+	ExpiresAt     time.Time              `json:"expires_at"`
+	Status        string                 `json:"status"`
+	CurrentPair   string                 `json:"current_pair_sha256,omitempty"`
+	Package       *runtimeupdate.Package `json:"package,omitempty"`
 }
 
 // XrayInstall retains the proposal and authorization digest independently of the
@@ -166,6 +184,11 @@ func migrate(db *sql.DB) error {
 	if current > schemaVersion {
 		return fmt.Errorf("database schema version %d is newer than this binary supports (%d)", current, schemaVersion)
 	}
+	if current < 4 {
+		if _, err := tx.Exec(createRuntimeUpdates); err != nil {
+			return err
+		}
+	}
 	if current == 0 {
 		for _, query := range schemaV2 {
 			if _, err := tx.Exec(query); err != nil {
@@ -214,6 +237,8 @@ func migrate(db *sql.DB) error {
 		if _, err := tx.Exec(createXrayInstalls); err != nil {
 			return err
 		}
+	}
+	if current >= 1 && current < schemaVersion {
 		if _, err := tx.Exec("INSERT INTO schema_migrations(version) VALUES(?)", schemaVersion); err != nil {
 			return err
 		}
@@ -222,6 +247,7 @@ func migrate(db *sql.DB) error {
 }
 
 const createXrayInstalls = `CREATE TABLE xray_installs (id TEXT PRIMARY KEY, payload BLOB NOT NULL)`
+const createRuntimeUpdates = `CREATE TABLE runtime_updates (id TEXT PRIMARY KEY, payload BLOB NOT NULL)`
 
 var upgradeV1 = []string{
 	"DROP TABLE enrollments",
@@ -240,7 +266,8 @@ var schemaV2 = []string{
 }
 
 func emptyState() State {
-	return State{Admins: map[string]Admin{}, Nodes: map[string]Node{}, Sessions: map[string]Session{}, Audits: []Audit{}, XrayInstalls: map[string]XrayInstall{}}
+	return State{Admins: map[string]Admin{}, Nodes: map[string]Node{}, Sessions: map[string]Session{},
+		Audits: []Audit{}, XrayInstalls: map[string]XrayInstall{}, RuntimeUpdates: map[string]RuntimeUpdate{}}
 }
 
 func decode(payload []byte) (State, error) {
@@ -285,6 +312,9 @@ func loadState(q executor) (State, error) {
 	if err := loadMap(q, `SELECT id, payload FROM xray_installs ORDER BY id`, state.XrayInstalls); err != nil {
 		return State{}, err
 	}
+	if err := loadMap(q, `SELECT id, payload FROM runtime_updates ORDER BY id`, state.RuntimeUpdates); err != nil {
+		return State{}, err
+	}
 	rows, err := q.Query(`SELECT payload FROM audit_logs ORDER BY event_seq`)
 	if err != nil {
 		return State{}, err
@@ -326,7 +356,7 @@ func loadMap[T any](q executor, query string, destination map[string]T) error {
 }
 
 func persistState(tx *sql.Tx, state State) error {
-	for _, table := range []string{"sessions", "nodes", "admins", "audit_logs", "xray_installs"} {
+	for _, table := range []string{"sessions", "nodes", "admins", "audit_logs", "xray_installs", "runtime_updates"} {
 		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
 			return err
 		}
@@ -376,6 +406,15 @@ func persistState(tx *sql.Tx, state State) error {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO xray_installs(id, payload) VALUES(?, ?)`, id, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.RuntimeUpdates) {
+		payload, err := json.Marshal(state.RuntimeUpdates[id])
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO runtime_updates(id, payload) VALUES(?, ?)`, id, payload); err != nil {
 			return err
 		}
 	}

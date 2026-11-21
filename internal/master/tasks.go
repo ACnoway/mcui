@@ -233,6 +233,9 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 		if err := checkXrayInstallReservation(st, in.RequestID, node.ID, now.Unix()); err != nil {
 			return err
 		}
+		if runtimeUpdateReserved(st, node.ID, now) {
+			return errRuntimeBusy
+		}
 		authorized := false
 		for _, event := range st.Audits {
 			if event.ResourceType != "task" || event.Resource != in.RequestID {
@@ -260,6 +263,10 @@ func (s *Server) createStatusTask(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		if errors.Is(err, errXrayInstallReserved) {
 			http.Error(w, "an Xray install proposal reserves this node sequence or task ID", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, errRuntimeBusy) {
+			http.Error(w, "a runtime update reserves this node", http.StatusConflict)
 			return
 		}
 		http.Error(w, "task authorization changed or request ID already used", http.StatusConflict)

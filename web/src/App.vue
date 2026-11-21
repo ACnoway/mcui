@@ -7,7 +7,11 @@ type StatusResult = { core?: string; load_state?: string; active_state?: string;
 type TaskAck = { status_version: number; status: string; result?: StatusResult }
 type StatusTask = { task_id: string; node_id: string; sequence: number; created_by?: string; created_at?: string; approval: string; control?: string; operation: string; core: string; issued_at: string; expires_at: string; active: boolean; lease_deadline?: string; status: string; acks: TaskAck[] }
 type ManagedAdmin = { id: string; username: string; role: string; node_ids: string[]; node_groups: string[]; disabled: boolean }
-type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean }
+type AdminInfo = { id: string; username: string; role: string; csrf_token: string; mfa_recent: boolean; can_create_nodes: boolean; can_install_agents: boolean; can_disable_nodes: boolean; can_prepare_xray_installs: boolean; can_update_runtime: boolean }
+type RuntimeUpdate = {
+  id: string; sequence: number; version: string; architecture: string; expires_at: string; current_pair_sha256?: string
+  status: 'QUEUED' | 'DELIVERED' | 'COMMITTED' | 'ROLLED_BACK' | 'REJECTED' | 'EXPIRED'
+}
 type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade' | 'core.downgrade' | 'core.uninstall'
 type XrayInstall = {
   proposal: {
@@ -33,6 +37,19 @@ const audits = ref<Audit[]>([])
 const tasks = ref<StatusTask[]>([])
 const statusTasks = computed(() => tasks.value.filter(task => task.operation === 'core.status'))
 const xrayInstalls = ref<XrayInstall[]>([])
+const runtimeUpdates = ref<RuntimeUpdate[]>([])
+const runtimeUpdateBusy = ref(false)
+const runtimeUpdateError = ref('')
+const runtimeUpdateStatus: Record<RuntimeUpdate['status'], string> = {
+  QUEUED: '待领取', DELIVERED: '已领取，等待结果', COMMITTED: '更新已提交',
+  ROLLED_BACK: '已恢复原版本', REJECTED: '节点拒绝', EXPIRED: '已过期',
+}
+const runtimeProofFields = [
+  { name: 'authorization', label: '节点授权 JSON', limit: 8192 },
+  { name: 'authorization_signature', label: '节点授权签名', limit: 64 },
+  { name: 'manifest', label: '发布清单 JSON', limit: 1 << 20 },
+  { name: 'manifest_signature', label: '发布清单签名', limit: 64 },
+]
 const xrayInstallInput = ref({
   operation: 'core.install' as XrayOperation,
   version: '', architecture: 'amd64', sha256: '', manifest_version: '' as number | '',
@@ -239,9 +256,57 @@ async function loadXrayInstalls(nodeID: string) {
   }
 }
 async function refreshNodeTasks(nodeID: string) {
-  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID)])
+  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadRuntimeUpdates(nodeID)])
 }
-async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); xrayInstalls.value = []; await refreshNodeTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
+async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); xrayInstalls.value = []; runtimeUpdates.value = []; await refreshNodeTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
+
+function runtimeUpdatePath(nodeID: string) {
+  return `/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/runtime-updates`
+}
+
+async function loadRuntimeUpdates(nodeID: string) {
+  if (!admin.value?.can_update_runtime) return
+  runtimeUpdateError.value = ''
+  try {
+    const updates = await api<RuntimeUpdate[]>(runtimeUpdatePath(nodeID))
+    if (selectedNode.value?.id === nodeID) runtimeUpdates.value = updates
+  } catch (e) {
+    if (selectedNode.value?.id === nodeID) runtimeUpdateError.value = e instanceof Error ? e.message : '读取运行时更新失败'
+  }
+}
+
+function encodeRuntimeProof(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取签名材料失败'))
+    reader.onload = () => resolve(String(reader.result).split(',', 2)[1])
+    reader.readAsDataURL(file)
+  })
+}
+
+async function submitRuntimeUpdate(event: Event) {
+  const nodeID = selectedNode.value?.id
+  if (!nodeID || runtimeUpdateBusy.value || !(event.currentTarget instanceof HTMLFormElement)) return
+  const form = event.currentTarget
+  const files = new FormData(form)
+  runtimeUpdateBusy.value = true
+  runtimeUpdateError.value = ''
+  try {
+    const proof: Record<string, string> = {}
+    for (const { name, label, limit } of runtimeProofFields) {
+      const file = files.get(name)
+      if (!(file instanceof File) || !file.size || file.size > limit) throw new Error(`${label}文件大小无效`)
+      proof[name] = await encodeRuntimeProof(file)
+    }
+    await apiWithStepUp<RuntimeUpdate>(runtimeUpdatePath(nodeID), { package: proof })
+    form.reset()
+    if (selectedNode.value?.id === nodeID) await loadRuntimeUpdates(nodeID)
+  } catch (e) {
+    if (selectedNode.value?.id === nodeID) runtimeUpdateError.value = e instanceof Error ? e.message : '提交运行时更新失败'
+  } finally {
+    runtimeUpdateBusy.value = false
+  }
+}
 async function createXrayInstall() {
   const nodeID = selectedNode.value?.id
   if (!nodeID || xrayInstallBusy.value) return
@@ -447,6 +512,25 @@ onMounted(async () => { try { admin.value = await api<AdminInfo>('/api/v1/admin/
           </form>
           <button v-if="install.status === 'SIGNED_TASK_VERIFIED' && !xrayTask(install.proposal.task_id)"
             :disabled="xrayInstallBusy" @click="dispatchXrayInstall(install)">投递{{ xrayOperationLabel[install.proposal.operation] }}任务</button>
+        </div>
+      </section>
+      <section v-if="selectedNode && admin?.can_update_runtime" :key="selectedNode.id" class="card">
+        <div class="section-head">
+          <h2>Agent / Helper 成对更新</h2>
+          <button class="outline" @click="loadRuntimeUpdates(selectedNode.id)">刷新结果</button>
+        </div>
+        <form v-if="!selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="submitRuntimeUpdate">
+          <label v-for="field in runtimeProofFields" :key="field.name">{{ field.label }}<input :name="field.name" type="file" required /></label>
+          <button :disabled="runtimeUpdateBusy">验证签名并投递</button>
+        </form>
+        <p v-if="runtimeUpdateError" class="error" role="alert">{{ runtimeUpdateError }}</p>
+        <p v-if="!runtimeUpdates.length" class="empty">暂无成对更新记录</p>
+        <div v-for="update in runtimeUpdates" :key="update.id" class="audit-row">
+          <div>
+            <strong>{{ update.version }} · {{ update.architecture }} · #{{ update.sequence }}</strong>
+            <small v-if="update.current_pair_sha256">当前成对 SHA-256 {{ update.current_pair_sha256 }}</small>
+          </div>
+          <span>{{ runtimeUpdateStatus[update.status] }}</span>
         </div>
       </section>
       <section class="card"><span class="eyebrow">AUDIT TRAIL</span><h2>安全事件</h2><div v-for="(event, i) in audits" :key="i" class="audit-row"><time>{{ new Date(event.at*1000).toLocaleString() }}</time><span>{{ event.action }}</span><small>{{ event.outcome }}</small></div><p v-if="!audits.length" class="empty">暂无事件</p></section>

@@ -5,7 +5,6 @@ package runtimeupdate
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -117,10 +116,14 @@ func (m *Manager) Apply(ctx context.Context, clock func() (time.Time, error)) er
 	if err != nil {
 		return err
 	}
+	return m.activate(ctx, state, pair, auth, expiry, clock)
+}
+
+func (m *Manager) activate(ctx context.Context, state State, pair Pair, auth Authorization, expiry time.Time, clock func() (time.Time, error)) error {
 	state.Sequence, state.ManifestVersion, state.ManifestSHA256 = auth.Sequence, auth.ManifestVersion, auth.ManifestSHA256
 	return m.switchPair(ctx, state, pair, func() error {
 		now, err := clock()
-		if err != nil || now.Before(auth.NotBefore) || !now.Before(auth.ExpiresAt) || !now.Before(expiry) {
+		if err != nil || !auth.MatchesTime(now, expiry) {
 			return errors.New("runtime update authorization expired or clock changed before activation")
 		}
 		return nil
@@ -142,43 +145,29 @@ func (m *Manager) authorize(state State, clock func() (time.Time, error)) (Autho
 	if err != nil {
 		return Authorization{}, empty, time.Time{}, err
 	}
-	auth, err := verifyAuthorization(raw, sig, state.AuthorizationKey, now)
+	manifest, err := readTrusted(filepath.Join(incoming, "manifest.json"), artifacttrust.MaxManifestBytes)
 	if err != nil {
 		return Authorization{}, empty, time.Time{}, err
 	}
-	if auth.NodeID != state.NodeID || auth.CurrentPair != state.Current.Digest() || auth.Architecture != runtime.GOARCH ||
-		auth.Sequence <= state.Sequence || auth.ManifestVersion < state.ManifestVersion ||
-		auth.ManifestVersion == state.ManifestVersion && auth.ManifestSHA256 != state.ManifestSHA256 {
-		return Authorization{}, empty, time.Time{}, errors.New("stale or mismatched runtime update authorization")
-	}
-	raw, err = readTrusted(filepath.Join(incoming, "manifest.json"), artifacttrust.MaxManifestBytes)
+	manifestSig, err := readTrusted(filepath.Join(incoming, "manifest.json.sig"), ed25519.SignatureSize)
 	if err != nil {
 		return Authorization{}, empty, time.Time{}, err
 	}
-	sig, err = readTrusted(filepath.Join(incoming, "manifest.json.sig"), ed25519.SignatureSize)
+	proof := Package{Authorization: raw, AuthorizationSignature: sig, Manifest: manifest, ManifestSignature: manifestSig}
+	auth, target, expiry, err := proof.Verify(state.ReleaseKey, state.AuthorizationKey)
 	if err != nil {
 		return Authorization{}, empty, time.Time{}, err
 	}
-	manifest, err := artifacttrust.VerifyManifest(raw, sig, state.ReleaseKey, now)
-	if err != nil {
-		return Authorization{}, empty, time.Time{}, err
+	if !state.accepts(auth) || !auth.MatchesTime(now, expiry) {
+		return Authorization{}, empty, time.Time{}, errors.New("stale, expired or mismatched runtime update authorization")
 	}
-	if manifest.ManifestVersion != auth.ManifestVersion || fmt.Sprintf("%x", sha256.Sum256(raw)) != auth.ManifestSHA256 {
-		return Authorization{}, empty, time.Time{}, errors.New("runtime manifest differs from the authorized manifest")
-	}
-	var target artifacttrust.Artifact
-	for _, entry := range manifest.Artifacts {
-		if entry.Component != "mcui-runtime" {
-			return Authorization{}, empty, time.Time{}, errors.New("runtime signing stream must contain only runtime releases")
-		}
-		if entry.Architecture == auth.Architecture && entry.Version == auth.Version && entry.SHA256 == auth.SHA256 {
-			target = entry
-		}
-	}
-	if target.Component == "mcui-runtime" {
-		return auth, target, manifest.ExpiresAt, nil
-	}
-	return Authorization{}, empty, time.Time{}, errors.New("authorized runtime pair is absent from the release manifest")
+	return auth, target, expiry, nil
+}
+
+func (s State) accepts(auth Authorization) bool {
+	return auth.NodeID == s.NodeID && auth.CurrentPair == s.Current.Digest() && auth.Architecture == runtime.GOARCH &&
+		auth.Sequence > s.Sequence && (auth.ManifestVersion > s.ManifestVersion ||
+		auth.ManifestVersion == s.ManifestVersion && auth.ManifestSHA256 == s.ManifestSHA256)
 }
 
 func (m *Manager) available() (State, error) {
@@ -257,6 +246,7 @@ func (m *Manager) trial(ctx context.Context, state State) error {
 	}
 	old := state.Current
 	state.Current, state.Previous, state.Pending, state.LastResult = *state.Pending, &old, nil, "committed"
+	state.finishRemote(Committed)
 	if err := m.save(state); err != nil {
 		return err
 	}
@@ -295,14 +285,27 @@ func (m *Manager) Repair(ctx context.Context) error {
 }
 
 func (m *Manager) restoreSelection(state State) error {
+	if state.Pending != nil {
+		if err := m.releaseRecoverySpace(); err != nil {
+			return err
+		}
+	}
 	if err := m.point(state.Current); err != nil {
 		return err
 	}
 	if state.Pending != nil {
 		state.Pending, state.LastResult = nil, "rolled_back"
+		state.finishRemote(RolledBack)
 		if err := m.save(state); err != nil {
 			return err
 		}
 	}
 	return m.clearTrial()
+}
+
+func (s *State) finishRemote(result string) {
+	if s.RemoteReceipt != nil && s.RemoteReceipt.Status == Delivered {
+		s.RemoteReceipt.Status = result
+		s.RemoteReceipt.CurrentPair = s.Current.Digest()
+	}
 }

@@ -128,6 +128,47 @@ func TestOpenPersistsAtomicUpdates(t *testing.T) {
 	}
 }
 
+func TestVersionThreeMigrationPreservesCheckpointState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Update(func(st *State) error {
+		st.XrayInstalls["proposal-1"] = XrayInstall{Proposal: json.RawMessage(`{"task_id":"proposal-1"}`)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stateJSON := func(s *Store) []byte {
+		t.Helper()
+		var raw []byte
+		if err := s.View(func(st State) error {
+			raw, err = json.Marshal(st)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	before := stateJSON(s)
+	if _, err := s.db.Exec(`DROP TABLE runtime_updates; UPDATE schema_migrations SET version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	if version, err := VerifyDatabase(path); err != nil || version != 3 {
+		t.Fatalf("v3 verify: version=%d, err=%v", version, err)
+	}
+	upgraded, err := OpenExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if after := stateJSON(upgraded); !bytes.Equal(before, after) || bytes.Contains(after, []byte(`"runtime_updates"`)) {
+		t.Fatalf("empty remote queue changed checkpoint payload: %s", after)
+	}
+}
+
 func TestLegacyBearerNodesRequireNewEnrollment(t *testing.T) {
 	legacy := []byte(`{"Nodes":{"node-old":{"id":"node-old","name":"legacy","group":"g1","token_hash":"old-token-hash"}}}`)
 	state, err := decode(legacy)

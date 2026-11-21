@@ -148,6 +148,9 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 		} else if !errors.Is(err, taskdispatch.ErrNotFound) {
 			return err
 		}
+		if runtimeUpdateReserved(st, in.NodeID, now) {
+			return errRuntimeBusy
+		}
 		for _, event := range st.Audits {
 			if event.ResourceType == "task" && event.Resource == in.TaskID {
 				return errXrayInstallReserved
@@ -316,6 +319,15 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "signed Xray install task expired or not yet valid", http.StatusConflict)
 		return
 	}
+	if err := s.store.View(func(st store.State) error {
+		if runtimeUpdateReserved(&st, task.NodeID, now) {
+			return errRuntimeBusy
+		}
+		return nil
+	}); err != nil {
+		writeXrayInstallError(w, r, err)
+		return
+	}
 	if err := s.taskRuntime.Store.ProvisionInstall(record.SignedTask, policy.InstallKey(), now); err != nil {
 		writeXrayInstallError(w, r, err)
 		return
@@ -478,6 +490,8 @@ func checkXrayInstallReservation(st *store.State, taskID, nodeID string, now int
 
 func writeXrayInstallError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, errRuntimeBusy):
+		http.Error(w, "a runtime update reserves this node", http.StatusConflict)
 	case errors.Is(err, errXrayInstallScope):
 		http.NotFound(w, r)
 	case errors.Is(err, lifecycleauth.ErrDenied):

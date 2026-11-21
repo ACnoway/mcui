@@ -22,7 +22,8 @@ import (
 const agentBinary = "mcui-agent"
 const helperBinary = "mcui-helper"
 const maxBinary = 128 << 20
-const maxArchive = 256 << 20
+const recoverySpaceFile = "recovery-space"
+const recoverySpaceBytes = 64 << 10
 
 var binaries = [...]string{agentBinary, helperBinary}
 
@@ -42,24 +43,28 @@ func (p Pair) valid() bool {
 }
 
 type State struct {
-	SchemaVersion    int    `json:"schema_version"`
-	NodeID           string `json:"node_id"`
-	Current          Pair   `json:"current"`
-	Previous         *Pair  `json:"previous,omitempty"`
-	Pending          *Pair  `json:"pending,omitempty"`
-	Sequence         int64  `json:"sequence"`
-	ManifestVersion  int64  `json:"manifest_version,omitempty"`
-	ManifestSHA256   string `json:"manifest_sha256,omitempty"`
-	ReleaseKey       []byte `json:"release_key"`
-	AuthorizationKey []byte `json:"authorization_key"`
-	LastResult       string `json:"last_result,omitempty"`
+	SchemaVersion    int      `json:"schema_version"`
+	NodeID           string   `json:"node_id"`
+	Current          Pair     `json:"current"`
+	Previous         *Pair    `json:"previous,omitempty"`
+	Pending          *Pair    `json:"pending,omitempty"`
+	Sequence         int64    `json:"sequence"`
+	ManifestVersion  int64    `json:"manifest_version,omitempty"`
+	ManifestSHA256   string   `json:"manifest_sha256,omitempty"`
+	ReleaseKey       []byte   `json:"release_key"`
+	AuthorizationKey []byte   `json:"authorization_key"`
+	LastResult       string   `json:"last_result,omitempty"`
+	RemoteReceipt    *Receipt `json:"remote_receipt,omitempty"`
 }
 
 func (s State) valid() bool {
 	validWatermark := s.Sequence == 0 && s.ManifestVersion == 0 && s.ManifestSHA256 == "" ||
 		s.Sequence > 0 && s.Sequence <= maxSequence && s.ManifestVersion > 0 && s.ManifestVersion <= maxSequence &&
 			digestPattern.MatchString(s.ManifestSHA256)
-	return s.SchemaVersion == 1 && security.ValidNodeID(s.NodeID) && s.Current.valid() && validWatermark &&
+	validReceipt := s.RemoteReceipt == nil || s.RemoteReceipt.Valid() ||
+		(s.RemoteReceipt.Status == Delivered && s.Pending != nil && ValidDigest(s.RemoteReceipt.ID) &&
+			s.RemoteReceipt.CurrentPair == s.Current.Digest())
+	return s.SchemaVersion == 1 && security.ValidNodeID(s.NodeID) && s.Current.valid() && validWatermark && validReceipt &&
 		(s.Previous == nil || (s.Previous.valid() && s.Previous.Digest() != s.Current.Digest())) &&
 		(s.Pending == nil || (s.Pending.valid() && s.Pending.Digest() != s.Current.Digest())) &&
 		len(s.ReleaseKey) == ed25519.PublicKeySize && len(s.AuthorizationKey) == ed25519.PublicKeySize &&
@@ -105,7 +110,14 @@ func (m *Manager) save(state State) error {
 }
 
 func (m *Manager) setTrial() error {
-	f, err := os.OpenFile(filepath.Join(m.dir, runtimehealth.TrialFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	path := filepath.Join(m.dir, runtimehealth.TrialFile)
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("a runtime trial already requires recovery")
+	}
+	if err := m.reserveRecoverySpace(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -119,8 +131,36 @@ func (m *Manager) setTrial() error {
 	return syncDir(m.dir)
 }
 
+// Retain enough filesystem space to restore the committed pointer and write a
+// rollback result even when final trial persistence runs out of data blocks.
+func (m *Manager) reserveRecoverySpace() error {
+	if err := m.releaseRecoverySpace(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(m.dir, recoverySpaceFile), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if err := unix.Fallocate(int(f.Fd()), 0, 0, recoverySpaceBytes); err != nil {
+		f.Close()
+		_ = m.releaseRecoverySpace()
+		return fmt.Errorf("reserve space for runtime rollback: %w", err)
+	}
+	return syncAndClose(f)
+}
+
+func (m *Manager) releaseRecoverySpace() error {
+	if err := os.Remove(filepath.Join(m.dir, recoverySpaceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (m *Manager) clearTrial() error {
 	if err := os.Remove(filepath.Join(m.dir, runtimehealth.TrialFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := m.releaseRecoverySpace(); err != nil {
 		return err
 	}
 	return syncDir(m.dir)

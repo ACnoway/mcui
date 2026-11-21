@@ -11,6 +11,7 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,10 +65,15 @@ type updateFixture struct {
 
 func newUpdateFixture(t *testing.T) updateFixture {
 	t.Helper()
+	return newUpdateFixtureAt(t, t.TempDir())
+}
+
+func newUpdateFixtureAt(t *testing.T, root string) updateFixture {
+	t.Helper()
 	if os.Geteuid() != 0 || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
 		t.Skip("fixture requires a supported Linux root test environment")
 	}
-	dir := filepath.Join(t.TempDir(), "runtime")
+	dir := filepath.Join(root, "runtime")
 	services := &testServices{dir: dir, running: true}
 	manager, err := openManager(dir, true, services)
 	if err != nil {
@@ -84,6 +90,54 @@ func newUpdateFixture(t *testing.T) updateFixture {
 		t.Fatal(err)
 	}
 	return updateFixture{manager, services, release, approve, time.Unix(1_800_000_000, 0).UTC()}
+}
+
+func TestRuntimeRollbackWithFullFilesystem(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("mounting a small test filesystem requires root")
+	}
+	root := t.TempDir()
+	if err := unix.Mount("tmpfs", root, "tmpfs", unix.MS_NODEV|unix.MS_NOSUID, "size=2m,mode=0700"); err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skipf("mount namespace cannot mount tmpfs: %v", err)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Unmount(root, 0); err != nil {
+			t.Error(err)
+		}
+	})
+	f := newUpdateFixtureAt(t, root)
+	f.provision(t, "v2.0.0", 1, 7)
+	state := requireStatus(t, f.manager, "v1.0.0", "initialized", 0, 0)
+	f.services.ifStarted = func(pair string) error {
+		if pair == state.Current.Digest() {
+			return nil
+		}
+		file, err := os.Create(filepath.Join(root, "fill"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		for offset := int64(0); ; offset += 4096 {
+			err := unix.Fallocate(int(file.Fd()), 0, offset, 4096)
+			if errors.Is(err, unix.ENOSPC) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return nil
+	}
+	if err := f.manager.Apply(t.Context(), f.clock); !errors.Is(err, unix.ENOSPC) {
+		t.Fatalf("commit did not encounter real ENOSPC: %v", err)
+	}
+	requireStatus(t, f.manager, "v1.0.0", "rolled_back", 1, 7)
+	if !f.services.running {
+		t.Fatal("disk exhaustion prevented the original services from restarting")
+	}
 }
 
 func (f updateFixture) clock() (time.Time, error) { return f.now, nil }
@@ -203,6 +257,7 @@ func TestBootRestoresCommittedPairWithoutStartingServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.Pending, state.Sequence, state.ManifestVersion, state.ManifestSHA256 = &candidate, auth.Sequence, auth.ManifestVersion, auth.ManifestSHA256
+	state.RemoteReceipt = &Receipt{ID: strings.Repeat("b", 64), Status: Delivered, CurrentPair: state.Current.Digest()}
 	if err := f.manager.save(state); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +275,10 @@ func TestBootRestoresCommittedPairWithoutStartingServices(t *testing.T) {
 	if err := reopened.BootRecover(); err != nil {
 		t.Fatal(err)
 	}
-	requireStatus(t, reopened, "v1.0.0", "rolled_back", 1, 7)
+	recovered := requireStatus(t, reopened, "v1.0.0", "rolled_back", 1, 7)
+	if recovered.RemoteReceipt == nil || recovered.RemoteReceipt.Status != RolledBack || recovered.RemoteReceipt.CurrentPair != recovered.Current.Digest() {
+		t.Fatalf("missing rollback receipt after boot: %+v", recovered.RemoteReceipt)
+	}
 	if f.services.calls != 0 {
 		t.Fatal("boot recovery called a dependent service")
 	}

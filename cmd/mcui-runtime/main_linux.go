@@ -21,7 +21,7 @@ import (
 	"github.com/ACnoway/mcui/internal/trustedtime"
 )
 
-const usage = "usage: mcui-runtime init|status|sign|apply|boot-recover|repair|revert [options]"
+const usage = "usage: mcui-runtime init|status|sign|apply|poll|boot-recover|repair|repair-pending|revert [options]"
 
 func main() {
 	log.SetFlags(0)
@@ -39,6 +39,7 @@ func run(ctx context.Context, args []string) error {
 	command := args[0]
 	flags := flag.NewFlagSet("mcui-runtime "+command, flag.ContinueOnError)
 	var node, version, releaseKey, updateKey, authorization, signature string
+	var master, ca, token string
 	switch command {
 	case "init":
 		flags.StringVar(&node, "node-id", "", "expected enrolled node ID")
@@ -49,7 +50,11 @@ func run(ctx context.Context, args []string) error {
 		flags.StringVar(&updateKey, "private-key", "", "offline Ed25519 PKCS#8 update authorization key")
 		flags.StringVar(&authorization, "input", "authorization.json", "exact authorization JSON to sign")
 		flags.StringVar(&signature, "signature", "authorization.json.sig", "new detached signature file")
-	case "status", "apply", "boot-recover", "repair", "revert":
+	case "poll":
+		flags.StringVar(&master, "master", "", "locally configured Master HTTPS origin")
+		flags.StringVar(&ca, "server-ca", "", "locally trusted private Master CA")
+		flags.StringVar(&token, "token-file", "/etc/mcui-runtime/supervisor.token", "private root supervisor token file")
+	case "status", "apply", "boot-recover", "repair", "repair-pending", "revert":
 	default:
 		return errors.New(usage)
 	}
@@ -97,13 +102,21 @@ func run(ctx context.Context, args []string) error {
 		if state.Pending != nil {
 			fmt.Printf("pending_version=%s pending_pair_sha256=%s\n", state.Pending.Version, state.Pending.Digest())
 		}
+		if state.RemoteReceipt != nil {
+			fmt.Printf("remote_update_id=%s remote_status=%s remote_pair_sha256=%s\n",
+				state.RemoteReceipt.ID, state.RemoteReceipt.Status, state.RemoteReceipt.CurrentPair)
+		}
 		return nil
 	case "apply":
 		return manager.Apply(ctx, trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource).Now)
+	case "poll":
+		return manager.Poll(ctx, master, ca, token, trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource).Now)
 	case "boot-recover":
 		return manager.BootRecover()
 	case "repair":
 		return manager.Repair(ctx)
+	case "repair-pending":
+		return manager.RepairPending(ctx)
 	case "revert":
 		return manager.Revert(ctx)
 	}
