@@ -66,8 +66,8 @@ func (s *Server) xrayInstallAccess(w http.ResponseWriter, r *http.Request) (admi
 		http.NotFound(w, r)
 		return ctx, nil, false
 	}
-	if r.TLS == nil || s.taskCheckpoint == nil || s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil {
-		http.Error(w, "Xray install requires HTTPS and a configured task checkpoint and authorization policy", http.StatusServiceUnavailable)
+	if r.TLS == nil || s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil {
+		http.Error(w, "Xray install requires HTTPS and a configured task runtime and authorization policy", http.StatusServiceUnavailable)
 		return ctx, nil, false
 	}
 	return ctx, s.taskRuntime.XrayInstallPolicy, true
@@ -402,7 +402,7 @@ func (s *Server) renewXrayInstallLease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "node credential rejected", http.StatusUnauthorized)
 		return
 	}
-	if s.taskRuntime == nil || s.taskCheckpoint == nil {
+	if s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil {
 		http.Error(w, "task runtime unavailable", http.StatusServiceUnavailable)
 		return
 	}

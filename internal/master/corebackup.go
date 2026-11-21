@@ -24,12 +24,23 @@ func (s *Server) serveXrayBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid artifact request", http.StatusBadRequest)
 		return
 	}
-	file, status := s.openXrayBackup(in)
+	var file *os.File
+	var status int
+	err := s.runWithTaskState(r.Context(), func() error {
+		file, status = s.openXrayBackup(in)
+		return nil
+	})
+	if file != nil {
+		defer file.Close()
+	}
+	if err != nil {
+		http.Error(w, "Master task checkpoint unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if file == nil {
 		http.Error(w, "requested backup artifact unavailable", status)
 		return
 	}
-	defer file.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(in.Length, 10))
 	w.Header().Set("Cache-Control", "no-store")
@@ -42,7 +53,7 @@ func (s *Server) openXrayBackup(in artifacttrust.BackupRequest) (*os.File, int) 
 	cache, ok := s.coreBackups.(interface {
 		OpenExact(string, string, string, string, int64) (*os.File, error)
 	})
-	if !ok || s.taskRuntime == nil || s.taskCheckpoint == nil {
+	if !ok || s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil {
 		return nil, http.StatusServiceUnavailable
 	}
 	task, err := s.verifyStoredXrayTask(in.Task, true)

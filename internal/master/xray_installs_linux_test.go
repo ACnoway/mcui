@@ -34,6 +34,11 @@ import (
 )
 
 func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
+	t.Run("single-host", func(t *testing.T) { testXrayInstallReservationAndOperatorAuthorization(t, false) })
+	t.Run("independent-checkpoint", func(t *testing.T) { testXrayInstallReservationAndOperatorAuthorization(t, true) })
+}
+
+func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independent bool) {
 	client := newTaskTestClient(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	var clockValue atomic.Int64
@@ -81,7 +86,16 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, authority, initial := enrollTestCheckpoint(t, client)
+	var checkRevision func()
+	if independent {
+		_, authority, initial := enrollTestCheckpoint(t, client)
+		checkRevision = func() {
+			anchored, err := authority.Read(t.Context(), initial.Node, initial.Epoch, checkpoint.Challenge{1})
+			if err != nil || anchored.Record.Revision < initial.Revision+2 {
+				t.Fatalf("reservation and signed task were not independently anchored: %+v, %v", anchored, err)
+			}
+		}
+	}
 	runtime := *client.server.taskRuntime
 	runtime.XrayInstallPolicy = policy
 	runtime.TrustedNow = func() (time.Time, error) { return clock(), nil }
@@ -186,9 +200,8 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	if !strings.Contains(res.Body.String(), in.TaskID) {
 		t.Fatalf("operator proposal missing from list: %s", res.Body)
 	}
-	anchored, err := authority.Read(t.Context(), initial.Node, initial.Epoch, checkpoint.Challenge{1})
-	if err != nil || anchored.Record.Revision < initial.Revision+2 {
-		t.Fatalf("reservation and signed task were not independently anchored: %+v, %v", anchored, err)
+	if checkRevision != nil {
+		checkRevision()
 	}
 
 	dispatch := base + "/" + in.TaskID + "/dispatch"

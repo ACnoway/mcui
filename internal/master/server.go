@@ -45,6 +45,7 @@ type Server struct {
 	bootstrapToken string
 	installer      *agentInstaller
 	nodeAccess     sync.RWMutex
+	taskState      sync.Mutex
 	taskRuntime    *TaskRuntime
 	taskCheckpoint *taskCheckpoint
 	runtimeUpdates *RuntimeUpdatePolicy
@@ -115,7 +116,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.handleAPI("POST /api/v1/agent/tasks/ack", x.acknowledgeTask)
 	x.handleAPI("POST /api/v1/agent/tasks/renew-install", x.renewXrayInstallLease)
 	x.handleAPI("POST /api/v1/helper/tasks/authorize", x.authorizeHelperTask)
-	x.handleAPI("POST "+artifacttrust.BackupEndpoint, x.serveXrayBackup)
+	x.mux.HandleFunc("POST "+artifacttrust.BackupEndpoint, x.serveXrayBackup)
 	if webDir != "" {
 		x.mux.Handle("/", x.staticHandler(webDir))
 	}

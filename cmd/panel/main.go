@@ -52,6 +52,9 @@ func main() {
 	if !usingTLS && !loopbackListen(*addr) {
 		log.Fatal("HTTP mode is development-only and must listen on loopback")
 	}
+	if (*xrayInstallPolicyPath != "" || *runtimeUpdatePolicyPath != "") && (!usingTLS || *taskDBPath == "") {
+		log.Fatal("remote Xray and runtime updates require Master HTTPS and -task-db")
+	}
 	var tlsConfig *tls.Config
 	if usingTLS {
 		serverCertPEM, err := os.ReadFile(*tlsCertPath)
@@ -89,20 +92,17 @@ func main() {
 		_ = os.MkdirAll(filepath.Dir(*dbPath), 0700)
 		s, err = store.Open(*dbPath)
 	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer s.Close()
 	var xrayInstallPolicy *lifecycleauth.Policy
 	if *xrayInstallPolicyPath != "" {
-		if machine == nil {
-			log.Fatal("Xray install requires the independent task checkpoint")
-		}
 		xrayInstallPolicy, err = readXrayInstallPolicy(*xrayInstallPolicyPath)
 		if err != nil {
 			log.Fatalf("read Xray install authorization policy: %v", err)
 		}
 	}
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer s.Close()
 	srv := master.New(s, os.Getenv("MCUI_BOOTSTRAP_TOKEN"), *webDir)
 	if *publicURL != "" || *installerURL != "" || *installerDigest != "" {
 		if !usingTLS {

@@ -51,8 +51,8 @@ func (s *Server) ConfigureTaskRuntime(runtime TaskRuntime) error {
 		return errors.New("incomplete task checkpoint configuration")
 	}
 	if policy := runtime.XrayInstallPolicy; policy != nil &&
-		(runtime.Checkpoint == nil || runtime.TrustedNow == nil || policy.SigningKeyID() == runtime.KeyID || policy.UsesPublicKey(runtime.PublicKey)) {
-		return errors.New("Xray install proposals require a checkpoint, trusted time and separate signing keys")
+		(runtime.TrustedNow == nil || policy.SigningKeyID() == runtime.KeyID || policy.UsesPublicKey(runtime.PublicKey)) {
+		return errors.New("Xray install proposals require trusted time and separate signing keys")
 	}
 	if s.taskCheckpoint != nil && runtime.Checkpoint == nil {
 		return errors.New("cannot remove the configured task checkpoint")
@@ -963,7 +963,7 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 	case "core.install", "core.start", "core.stop", "core.upgrade", "core.downgrade", "core.uninstall":
 		var task lifecycleauth.InstallTask
 		task, err = s.verifyStoredXrayTask(in.Task, true)
-		if err == nil && s.taskCheckpoint != nil && task.NodeID == envelope.NodeID {
+		if err == nil && task.NodeID == envelope.NodeID {
 			previous, err = runtime.Store.ValidateInstallLease(task, in.LeaseID, in.Task, now)
 		} else if err == nil {
 			err = lifecycleauth.ErrDenied

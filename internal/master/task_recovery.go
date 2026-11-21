@@ -20,12 +20,12 @@ var ErrTaskAuditReconciliation = errors.New("task and audit databases require re
 // authorization exists but whose post-issue audit was interrupted gets a
 // recovery audit entry.
 func (s *Server) ReconcileTaskRuntime() error {
-	if s != nil && s.taskCheckpoint != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), taskCheckpointTimeout)
-		defer cancel()
-		return s.runWithTaskCheckpoint(ctx, s.reconcileTaskRuntime)
+	if s == nil {
+		return ErrTaskAuditReconciliation
 	}
-	return s.reconcileTaskRuntime()
+	ctx, cancel := context.WithTimeout(context.Background(), taskCheckpointTimeout)
+	defer cancel()
+	return s.runWithTaskState(ctx, s.reconcileTaskRuntime)
 }
 
 func (s *Server) reconcileTaskRuntime() error {

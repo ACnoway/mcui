@@ -87,7 +87,7 @@ V1 控制运行时当前允许：取消尚未过期、尚未开始的状态任�
 - skip 只接受当前期望序号且签名/用途/时限均有效。`VOID_UNISSUED` 由 Master 的未发布槽记录证明；`EXPIRED` 只能关闭已过期且未开始槽；`CANCELED` 必须对应已持久化的取消墓碑。Agent 有 `RUNNING`/未决记录时拒绝 skip 并对账。任何 skip 槽关闭后均不可再发布任务。
 - ACK 的 `status_version` 从 1 单调递增，唯一键为 `(node_id, task_id, status_version)`。相同版本不同内容冲突；重复内容幂等。认证节点、任务归属和任务状态必须同时匹配。
 - 每个操作定义固定有序步骤和参数摘要。未来阶段 2 的首个允许操作仅为 `core.status`，不得修改系统；其余 `config-policy.md` 中的 Helper 操作是未来白名单，尚未开放。Helper 接收原始任务和单个固定 `step_id`，逐字段校验本机观测参数，路径、URL、unit、脚本和 argv 永远不能来自请求。
-- 重启时将 `ACCEPTED/WAITING` 重新做期限校验；`RUNNING/VERIFYING/ROLLING_BACK` 一律先检查实际系统状态，证据不足转 `NEEDS_RECONCILIATION` 并停止副作用。任务备份恢复不能清除 Agent/Helper 的更高持久化高水位；无法比较独立检查点时保持隔离。
+- 重启时将 `ACCEPTED/WAITING` 重新做期限校验；`RUNNING/VERIFYING/ROLLING_BACK` 一律先检查实际系统状态，证据不足转 `NEEDS_RECONCILIATION` 并停止副作用。任务备份恢复须保留 Agent/Helper 的更高持久化高水位。怀疑回退时，先核对现存账本和节点状态，并核对已配置的独立检查点。无法确认状态时保持隔离。[单机备份恢复](./phase-2-operations.md#单机运行与备份恢复)
 
 ### 5.2 审批、密钥用途与发布边界
 

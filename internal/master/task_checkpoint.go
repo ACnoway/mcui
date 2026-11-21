@@ -9,7 +9,6 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/checkpoint"
@@ -21,7 +20,6 @@ const taskCheckpointTimeout = 35 * time.Second
 
 type taskCheckpoint struct {
 	machine checkpoint.Machine
-	mu      sync.Mutex
 }
 
 // TaskCheckpointDigest binds both databases, including credentials, session
@@ -51,10 +49,16 @@ func TaskCheckpointDigest(ctx context.Context, stateStore *store.Store, tasks *t
 	return digest, nil
 }
 
-func (s *Server) runWithTaskCheckpoint(ctx context.Context, operation func() error) error {
+// Keep reservations and dispatch transitions serialized across the two SQLite
+// stores even on a single Master without an external checkpoint.
+func (s *Server) runWithTaskState(ctx context.Context, operation func() error) error {
+	s.taskState.Lock()
+	defer s.taskState.Unlock()
+
 	gate := s.taskCheckpoint
-	gate.mu.Lock()
-	defer gate.mu.Unlock()
+	if gate == nil {
+		return operation()
+	}
 
 	before, err := s.verifyTaskCheckpoint(ctx)
 	if err != nil {
@@ -115,12 +119,15 @@ func (s *Server) verifyTaskCheckpoint(ctx context.Context) (checkpoint.Record, e
 // the guard. This includes GET handlers that refresh or expire sessions.
 func (s *Server) handleAPI(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		if s.taskCheckpoint == nil {
+		if s.taskCheckpoint == nil && s.runtimeUpdates == nil && (s.taskRuntime == nil || s.taskRuntime.XrayInstallPolicy == nil) {
 			handler(w, r)
 			return
 		}
-		response := &checkpointResponse{header: make(http.Header)}
-		err := s.runWithTaskCheckpoint(r.Context(), func() error {
+		response := w
+		if s.taskCheckpoint != nil {
+			response = &checkpointResponse{header: make(http.Header)}
+		}
+		err := s.runWithTaskState(r.Context(), func() error {
 			handler(response, r)
 			return nil
 		})
@@ -131,7 +138,9 @@ func (s *Server) handleAPI(pattern string, handler http.HandlerFunc) {
 			http.Error(w, "Master task checkpoint unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		response.send(w)
+		if buffered, ok := response.(*checkpointResponse); ok {
+			buffered.send(w)
+		}
 	})
 }
 

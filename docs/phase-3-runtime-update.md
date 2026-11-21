@@ -56,7 +56,7 @@ mcui-runtime sign -private-key "$UPDATE_PRIVATE_KEY" \
 
 ## 从 Master 发起更新
 
-1. Master 启用 HTTPS、[认证 NTS 时间](./phase-2-operations.md#11-配置认证-nts-时间)和[独立检查点](./phase-2-operations.md#8-部署独立检查点)。在已启用本地监督的节点生成一个独立随机凭据。凭据归节点 root 管理，Master 策略保存凭据原文的 SHA-256。
+1. Master 启用 HTTPS、任务运行时和 [Cloudflare NTS 认证时间](./phase-2-operations.md#11-配置认证-nts-时间)。单机部署可采用[单机备份恢复流程](./phase-2-operations.md#单机运行与备份恢复)。在已启用本地监督的节点生成一个独立随机凭据。凭据归节点 root 管理，Master 策略保存凭据原文的 SHA-256。
 
    ```sh
    install -d -o root -g root -m 0700 /etc/mcui-runtime

@@ -148,6 +148,16 @@ systemctl restart mcui-panel.service mcui-agent.service
 
 ## 8. 部署独立检查点
 
+单机自用可以省略 `MCUI_TASK_CHECKPOINT_*` 和对应命令行参数。需要检测 Master 的两份数据库被整体恢复到旧版本时，再按本节部署独立检查点。无论采用哪种方式，节点的 Helper 都通过 Master 自身的 HTTPS 接口在线核验当前租约。
+
+### 单机运行与备份恢复
+
+单机 Master 继续用 Cloudflare NTS、任务验签、节点账本和两库启动对账。停 Master 后同时备份面板库 `mcui.db` 与任务库 `tasks.db`。如果 Xray 签发账本也在这台机器上，保存它的最新副本并单独管理，避免恢复 Master 快照时覆盖账本。保留 Agent、Helper 和成对更新监督器各自的当前状态。
+
+没有外部记录时，主控无法可靠检测两库一起恢复成较早但彼此一致的版本。恢复时先停用远程派发，核对恢复候选、签发账本与存活节点上的任务序号、未决操作和运行时版本。对无法确认是否已经执行的任务，先核对节点实际状态和账本，再恢复远程操作。单节点可按操作手册进行本地修复。
+
+### 独立检查点配置
+
 `mcui-checkpointd` 为一个检查点身份和 epoch 持久化最新 revision 与 SHA-256，提供读取和比较后更新两个接口。服务使用 TLS 1.3 验证客户端签发链，并核对其公钥 SPKI 的 SHA-256 指纹。主控用指定 CA 验证服务端证书和主机名，每次请求绑定新的随机挑战。
 
 1. 在验证环境构建 `go build -trimpath -o mcui-checkpointd ./cmd/mcui-checkpointd`。将二进制和 `deploy/systemd/mcui-checkpointd.service` 安装到独立检查点主机，创建专用系统账号和组 `mcui-checkpoint`。

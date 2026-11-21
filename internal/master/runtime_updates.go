@@ -30,8 +30,8 @@ type RuntimeUpdatePolicy struct {
 }
 
 func (s *Server) ConfigureRuntimeUpdates(policy RuntimeUpdatePolicy) error {
-	if s.taskCheckpoint == nil || s.taskRuntime == nil || s.taskRuntime.TrustedNow == nil {
-		return errors.New("runtime updates require the independent Master checkpoint and trusted clock")
+	if s.taskRuntime == nil || s.taskRuntime.TrustedNow == nil {
+		return errors.New("runtime updates require the Master task runtime and trusted clock")
 	}
 	if len(policy.ReleaseKey) != ed25519.PublicKeySize || len(policy.AuthorizationKey) != ed25519.PublicKeySize ||
 		ed25519.PublicKey(policy.ReleaseKey).Equal(ed25519.PublicKey(policy.AuthorizationKey)) ||
@@ -343,15 +343,15 @@ func (s *Server) acceptRuntimeReceipt(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// The checkpoint authorizes the read before streaming. The large ZIP is not
-// buffered by the checkpoint and its bytes are independently checked on node.
+// Authorize the read while the task state is locked, then stream without the
+// lock. The node independently checks the ZIP against the signed manifest.
 func (s *Server) serveRuntimeArchive(w http.ResponseWriter, r *http.Request) {
 	if s.runtimeUpdates == nil {
 		http.NotFound(w, r)
 		return
 	}
 	var entry store.RuntimeUpdate
-	err := s.runWithTaskCheckpoint(r.Context(), func() error {
+	err := s.runWithTaskState(r.Context(), func() error {
 		node, ok := s.runtimeSupervisor(r)
 		if !ok {
 			return errRuntimeScope
