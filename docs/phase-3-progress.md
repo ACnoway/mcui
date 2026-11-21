@@ -6,7 +6,7 @@ Xray 本地和远程生命周期、官方版本目录、主控备用缓存及中
 
 | 批次 | 开发内容 | 完成条件 |
 |---|---|---|
-| 后续验收 | 生产发布与故障演练 | 发布首份生产签名清单，部署生产 NTS 和由独立保管方运行的检查点。完成 Agent/Helper 成对更新的实际断电和磁盘写满演练。 |
+| 生产验收 | 签发、部署与恢复 | 发布首份生产签名清单，部署生产 NTS 和由独立保管方运行的检查点，并在待发布的节点配置上复验断电及磁盘写满恢复。隔离环境中的断电和写满演练已完成。 |
 
 成对更新沿用双架构 ZIP。节点监督器核对独立发布签名及绑定节点与当前版本的更新授权，验证架构后原子切换两个服务。试运行检查节点身份、账本和 Helper 握手，提交前暂停任务处理。失败或中断可恢复上一次提交的成对版本，人工修复入口只需节点本地权限。
 
@@ -61,6 +61,8 @@ Xray 本地和远程生命周期、官方版本目录、主控备用缓存及中
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
+| Master 远程发起 Agent/Helper 成对更新 | 通过，提交 `e66e9af`（2026-11-21） | `ro` 的 `/root/mcui` 隔离检出，Debian 13 amd64、Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。全量 `bash scripts/check-static.sh`、Master/监督器竞态检查、systemd 单元验证、amd64/arm64 ZIP 构建和 SHA-256 校验通过。涵盖独立签名与凭据、节点绑定、伪造和损坏制品拒绝、任务互斥、TLS 下载、提交和回退、过期处理、回执重试与数据库迁移。arm64 仅验证构建和制品摘要。 |
+| 成对更新写满与断电恢复 | 通过，提交 `e66e9af`（2026-11-21） | `TestRuntimeRollbackWithFullFilesystem` 在 2 MiB tmpfs 上实际填满数据块，候选切换后的状态提交触发 `ENOSPC`。监督器释放预留空间并恢复旧对，授权序号保持已消费。同一宿主上用测试签名和服务替身启动无网 QEMU 10.0.13 客户机。候选指针切换并持久化后从宿主机强制终止客户机，复用同一 ext4 镜像启动并确认日志恢复、旧版本指针、已消费序号及待回报的回退结果。临时资源已清理。 |
 | Agent/Helper 本地成对更新 | 通过，提交 `c8fe41b`（2026-11-21） | `ro` 的 `/root/mcui` 隔离检出。Debian 13 amd64，Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。`bash scripts/check-static.sh`、`go test -race -count=1 ./internal/{runtimeupdate,agent,helper,taskledger,xrayruntime,artifacttrust}`、`scripts/build-runtime-release.sh` 和 `sha256sum -c SHA256SUMS` 均通过。全量测试包含独立授权、重放和旧清单拒绝、损坏归档拒绝、试运行拒绝未决任务。真实 systemd 临时服务在 `umask 077` 下用测试密钥和测试时钟验证 Agent 启动失败、Helper 启动失败、就绪握手后提交、切换中断后的开机恢复逻辑和本地回退。节点身份、授权序号及清单版本保持。arm64 仅验证构建和制品摘要。 |
 | Xray 远程升级、显式降级和卸载 | 通过，提交 `5214c4a`（2026-11-21） | `ro` 的 `/root/mcui` 隔离检出。Debian 13 amd64，Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。`bash scripts/check-static.sh`、`go test -race -count=1 ./internal/{agent,agenttasks,artifacttrust,corecatalog,helper,lifecycleauth,master,protocol,taskdispatch,xrayruntime}`、`scripts/build-runtime-release.sh` 和 `sha256sum -c SHA256SUMS` 均通过。集成测试覆盖源版本与目标绑定、不同操作的确认校验、旧 Agent 隔离、制品缓存和结果回报。真实 systemd 使用临时单元和合成制品验证失败启动后恢复原版本与运行状态、成功升级、显式降级和卸载。卸载后服务无主 PID，受管版本目录为空。arm64 仅验证构建和制品摘要。 |
 | Xray 远程启停 | 通过，提交 `a6b0246`（2026-11-21） | `ro` 的 `/root/mcui` 隔离检出。Debian 13 amd64，Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。`bash scripts/check-static.sh`、`go test -race -count=1 ./internal/agent ./internal/agenttasks ./internal/helper ./internal/lifecycleauth ./internal/master ./internal/protocol ./internal/taskdispatch ./internal/xrayruntime`、`scripts/build-runtime-release.sh` 和 `sha256sum -c SHA256SUMS` 均通过。集成测试覆盖独立签发、范围校验、旧 Agent 隔离、制品缓存拒绝、真实 TLS 与 Unix socket、终态回报。运行时测试覆盖版本不符、租约拒绝和中断回滚。临时 `mcui-xray.service` 以受限测试进程验证停止、启动、再次停止及 PID，并在测试后清理。arm64 仅验证构建和制品摘要。 |
