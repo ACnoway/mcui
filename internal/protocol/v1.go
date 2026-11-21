@@ -345,7 +345,8 @@ func validateTaskPayload(operation string, value any) error {
 		return errors.New("task payload must be an object")
 	}
 	expected := []string{"core"}
-	releaseControl := (operation == "core.start" || operation == "core.stop") && len(payload) != 1
+	releaseControl := (operation == "core.start" || operation == "core.stop" || operation == "core.uninstall") && len(payload) != 1
+	releaseChange := (operation == "core.upgrade" || operation == "core.downgrade") && len(payload) != 4
 	if releaseControl {
 		expected = append(expected, "version", "architecture", "sha256")
 	}
@@ -353,6 +354,9 @@ func validateTaskPayload(operation string, value any) error {
 	case "core.status", "core.start", "core.stop", "core.restart", "core.uninstall":
 	case "core.install", "core.upgrade", "core.downgrade":
 		expected = append(expected, "version", "artifact_id", "manifest_version")
+		if releaseChange {
+			expected = append(expected, "current_version", "current_sha256")
+		}
 	case "config.apply":
 		expected = append(expected, "revision", "content_sha256", "core_version")
 	default:
@@ -374,6 +378,15 @@ func validateTaskPayload(operation string, value any) error {
 	}
 	switch operation {
 	case "core.install", "core.upgrade", "core.downgrade":
+		if releaseChange {
+			digest, ok := payload["current_sha256"].(string)
+			if payload["core"] != "xray" || !ok || !digestPattern.MatchString(digest) {
+				return errors.New("invalid installed Xray release digest")
+			}
+			if err := validIdentifier(payload, "current_version"); err != nil {
+				return err
+			}
+		}
 		if err := validIdentifier(payload, "version"); err != nil {
 			return err
 		}

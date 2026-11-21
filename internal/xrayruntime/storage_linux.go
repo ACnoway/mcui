@@ -143,20 +143,20 @@ func (r *Runtime) readStatus() (Status, error) {
 		if err := validateTransition(current, *state.Pending); err != nil {
 			return Status{}, err
 		}
-		if state.Pending.InstallHash != "" && (state.Pending.Action != Install || !validTaskHash(state.Pending.InstallHash)) {
+		if state.Pending.InstallHash != "" && (!isArtifactAction(state.Pending.Action) || !validTaskHash(state.Pending.InstallHash)) {
 			return Status{}, errors.New("invalid Xray install intent identity")
 		}
-		if state.Pending.ControlHash != "" && (!isServiceControl(state.Pending.Action) || !validTaskHash(state.Pending.ControlHash)) {
+		if state.Pending.ControlHash != "" && (!isControlAction(state.Pending.Action) || !validTaskHash(state.Pending.ControlHash)) {
 			return Status{}, errors.New("invalid Xray control intent identity")
 		}
 	}
 	if receipt := state.InstallReceipt; receipt != nil {
-		if !receipt.valid() || receipt.Action != "" {
+		if !receipt.valid() || (receipt.Action != "" && receipt.Action != Upgrade && receipt.Action != Downgrade) {
 			return Status{}, errors.New("invalid Xray install receipt")
 		}
 	}
 	if receipt := state.ControlReceipt; receipt != nil {
-		if !receipt.valid() || !isServiceControl(receipt.Action) {
+		if !receipt.valid() || !isControlAction(receipt.Action) {
 			return Status{}, errors.New("invalid Xray control receipt")
 		}
 	}

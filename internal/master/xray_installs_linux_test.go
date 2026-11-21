@@ -212,11 +212,14 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	assertStatus(client.request(http.MethodPost, "/api/v1/agent/tasks/renew-install", leased, true), http.StatusNoContent)
 	backupPath := filepath.Join(t.TempDir(), "test-backup")
 	const backupPayload = "cached fixture"
+	const newVersion = "v26.11.9"
+	newDigest := strings.Repeat("b", 64)
 	if err := os.WriteFile(backupPath, []byte(backupPayload), 0600); err != nil {
 		t.Fatal(err)
 	}
 	client.server.ConfigureCoreBackups(installTestCache(func(core, version, arch, digest string, size int64) (*os.File, error) {
-		if core != "xray" || version != in.Version || arch != in.Architecture || digest != in.SHA256 || size != int64(len(backupPayload)) {
+		approved := (version == in.Version && digest == in.SHA256) || (version == newVersion && digest == newDigest)
+		if core != "xray" || arch != in.Architecture || !approved || size != int64(len(backupPayload)) {
 			return nil, os.ErrNotExist
 		}
 		return os.Open(backupPath)
@@ -243,7 +246,11 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		install: func(raw []byte, lease string) (json.RawMessage, error) {
 			calls.Add(1)
 			assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", helperAuthorizationRequest{LeaseID: lease, Task: raw}, true), http.StatusOK)
-			durableResult, err = json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: in.Version, SHA256: in.SHA256})
+			task, err := policy.InstallKey().Verify(raw)
+			if err != nil {
+				return nil, err
+			}
+			durableResult, err = json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: task.Version, SHA256: task.SHA256})
 			return durableResult, err
 		},
 		reconcile: func(raw []byte) (json.RawMessage, error) {
@@ -256,7 +263,10 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	if os.Geteuid() == 0 {
 		executor = rootInstallTestExecutor(t, client.server, client.nodeID, policy.InstallKey(), clock, &calls)
 	}
-	artifacts := testInstallArtifacts{target: artifacttrust.Target{Core: "xray", Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, SignatureStatus: "not-provided"}}
+	artifacts := testInstallArtifacts{
+		in.Version: {Core: "xray", Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, SignatureStatus: "not-provided"},
+		newVersion: {Core: "xray", Version: newVersion, Architecture: in.Architecture, SHA256: newDigest, SignatureStatus: "not-provided"},
+	}
 	newRunner := func(ledger *taskledger.Ledger, executor agenttasks.InstallExecutor) *agenttasks.Runner {
 		t.Helper()
 		proc, err := agenttasks.New(agenttasks.Config{NodeID: client.nodeID, Now: clock, Ledger: ledger, Keys: map[string]taskauth.Key{
@@ -363,10 +373,22 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	}
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=2", nil, true), http.StatusNoContent)
 
-	for i, operation := range []string{"core.stop", "core.start"} {
+	for i, operation := range []string{"core.stop", "core.start", "core.upgrade", "core.downgrade", "core.uninstall"} {
 		control := in
 		control.TaskID = "xray-control-" + operation[5:] + "-000000000001"
 		control.Operation, control.ManifestVersion = operation, 0
+		schema, capability := lifecycleauth.ControlProposalVersion, "xray_control=v1"
+		switch operation {
+		case "core.upgrade":
+			control.CurrentVersion, control.CurrentSHA256 = in.Version, in.SHA256
+			control.Version, control.SHA256, control.ManifestVersion = newVersion, newDigest, in.ManifestVersion
+		case "core.downgrade":
+			control.CurrentVersion, control.CurrentSHA256, control.ManifestVersion = newVersion, newDigest, in.ManifestVersion
+		}
+		versionChange := lifecycleauth.IsVersionChange(operation)
+		if versionChange || operation == "core.uninstall" {
+			schema, capability = lifecycleauth.ChangeProposalVersion, "xray_change=v1"
+		}
 		res := request(http.MethodPost, base, "test-session-token", client.csrf, control)
 		assertStatus(res, http.StatusCreated)
 		var view xrayInstallView
@@ -375,7 +397,8 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		}
 		sequence := int64(i + 2)
 		p, err := lifecycleauth.ParseProposal(view.Proposal)
-		if err != nil || p.Operation != operation || p.Sequence != sequence || p.SchemaVersion != lifecycleauth.ControlProposalVersion {
+		if err != nil || p.Operation != operation || p.Sequence != sequence || p.SchemaVersion != schema ||
+			p.CurrentVersion != control.CurrentVersion || p.CurrentSHA256 != control.CurrentSHA256 {
 			t.Fatalf("control proposal: %+v (%v)", p, err)
 		}
 		proof, err := policy.SignRequest(p, operatorPrivate, now)
@@ -389,7 +412,18 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		body := map[string]any{"request": proof, "task": json.RawMessage(controlTask)}
 		assertStatus(request(http.MethodPost, base+"/"+control.TaskID+"/signed-task", "other-session", "other-csrf", body), http.StatusNotFound)
 		assertStatus(request(http.MethodPost, base+"/"+control.TaskID+"/signed-task", "test-session-token", client.csrf, body), http.StatusOK)
-		res = request(http.MethodPost, base+"/"+control.TaskID+"/dispatch", "test-session-token", client.csrf, map[string]any{})
+		dispatchPath := base + "/" + control.TaskID + "/dispatch"
+		confirmation := map[string]any{}
+		if operation == "core.downgrade" || operation == "core.uninstall" {
+			assertStatus(request(http.MethodPost, dispatchPath, "test-session-token", client.csrf, confirmation), http.StatusBadRequest)
+			wrongOperation := "core.uninstall"
+			if operation == wrongOperation {
+				wrongOperation = "core.downgrade"
+			}
+			assertStatus(request(http.MethodPost, dispatchPath, "test-session-token", client.csrf, map[string]any{"confirm_operation": wrongOperation}), http.StatusBadRequest)
+			confirmation["confirm_operation"] = operation
+		}
+		res = request(http.MethodPost, dispatchPath, "test-session-token", client.csrf, confirmation)
 		assertStatus(res, http.StatusCreated)
 		var dispatched taskView
 		if err := json.Unmarshal(res.Body.Bytes(), &dispatched); err != nil || dispatched.Operation != operation {
@@ -397,15 +431,26 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 		}
 		next := "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=" + strconv.FormatInt(sequence, 10)
 		assertStatus(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
-		res = client.request(http.MethodGet, next+"&xray_control=v1", nil, true)
+		if schema == lifecycleauth.ChangeProposalVersion {
+			assertStatus(client.request(http.MethodGet, next+"&xray_control=v1", nil, true), http.StatusNoContent)
+		}
+		if versionChange {
+			legacy := strings.Replace(next, "xray-manifest-v1", "xray-v1", 1)
+			assertStatus(client.request(http.MethodGet, legacy+"&"+capability, nil, true), http.StatusNoContent)
+		}
+		res = client.request(http.MethodGet, next+"&"+capability, nil, true)
 		assertStatus(res, http.StatusOK)
 		var delivery helperAuthorizationRequest
 		if err := json.Unmarshal(res.Body.Bytes(), &delivery); err != nil || len(delivery.LeaseID) != 32 || !bytes.Equal(delivery.Task, controlTask) {
 			t.Fatalf("invalid control delivery: %+v (%v)", delivery, err)
 		}
+		backupStatus := http.StatusForbidden
+		if versionChange {
+			backupStatus = http.StatusOK
+		}
 		assertStatus(client.request(http.MethodPost, artifacttrust.BackupEndpoint, artifacttrust.BackupRequest{
 			Task: delivery.Task, LeaseID: delivery.LeaseID, Length: int64(len(backupPayload)),
-		}, true), http.StatusForbidden)
+		}, true), backupStatus)
 		acks, err := runner.ProcessXrayInstall(t.Context(), delivery.Task, delivery.LeaseID, nil, 0, now)
 		if err != nil || len(acks) != 4 || acks[3].Status != "SUCCEEDED" {
 			t.Fatalf("control %s ACKs: %+v (%v)", operation, acks, err)
@@ -421,8 +466,8 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 			t.Fatalf("reported control: %+v (%v)", dispatched, err)
 		}
 	}
-	if calls.Load() != 3 {
-		t.Fatalf("unexpected install and control execution count: %d", calls.Load())
+	if calls.Load() != 6 {
+		t.Fatalf("unexpected Xray execution count: %d", calls.Load())
 	}
 
 	advance(30 * time.Minute)
@@ -433,7 +478,7 @@ func TestXrayInstallReservationAndOperatorAuthorization(t *testing.T) {
 	changed.TaskID = "xray-install-0000000000003"
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, changed), http.StatusConflict)
 	assertStatus(client.request(http.MethodPost, "/api/v1/admin/tasks", status, false), http.StatusCreated)
-	res = client.request(http.MethodGet, reconcilePath+"4", nil, true)
+	res = client.request(http.MethodGet, reconcilePath+"7", nil, true)
 	assertStatus(res, http.StatusOK)
 	if !strings.Contains(res.Body.String(), status.RequestID) || strings.Contains(res.Body.String(), "reconcile_install") {
 		t.Fatalf("next sequence did not resume normal delivery: %s", res.Body)
@@ -475,10 +520,12 @@ func rootInstallTestExecutor(t *testing.T, master *Server, node string, key life
 		Keys:               map[string]helper.TrustedKey{master.taskRuntime.KeyID: {PublicKey: master.taskRuntime.PublicKey, Purpose: "task"}},
 		ReadStatus:         func(string) (string, error) { return "", lifecycleauth.ErrDenied },
 		Checkpoint:         cp,
-		XrayInstall: &helper.XrayInstallConfig{Key: key, Apply: func(ctx context.Context, _ lifecycleauth.InstallTask, _ string, authorize func(context.Context) error) (string, error) {
-			for range 2 {
-				if err := authorize(ctx); err != nil {
-					return "", err
+		XrayInstall: &helper.XrayInstallConfig{Key: key, Apply: func(ctx context.Context, task lifecycleauth.InstallTask, _ string, authorize func(context.Context) error) (string, error) {
+			if task.Operation == "core.install" {
+				for range 2 {
+					if err := authorize(ctx); err != nil {
+						return "", err
+					}
 				}
 			}
 			calls.Add(1)
@@ -539,13 +586,14 @@ func (e testInstallExecutor) ReconcileInstall(_ context.Context, raw []byte) (js
 	return e.reconcile(raw)
 }
 
-type testInstallArtifacts struct{ target artifacttrust.Target }
+type testInstallArtifacts map[string]artifacttrust.Target
 
 func (s testInstallArtifacts) LookupCoreManifest(_ context.Context, core, version string, manifest int64) (artifacttrust.Target, error) {
-	if manifest != 2 || core != s.target.Core || version != s.target.Version {
+	target, ok := s[version]
+	if !ok || manifest != 2 || core != target.Core {
 		return artifacttrust.Target{}, lifecycleauth.ErrDenied
 	}
-	return s.target, nil
+	return target, nil
 }
 
 func (s testInstallArtifacts) Download(context.Context, artifacttrust.Target) (string, error) {

@@ -781,14 +781,20 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	delivery, err := runtime.Store.LeaseWithInstall(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
+	query := r.URL.Query()
+	capabilities := taskdispatch.XrayDeliveryCapabilities{
+		InstallMode: query.Get("install"),
+		Reconcile:   query.Get("install_reconciliation") == "v1",
+		Control:     query.Get("xray_control") == "v1",
+		Change:      query.Get("xray_change") == "v1",
+	}
+	delivery, err := runtime.Store.LeaseWithXray(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
 		unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)
 		if buildErr != nil {
 			return nil, buildErr
 		}
 		return runtime.Signer.SignControl(protocol.Skip, unsigned)
-	}, runtime.XrayInstallPolicy.InstallKey(), r.URL.Query().Get("install"), r.URL.Query().Get("install_reconciliation") == "v1",
-		r.URL.Query().Get("xray_control") == "v1")
+	}, runtime.XrayInstallPolicy.InstallKey(), capabilities)
 	if errors.Is(err, taskdispatch.ErrNotFound) || errors.Is(err, taskdispatch.ErrLeaseActive) {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -947,7 +953,7 @@ func (s *Server) authorizeHelperTask(w http.ResponseWriter, r *http.Request) {
 	switch envelope.Operation {
 	case "core.status":
 		previous, err = runtime.Store.ValidateLease(envelope.NodeID, envelope.TaskID, envelope.Sequence, in.LeaseID, in.Task, now, runtime.KeyID, runtime.PublicKey)
-	case "core.install", "core.start", "core.stop":
+	case "core.install", "core.start", "core.stop", "core.upgrade", "core.downgrade", "core.uninstall":
 		var task lifecycleauth.InstallTask
 		task, err = s.verifyStoredXrayTask(in.Task, true)
 		if err == nil && s.taskCheckpoint != nil && task.NodeID == envelope.NodeID {

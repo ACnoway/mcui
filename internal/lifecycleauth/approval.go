@@ -28,8 +28,10 @@ const (
 	taskTTL                       = 10 * time.Minute
 	requestDomain                 = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
 	controlRequestDomain          = "MCUI-XRAY-CONTROL-REQUEST-V1\n"
+	changeRequestDomain           = "MCUI-XRAY-CHANGE-REQUEST-V1\n"
 	SignedManifestProposalVersion = 3
 	ControlProposalVersion        = 4
+	ChangeProposalVersion         = 5
 )
 
 var (
@@ -51,6 +53,8 @@ type Proposal struct {
 	Architecture    string `json:"architecture"`
 	SHA256          string `json:"sha256"`
 	ManifestVersion int64  `json:"manifest_version,omitempty"`
+	CurrentVersion  string `json:"current_version,omitempty"`
+	CurrentSHA256   string `json:"current_sha256,omitempty"`
 	RequesterID     string `json:"requester_id"`
 	ApproverID      string `json:"approver_id,omitempty"` // Retained for stored V1 proposals.
 	SigningKeyID    string `json:"signing_key_id"`
@@ -159,12 +163,7 @@ func ParseRequest(raw []byte) (Request, error) {
 func (p Proposal) valid() bool {
 	validSchema := (p.singleOperator() && p.ApproverID == "") ||
 		(p.SchemaVersion == 1 && identifier.MatchString(p.ApproverID) && p.ApproverID != p.RequesterID)
-	validOperation := p.Operation == "core.install" && p.SchemaVersion != ControlProposalVersion &&
-		p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence
-	if IsControlOperation(p.Operation) {
-		validOperation = p.SchemaVersion == ControlProposalVersion && p.ManifestVersion == 0
-	}
-	return validSchema && validOperation && p.Core == "xray" &&
+	return validSchema && p.validOperation() && p.Core == "xray" &&
 		taskIDPattern.MatchString(p.TaskID) && security.ValidNodeID(p.NodeID) &&
 		p.Sequence >= 1 && p.Sequence <= maxSequence &&
 		corecatalog.ValidXrayRelease(p.Version, p.SHA256) && (p.Architecture == "amd64" || p.Architecture == "arm64") &&
@@ -173,15 +172,37 @@ func (p Proposal) valid() bool {
 		p.CreatedAt < p.ExpiresAt && p.ExpiresAt-p.CreatedAt <= int64(proposalTTL/time.Second)
 }
 
+func (p Proposal) validOperation() bool {
+	noCurrent := p.CurrentVersion == "" && p.CurrentSHA256 == ""
+	validManifest := p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence
+	switch p.Operation {
+	case "core.install":
+		return p.SchemaVersion >= 1 && p.SchemaVersion <= SignedManifestProposalVersion && noCurrent && validManifest
+	case "core.start", "core.stop":
+		return p.SchemaVersion == ControlProposalVersion && noCurrent && p.ManifestVersion == 0
+	case "core.upgrade", "core.downgrade":
+		return p.SchemaVersion == ChangeProposalVersion && validManifest &&
+			validVersionChange(p.Operation, p.CurrentVersion, p.CurrentSHA256, p.Version, p.SHA256)
+	case "core.uninstall":
+		return p.SchemaVersion == ChangeProposalVersion && noCurrent && p.ManifestVersion == 0
+	default:
+		return false
+	}
+}
+
 func (p Proposal) singleOperator() bool {
-	return p.SchemaVersion == 2 || p.SchemaVersion == SignedManifestProposalVersion || p.SchemaVersion == ControlProposalVersion
+	return p.SchemaVersion >= 2 && p.SchemaVersion <= ChangeProposalVersion
 }
 
 func (p Proposal) requestDomain() string {
-	if p.SchemaVersion == ControlProposalVersion {
+	switch p.SchemaVersion {
+	case ChangeProposalVersion:
+		return changeRequestDomain
+	case ControlProposalVersion:
 		return controlRequestDomain
+	default:
+		return requestDomain
 	}
-	return requestDomain
 }
 
 func (policy *Policy) requesterKey(p Proposal) ed25519.PublicKey {

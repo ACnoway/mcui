@@ -25,6 +25,8 @@ type xrayInstallRequest struct {
 	Architecture    string `json:"architecture"`
 	SHA256          string `json:"sha256"`
 	ManifestVersion int64  `json:"manifest_version"`
+	CurrentVersion  string `json:"current_version"`
+	CurrentSHA256   string `json:"current_sha256"`
 	MFACode         string `json:"mfa_code"`
 }
 
@@ -102,6 +104,8 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Xray control does not use a manifest version", http.StatusBadRequest)
 			return
 		}
+	case "core.upgrade", "core.downgrade", "core.uninstall":
+		schema = lifecycleauth.ChangeProposalVersion
 	default:
 		http.Error(w, "invalid Xray lifecycle operation", http.StatusBadRequest)
 		return
@@ -119,6 +123,7 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 		SchemaVersion: schema, Core: "xray", Operation: in.Operation,
 		TaskID: in.TaskID, NodeID: in.NodeID, RequesterID: ctx.Admin.ID,
 		Version: in.Version, Architecture: in.Architecture, SHA256: in.SHA256, ManifestVersion: in.ManifestVersion,
+		CurrentVersion: in.CurrentVersion, CurrentSHA256: in.CurrentSHA256,
 		SigningKeyID: policy.SigningKeyID(), CreatedAt: now.Unix(), ExpiresAt: now.Add(30 * time.Minute).Unix(),
 	}
 	var record store.XrayInstall
@@ -204,8 +209,7 @@ func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p := request.Proposal
-	if (p.SchemaVersion != lifecycleauth.SignedManifestProposalVersion && p.SchemaVersion != lifecycleauth.ControlProposalVersion) ||
-		p.TaskID != r.PathValue("id") || p.RequesterID != ctx.Admin.ID {
+	if p.SchemaVersion < lifecycleauth.SignedManifestProposalVersion || p.TaskID != r.PathValue("id") || p.RequesterID != ctx.Admin.ID {
 		http.NotFound(w, r)
 		return
 	}
@@ -269,7 +273,8 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		MFACode string `json:"mfa_code"`
+		MFACode          string `json:"mfa_code"`
+		ConfirmOperation string `json:"confirm_operation"`
 	}
 	if readJSON(r, &in) != nil {
 		http.Error(w, "invalid Xray dispatch request", http.StatusBadRequest)
@@ -295,11 +300,15 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		writeXrayInstallError(w, r, err)
 		return
 	}
+	if (task.Operation == "core.downgrade" || task.Operation == "core.uninstall") && in.ConfirmOperation != task.Operation {
+		http.Error(w, "confirm the specific Xray downgrade or uninstall operation before dispatch", http.StatusBadRequest)
+		return
+	}
 	if existing, err := s.taskRuntime.Store.GetRecord(id); err == nil && bytes.Equal(existing.Raw, record.SignedTask) {
 		writeJSON(w, http.StatusOK, s.taskRecordView(existing))
 		return
 	}
-	if task.Operation == "core.install" && !task.SignedManifest {
+	if !lifecycleauth.IsControlOperation(task.Operation) && !task.SignedManifest {
 		http.Error(w, "rebuild the legacy proposal with the signed release manifest", http.StatusConflict)
 		return
 	}

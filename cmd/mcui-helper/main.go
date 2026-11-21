@@ -151,10 +151,12 @@ func main() {
 				}
 				defer runtime.Close()
 				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
+				action := xrayruntime.Action(strings.TrimPrefix(task.Operation, "core."))
 				if control {
-					return runtime.ControlAuthorized(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash, authorize)
+					return runtime.ControlAuthorized(ctx, action, release, hash, authorize)
 				}
-				return runtime.InstallAuthorized(ctx, release, artifacts, task.ManifestVersion, hash, authorize)
+				expected := xrayruntime.Release{Version: task.CurrentVersion, SHA256: task.CurrentSHA256}
+				return runtime.ApplyAuthorized(ctx, action, expected, release, artifacts, task.ManifestVersion, hash, authorize)
 			},
 			Reconcile: func(ctx context.Context, task lifecycleauth.InstallTask, hash string) (string, error) {
 				runtime, err := xrayruntime.Open(false)
@@ -163,10 +165,7 @@ func main() {
 				}
 				defer runtime.Close()
 				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
-				if lifecycleauth.IsControlOperation(task.Operation) {
-					return runtime.ReconcileControl(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash)
-				}
-				return runtime.ReconcileInstall(ctx, release, hash)
+				return runtime.ReconcileTask(ctx, xrayruntime.Action(strings.TrimPrefix(task.Operation, "core.")), release, hash)
 			},
 		}
 	}

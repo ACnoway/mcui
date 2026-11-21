@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/ACnoway/mcui/internal/artifacttrust"
 )
 
 func TestXrayArchiveRejectsInvalidInput(t *testing.T) {
@@ -168,7 +170,7 @@ func TestRemoteInstallReceiptsAfterReopen(t *testing.T) {
 			}
 			defer reopened.Close()
 			starts := svc.starts
-			if got, err := reopened.ReconcileInstall(ctx, release, strings.Repeat("b", 64)); err == nil || got != "" {
+			if got, err := reopened.ReconcileTask(ctx, Install, release, strings.Repeat("b", 64)); err == nil || got != "" {
 				t.Fatalf("different task got %q, %v", got, err)
 			}
 			if outcome == "ROLLED_BACK" {
@@ -176,13 +178,13 @@ func TestRemoteInstallReceiptsAfterReopen(t *testing.T) {
 					t.Fatal("different task modified pending activation")
 				}
 				svc.stopError = errors.New("stop failed")
-				if _, err := reopened.ReconcileInstall(ctx, release, hash); err == nil || readState(t, reopened).Pending == nil {
+				if _, err := reopened.ReconcileTask(ctx, Install, release, hash); err == nil || readState(t, reopened).Pending == nil {
 					t.Fatal("failed rollback produced a terminal receipt")
 				}
 				svc.stopError = nil
 			}
 			for range 2 {
-				if got, err := reopened.ReconcileInstall(ctx, release, hash); err != nil || got != outcome {
+				if got, err := reopened.ReconcileTask(ctx, Install, release, hash); err != nil || got != outcome {
 					t.Fatalf("reconciliation = %q, %v, want %q", got, err, outcome)
 				}
 			}
@@ -252,7 +254,7 @@ func TestRemoteControlUsesExpectedReleaseAndRecovers(t *testing.T) {
 	if outcome, err := r.ControlAuthorized(ctx, Stop, release, stopHash, authorize); err != nil || outcome != "SUCCEEDED" || svc.running {
 		t.Fatalf("stop = %q, %v", outcome, err)
 	}
-	if outcome, err := r.ReconcileControl(ctx, Start, release, stopHash); err == nil || outcome != "" {
+	if outcome, err := r.ReconcileTask(ctx, Start, release, stopHash); err == nil || outcome != "" {
 		t.Fatalf("start accepted a stop receipt: %q, %v", outcome, err)
 	}
 	state := readState(t, r)
@@ -261,13 +263,125 @@ func TestRemoteControlUsesExpectedReleaseAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.running = true // Interrupted after start and before commit.
-	if outcome, err := r.ReconcileControl(ctx, Start, release, startHash); err != nil || outcome != "ROLLED_BACK" || svc.running {
+	if outcome, err := r.ReconcileTask(ctx, Start, release, startHash); err != nil || outcome != "ROLLED_BACK" || svc.running {
 		t.Fatalf("interrupted start recovery = %q, %v", outcome, err)
 	}
 	if outcome, err := r.ControlAuthorized(ctx, Start, release, strings.Repeat("d", 64), authorize); err != nil || outcome != "SUCCEEDED" || !svc.running || checks != 2 {
 		t.Fatalf("start = %q, %v; checks=%d", outcome, err, checks)
 	}
 }
+
+func TestRemoteVersionChangeRestoresLastGoodRelease(t *testing.T) {
+	ctx := t.Context()
+	svc := &fakeService{}
+	r := newRuntime(t, svc)
+	svc.dir = r.dir
+	old, oldPath, oldSize := makeArchive(t, "v26.10.31", testEntries("old"))
+	if err := r.stage(ctx, old, oldSize, func() (string, error) { return oldPath, nil }); err != nil {
+		t.Fatal(err)
+	}
+	applyFixture(t, r, Install, selection{Release: old, Running: true})
+	target, path, size := makeArchive(t, "v26.11.9", testEntries("candidate"))
+	trust := &fixtureTrust{target: versionFixture(target, size), path: path}
+	authChecks := 0
+	authorize := func(context.Context) error { authChecks++; return nil }
+	hash := strings.Repeat("a", 64)
+	stale := Release{Version: old.Version, SHA256: strings.Repeat("e", 64)}
+	if got, err := r.ApplyAuthorized(ctx, Upgrade, stale, target, trust, 3, hash, authorize); err != nil || got != "FAILED" || trust.downloads != 0 {
+		t.Fatalf("a stale source started the upgrade: %q, %v, downloads=%d", got, err, trust.downloads)
+	}
+	svc.failedRelease = target.link()
+	if got, err := r.ApplyAuthorized(ctx, Upgrade, old, target, trust, 3, hash, authorize); err != nil || got != "ROLLED_BACK" {
+		t.Fatalf("failed candidate = %q, %v", got, err)
+	}
+	if got, err := r.ReconcileTask(ctx, Upgrade, target, hash); err != nil || got != "ROLLED_BACK" {
+		t.Fatalf("upgrade rollback receipt = %q, %v", got, err)
+	}
+	if state := readState(t, r); state.Current.Release != old || state.Pending != nil || !svc.running || authChecks != 2 {
+		t.Fatalf("upgrade did not restore the previous running release: %+v, checks=%d", state, authChecks)
+	}
+	svc.failedRelease = ""
+	if got, err := r.ApplyAuthorized(ctx, Upgrade, old, target, trust, 3, strings.Repeat("b", 64), authorize); err != nil || got != "SUCCEEDED" {
+		t.Fatalf("upgrade retry with new authorization = %q, %v", got, err)
+	}
+	if err := r.Control(ctx, Stop, target); err != nil {
+		t.Fatal(err)
+	}
+	oldTrust := &fixtureTrust{target: versionFixture(old, oldSize), path: oldPath}
+	downHash := strings.Repeat("c", 64)
+	if got, err := r.ApplyAuthorized(ctx, Downgrade, target, old, oldTrust, 3, downHash, authorize); err != nil || got != "SUCCEEDED" || svc.running {
+		t.Fatalf("downgrade did not preserve stopped intent: %q, %v", got, err)
+	}
+	if got, err := r.ReconcileTask(ctx, Upgrade, old, downHash); err == nil || got != "" {
+		t.Fatalf("an upgrade accepted a downgrade receipt: %q, %v", got, err)
+	}
+	if state := readState(t, r); state.Current.Release != old || state.Previous != target || state.Current.Running {
+		t.Fatalf("unexpected downgraded state: %+v", state)
+	}
+}
+
+func TestRemoteUninstallReceiptBindsRemovedRelease(t *testing.T) {
+	ctx := t.Context()
+	svc := &fakeService{}
+	r := newRuntime(t, svc)
+	svc.dir = r.dir
+	release := stageFixture(t, r, "v26.10.31")
+	applyFixture(t, r, Install, selection{Release: release, Running: true})
+	state := readState(t, r)
+	hash := strings.Repeat("a", 64)
+	state.Pending = &intent{Action: Uninstall, ControlHash: hash}
+	if err := r.save(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.point("current", Release{}); err != nil {
+		t.Fatal(err)
+	}
+	svc.running = false
+	if got, err := r.ReconcileTask(ctx, Uninstall, release, hash); err != nil || got != "ROLLED_BACK" || !svc.running {
+		t.Fatalf("interrupted uninstall = %q, %v", got, err)
+	}
+	hash = strings.Repeat("b", 64)
+	if got, err := r.ControlAuthorized(ctx, Uninstall, release, hash, func(context.Context) error { return nil }); err != nil || got != "SUCCEEDED" || svc.running {
+		t.Fatalf("uninstall = %q, %v", got, err)
+	}
+	for range 2 {
+		if got, err := r.ReconcileTask(ctx, Uninstall, release, hash); err != nil || got != "SUCCEEDED" {
+			t.Fatalf("repeat uninstall receipt = %q, %v", got, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(r.dir, "versions"))
+	if state := readState(t, r); err != nil || len(entries) != 0 || state.Current != (selection{}) || state.Previous != (Release{}) {
+		t.Fatalf("uninstall left state or versions: %+v, %v, %v", state, entries, err)
+	}
+}
+
+type fixtureTrust struct {
+	target    artifacttrust.Target
+	path      string
+	downloads int
+}
+
+func versionFixture(release Release, size int64) artifacttrust.Target {
+	return artifacttrust.Target{Core: "xray", Version: release.Version, SHA256: release.SHA256, Size: size, ArchiveFormat: "zip", SignatureStatus: "not-provided"}
+}
+
+func (f *fixtureTrust) Lookup(context.Context, string, string) (artifacttrust.Target, error) {
+	return artifacttrust.Target{}, artifacttrust.ErrUntrustedTarget
+}
+
+func (f *fixtureTrust) LookupCoreManifest(_ context.Context, core, version string, manifest int64) (artifacttrust.Target, error) {
+	if core != f.target.Core || version != f.target.Version || manifest != 3 {
+		return artifacttrust.Target{}, artifacttrust.ErrUntrustedTarget
+	}
+	return f.target, nil
+}
+
+func (f *fixtureTrust) Download(context.Context, artifacttrust.Target) (string, error) {
+	f.downloads++
+	return f.path, nil
+}
+
+func (f *fixtureTrust) Revalidate(context.Context, artifacttrust.Target) error { return nil }
 
 func TestLifecycleRejectsUntrustedArtifactsAndConcurrentWriters(t *testing.T) {
 	r := newRuntime(t, &fakeService{})

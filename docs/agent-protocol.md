@@ -43,9 +43,10 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 | operation | payload 必填字段（除 core 外） |
 |---|---|
 | `core.status` | 无；V1 仅定义签名结构，阶段 2 的运行时使用 V2，规则见[状态任务协议草案](./phase-2-protocol-draft.md) |
-| `core.start`, `core.stop` | Xray 远程启停使用已安装的 `version`、`architecture`、`sha256`。仅有 `core` 的旧信封保留解析兼容。 |
-| `core.restart`, `core.uninstall` | 无 |
-| `core.install`, `core.upgrade`, `core.downgrade` | `version`、`artifact_id` 为标识符；`manifest_version` 为正整数 |
+| `core.start`, `core.stop`, `core.uninstall` | Xray 使用已安装的 `version`、`architecture`、`sha256`。仅有 `core` 的旧信封保留解析兼容。 |
+| `core.restart` | 无 |
+| `core.install` | `version`、`artifact_id` 为标识符，`manifest_version` 为正整数 |
+| `core.upgrade`, `core.downgrade` | Xray 同时绑定已安装的 `current_version`、`current_sha256` 和目标的 `version`、`artifact_id`、`manifest_version`。旧信封保留解析兼容。 |
 | `config.apply` | `revision` 正整数、`content_sha256` 摘要、`core_version` 标识符 |
 
 任务签名只授权固定动作；制品 ID、版本、架构及摘要须匹配独立受信任且未过期的发布清单，降级须独立授权。任务时间为启动与新步骤授权边界，不是可无限续租的通行证。Agent/Helper 自更新和信任根轮换的独立发布授权尚未定义，禁止用本表绕行。节点 Token 轮换按第 2 节接入流程处理。
@@ -70,7 +71,7 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 
 状态查询使用 `schema_version: 2`、`operation: core.status`。V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。显式启用单签名清单的 Agent 通过 `install=xray-manifest-v1` 接收独立签发的 V1 `core.install`，共享同一节点序号。旧 TUF 节点使用 `install=xray-v1` 处理已投递任务。安装租约为 60 秒，同一节点凭据可为未过期的同一信封续租。租约到期只重投相同签名消息。Agent 账本先写入再处理；重复 ACK 可重放，执行中状态重启后进入 `NEEDS_RECONCILIATION`。[Xray 安装操作说明](./phase-3-operations.md#5-启用远程-xray-安装)
 
-支持远程启停的 Agent 在轮询中声明 `xray_control=v1`。独立签发的 V1 `core.start`、`core.stop` 共享上述租约、序号及 ACK 规则。Helper 只接受绑定已安装版本、架构、SHA-256 的启停信封。制品缓存接口只接受符合条件的签名安装任务。[远程启停操作说明](./phase-3-operations.md#6-远程启停)
+支持远程启停的 Agent 在轮询中声明 `xray_control=v1`。升级、降级、卸载使用 `xray_change=v1`。各操作共享租约、序号及 ACK 规则，Helper 校验已安装版本和架构。符合条件的签名安装、升级和降级任务可按目标摘要使用主控制品缓存。卸载只操作节点的受管版本。[远程启停](./phase-3-operations.md#6-远程启停) · [远程版本切换与卸载](./phase-3-operations.md#7-远程版本切换与卸载)
 
 Helper 要求当前 Master 签发租约、提交完整原始签名消息并从 TLS 验证的 Master 获取当前时间和前序终态位置。检查点返回的前序序号只允许将已终结缺口写入 Helper 本地 ledger；未知缺口不跳过。状态读取仅执行固定 `systemctl show` 属性查询。Agent 过期收到的签名任务只持久化 `EXPIRED` 并 ACK，不执行 Helper。执行结果不确定时两端保持 reconciliation 栅栏，不能删除账本恢复。
 

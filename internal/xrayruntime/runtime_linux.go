@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -76,6 +75,13 @@ type service interface {
 	stop(context.Context) error
 }
 
+type releaseTrust interface {
+	Lookup(context.Context, string, string) (artifacttrust.Target, error)
+	LookupCoreManifest(context.Context, string, string, int64) (artifacttrust.Target, error)
+	Download(context.Context, artifacttrust.Target) (string, error)
+	Revalidate(context.Context, artifacttrust.Target) error
+}
+
 // Runtime holds the exclusive local lifecycle lock until Close.
 type Runtime struct {
 	dir     string
@@ -96,7 +102,7 @@ func (r *Runtime) Status() (Status, error) { return r.readStatus() }
 
 // Apply fetches only the exact operator-selected and authorized release.
 func (r *Runtime) Apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client) error {
-	return r.apply(ctx, action, release, trust, 0, "", nil)
+	return r.apply(ctx, action, Release{}, release, trust, 0, "", nil)
 }
 
 // ApplyWithManifest pins the approved manifest version across lookup,
@@ -105,16 +111,17 @@ func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release 
 	if manifestVersion <= 0 {
 		return artifacttrust.ErrUntrustedTarget
 	}
-	return r.apply(ctx, action, release, trust, manifestVersion, "", nil)
+	return r.apply(ctx, action, Release{}, release, trust, manifestVersion, "", nil)
 }
 
-// InstallAuthorized rechecks the remote authorization before candidate
+// ApplyAuthorized rechecks the remote authorization before candidate
 // execution and immediately before recording any activation intent.
-func (r *Runtime) InstallAuthorized(ctx context.Context, release Release, trust *artifacttrust.Client, manifestVersion int64, hash string, authorize func(context.Context) error) (string, error) {
-	if manifestVersion <= 0 || !validTaskHash(hash) || authorize == nil {
+func (r *Runtime) ApplyAuthorized(ctx context.Context, action Action, expected, release Release, trust releaseTrust, manifestVersion int64, hash string, authorize func(context.Context) error) (string, error) {
+	safeSource := (action == Install && expected == (Release{})) || ((action == Upgrade || action == Downgrade) && expected.valid())
+	if !safeSource || manifestVersion <= 0 || !validTaskHash(hash) || authorize == nil {
 		return "FAILED", nil
 	}
-	return taskOutcome(r.apply(ctx, Install, release, trust, manifestVersion, hash, authorize))
+	return taskOutcome(r.apply(ctx, action, expected, release, trust, manifestVersion, hash, authorize))
 }
 
 func taskOutcome(err error) (string, error) {
@@ -130,17 +137,23 @@ func taskOutcome(err error) (string, error) {
 	}
 }
 
-func (r *Runtime) apply(ctx context.Context, action Action, release Release, trust *artifacttrust.Client, manifestVersion int64, hash string, authorize func(context.Context) error) error {
+func (r *Runtime) apply(ctx context.Context, action Action, expected, release Release, trust releaseTrust, manifestVersion int64, hash string, authorize func(context.Context) error) error {
 	state, err := r.ready()
 	if err != nil {
 		return errors.Join(errUnknown, err)
+	}
+	if expected != (Release{}) && state.Current.Release != expected {
+		return errors.New("current Xray release does not match the expected release")
 	}
 	next := selection{Release: release, Running: action == Install || state.Current.Running}
 	if err := validateTransition(state.Current, intent{Action: action, Next: next}); err != nil {
 		return err
 	}
-	if action != Install && action != Upgrade && action != Downgrade {
+	if !isArtifactAction(action) {
 		return errors.New("invalid Xray artifact action")
+	}
+	if trust == nil {
+		return artifacttrust.ErrUntrustedTarget
 	}
 	var target artifacttrust.Target
 	if manifestVersion != 0 {
@@ -185,10 +198,14 @@ func (r *Runtime) Control(ctx context.Context, action Action, expected Release) 
 // ControlAuthorized limits remote control to the fixed service and confirms the
 // current lease before committing an intent for the exact installed release.
 func (r *Runtime) ControlAuthorized(ctx context.Context, action Action, expected Release, hash string, authorize func(context.Context) error) (string, error) {
-	if !isServiceControl(action) || !validTaskHash(hash) || authorize == nil {
+	if !isControlAction(action) || !validTaskHash(hash) || authorize == nil {
 		return "FAILED", nil
 	}
-	return taskOutcome(r.control(ctx, action, expected, hash, authorize))
+	err := r.control(ctx, action, expected, hash, authorize)
+	if action == Uninstall && errors.Is(err, errCommitted) {
+		return "", err // Committed removal still needs to finish pruning the old bundles.
+	}
+	return taskOutcome(err)
 }
 
 func (r *Runtime) control(ctx context.Context, action Action, expected Release, hash string, authorize func(context.Context) error) error {
@@ -221,21 +238,9 @@ func (r *Runtime) control(ctx context.Context, action Action, expected Release, 
 	return r.change(ctx, state, intent{Action: action, Next: next, ControlHash: hash})
 }
 
-// ReconcileInstall returns the persisted result of the exact signed install.
-func (r *Runtime) ReconcileInstall(ctx context.Context, release Release, hash string) (string, error) {
-	return r.reconcileTask(ctx, Install, release, hash)
-}
-
-// ReconcileControl only reads a receipt or rolls back a matching transaction.
-func (r *Runtime) ReconcileControl(ctx context.Context, action Action, release Release, hash string) (string, error) {
-	if !isServiceControl(action) {
-		return "", errUnknown
-	}
-	return r.reconcileTask(ctx, action, release, hash)
-}
-
-func (r *Runtime) reconcileTask(ctx context.Context, action Action, release Release, hash string) (string, error) {
-	if !release.valid() || !validTaskHash(hash) {
+// ReconcileTask reads a receipt or rolls back the exact interrupted transaction.
+func (r *Runtime) ReconcileTask(ctx context.Context, action Action, release Release, hash string) (string, error) {
+	if (!isArtifactAction(action) && !isControlAction(action)) || !release.valid() || !validTaskHash(hash) {
 		return "", errUnknown
 	}
 	state, err := r.readStatus()
@@ -245,10 +250,10 @@ func (r *Runtime) reconcileTask(ctx context.Context, action Action, release Rele
 	if state.Pending != nil {
 		pending := state.Pending
 		pendingHash := pending.InstallHash
-		if action != Install {
+		if isControlAction(action) {
 			pendingHash = pending.ControlHash
 		}
-		if pending.Action != action || pendingHash != hash || pending.Next.Release != release {
+		if pending.Action != action || pendingHash != hash || pending.receiptRelease(state.Current.Release) != release {
 			return "", errUnknown
 		}
 		if err := r.rollback(ctx, state); err != nil {
@@ -260,14 +265,19 @@ func (r *Runtime) reconcileTask(ctx context.Context, action Action, release Rele
 		}
 	}
 	receipt := state.InstallReceipt
-	if action != Install {
+	if isControlAction(action) {
 		receipt = state.ControlReceipt
-		if receipt != nil && receipt.Action != action {
-			return "", errUnknown
-		}
 	}
 	if receipt == nil || receipt.Hash != hash || receipt.Release != release {
 		return "", errUnknown
+	}
+	if receipt.Action != action && !(action == Install && receipt.Action == "") {
+		return "", errUnknown
+	}
+	if action == Uninstall && receipt.Outcome == "SUCCEEDED" {
+		if err := r.prune(state); err != nil {
+			return "", err
+		}
 	}
 	if err := syncDir(filepath.Join(r.dir, "control")); err != nil {
 		return "", err
@@ -283,15 +293,30 @@ func validTaskHash(hash string) bool {
 	return err == nil
 }
 
-func isServiceControl(action Action) bool {
-	return action == Start || action == Stop
+func isControlAction(action Action) bool {
+	return action == Start || action == Stop || action == Uninstall
+}
+
+func isArtifactAction(action Action) bool {
+	return action == Install || action == Upgrade || action == Downgrade
+}
+
+func (attempt intent) receiptRelease(current Release) Release {
+	if attempt.Action == Uninstall {
+		return current
+	}
+	return attempt.Next.Release
 }
 
 func (s *Status) recordReceipt(attempt intent, outcome string) {
+	release := attempt.receiptRelease(s.Current.Release)
 	if attempt.InstallHash != "" {
-		s.InstallReceipt = &taskReceipt{Hash: attempt.InstallHash, Release: attempt.Next.Release, Outcome: outcome}
+		s.InstallReceipt = &taskReceipt{Hash: attempt.InstallHash, Release: release, Outcome: outcome}
+		if attempt.Action != Install {
+			s.InstallReceipt.Action = attempt.Action
+		}
 	} else if attempt.ControlHash != "" {
-		s.ControlReceipt = &taskReceipt{Hash: attempt.ControlHash, Release: attempt.Next.Release, Outcome: outcome, Action: attempt.Action}
+		s.ControlReceipt = &taskReceipt{Hash: attempt.ControlHash, Release: release, Outcome: outcome, Action: attempt.Action}
 	}
 }
 
@@ -360,9 +385,9 @@ func (r *Runtime) change(ctx context.Context, state Status, attempt intent) erro
 	if action == Uninstall {
 		state.Previous = Release{}
 	}
+	state.recordReceipt(attempt, "SUCCEEDED")
 	state.Current, state.Pending = next, nil
 	state.LastAction, state.LastResult = action, "committed"
-	state.recordReceipt(attempt, "SUCCEEDED")
 	if err := r.save(state); err != nil {
 		// A rename may already have completed even when directory fsync fails.
 		return errors.Join(errUnknown, fmt.Errorf("persist Xray commit; run recover before continuing: %w", err))
@@ -448,18 +473,6 @@ func (r Release) link() string {
 	return filepath.Join("versions", r.key())
 }
 
-func compareVersions(left, right string) int {
-	first, second := strings.Split(left[1:], "."), strings.Split(right[1:], ".")
-	for i := range first {
-		a, _ := strconv.Atoi(first[i])
-		b, _ := strconv.Atoi(second[i])
-		if a != b {
-			return a - b
-		}
-	}
-	return 0
-}
-
 func validateTransition(current selection, pending intent) error {
 	next := pending.Next
 	if (next.Release != (Release{}) && !next.Release.valid()) || (next.Release == (Release{}) && next.Running) {
@@ -471,7 +484,7 @@ func validateTransition(current selection, pending intent) error {
 		valid = current == (selection{}) && next.Release.valid() && next.Running
 	case Upgrade, Downgrade:
 		if current.Release.valid() && next.Release.valid() && current.Running == next.Running {
-			order := compareVersions(next.Release.Version, current.Release.Version)
+			order := corecatalog.CompareXrayVersions(next.Release.Version, current.Release.Version)
 			valid = (pending.Action == Upgrade && order > 0) || (pending.Action == Downgrade && order < 0)
 		}
 	case Start, Stop:

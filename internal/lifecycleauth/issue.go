@@ -17,6 +17,8 @@ type installPayload struct {
 	ManifestVersion int64  `json:"manifest_version,omitempty"`
 	Architecture    string `json:"architecture,omitempty"`
 	SHA256          string `json:"sha256,omitempty"`
+	CurrentVersion  string `json:"current_version,omitempty"`
+	CurrentSHA256   string `json:"current_sha256,omitempty"`
 }
 
 type installTask struct {
@@ -82,7 +84,7 @@ func signInstallTask(request Request, requestID string, key ed25519.PrivateKey, 
 func expectedInstallTask(request Request, requestID string) installTask {
 	p := request.Proposal
 	prefix := "xray-"
-	if p.SchemaVersion == SignedManifestProposalVersion {
+	if p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation) {
 		prefix = "xray-manifest-"
 	}
 	payload := installPayload{Core: p.Core, Version: p.Version}
@@ -90,6 +92,7 @@ func expectedInstallTask(request Request, requestID string) installTask {
 		payload.Architecture, payload.SHA256 = p.Architecture, p.SHA256
 	} else {
 		payload.ArtifactID, payload.ManifestVersion = prefix+p.Architecture+"-"+p.SHA256, p.ManifestVersion
+		payload.CurrentVersion, payload.CurrentSHA256 = p.CurrentVersion, p.CurrentSHA256
 	}
 	issued := time.Unix(request.RequestedAt, 0).UTC().Format(time.RFC3339)
 	return installTask{

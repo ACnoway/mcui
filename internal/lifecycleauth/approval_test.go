@@ -130,6 +130,44 @@ func TestIssueXrayControlBindsActionAndInstalledRelease(t *testing.T) {
 	}
 }
 
+func TestIssueXrayVersionChangesBindBothReleases(t *testing.T) {
+	a := newTestAuthority(t)
+	_, ledger := newLedger(t)
+	p := a.proposal
+	p.SchemaVersion, p.Operation = ChangeProposalVersion, "core.downgrade"
+	p.CurrentVersion, p.CurrentSHA256 = "v26.11.9", strings.Repeat("b", 64)
+	missingDigest, wrongDirection := p, p
+	missingDigest.CurrentSHA256 = ""
+	wrongDirection.Operation = "core.upgrade"
+	for _, invalid := range []Proposal{missingDigest, wrongDirection} {
+		if _, err := a.policy.SignRequest(invalid, a.requestKey, a.now); !errors.Is(err, ErrDenied) {
+			t.Fatalf("accepted invalid version-change proposal: %+v (%v)", invalid, err)
+		}
+	}
+	request := a.request(t, p)
+	raw, err := a.policy.Issue(t.Context(), ledger, request, a.taskKey, a.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := a.policy.VerifyIssuedTask(raw, request, a.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := a.policy.InstallKey().Verify(raw)
+	if err != nil || !task.Matches(p, id) || !task.SignedManifest {
+		t.Fatalf("verified downgrade: %+v, %v", task, err)
+	}
+	changed := request
+	changed.Proposal.CurrentSHA256 = strings.Repeat("c", 64)
+	mismatch, err := signInstallTask(changed, id, a.taskKey, a.policy.signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.policy.VerifyIssuedTask(mismatch, request, a.now); !errors.Is(err, ErrDenied) {
+		t.Fatalf("accepted changed installed digest: %v", err)
+	}
+}
+
 func TestIssueExactInstallAndReplayAfterReopen(t *testing.T) {
 	a := newTestAuthority(t)
 	path, ledger := newLedger(t)

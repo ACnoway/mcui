@@ -27,12 +27,25 @@ type InstallTask struct {
 	TaskID, NodeID, KeyID, ApprovalID        string
 	Sequence, ManifestVersion                int64
 	Operation, Version, Architecture, SHA256 string
+	CurrentVersion, CurrentSHA256            string
 	NotBefore, ExpiresAt                     time.Time
 	SignedManifest                           bool
 }
 
 func IsControlOperation(operation string) bool {
-	return operation == "core.start" || operation == "core.stop"
+	return operation == "core.start" || operation == "core.stop" || operation == "core.uninstall"
+}
+
+func IsVersionChange(operation string) bool {
+	return operation == "core.upgrade" || operation == "core.downgrade"
+}
+
+func validVersionChange(operation, current, currentSHA256, target, targetSHA256 string) bool {
+	if !corecatalog.ValidXrayRelease(current, currentSHA256) || !corecatalog.ValidXrayRelease(target, targetSHA256) {
+		return false
+	}
+	order := corecatalog.CompareXrayVersions(target, current)
+	return (operation == "core.upgrade" && order > 0) || (operation == "core.downgrade" && order < 0)
 }
 
 // Verify validates the exact signed V1 Xray lifecycle envelope against a
@@ -48,7 +61,7 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 	payload := wire.Payload
 	var signedManifest bool
 	switch {
-	case wire.Operation == "core.install":
+	case wire.Operation == "core.install" || IsVersionChange(wire.Operation):
 		prefix := "xray-"
 		if strings.HasPrefix(payload.ArtifactID, "xray-manifest-") {
 			prefix, signedManifest = "xray-manifest-", true
@@ -58,6 +71,10 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 			return InstallTask{}, ErrDenied
 		}
 		payload.Architecture, payload.SHA256 = architecture, digest
+		if IsVersionChange(wire.Operation) && (!signedManifest ||
+			!validVersionChange(wire.Operation, payload.CurrentVersion, payload.CurrentSHA256, payload.Version, payload.SHA256)) {
+			return InstallTask{}, ErrDenied
+		}
 	case IsControlOperation(wire.Operation):
 		// Only a release-bound control envelope can pass the lifecycle key.
 	default:
@@ -77,6 +94,7 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 	return InstallTask{
 		TaskID: wire.TaskID, NodeID: wire.NodeID, KeyID: key.ID, ApprovalID: wire.ApprovalID,
 		Sequence: wire.Sequence, Operation: wire.Operation, Version: payload.Version, ManifestVersion: payload.ManifestVersion,
+		CurrentVersion: payload.CurrentVersion, CurrentSHA256: payload.CurrentSHA256,
 		Architecture: payload.Architecture, SHA256: payload.SHA256, NotBefore: before, ExpiresAt: expires, SignedManifest: signedManifest,
 	}, nil
 }
@@ -84,7 +102,8 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 func (t InstallTask) Matches(p Proposal, id string) bool {
 	return id == t.ApprovalID && p.TaskID == t.TaskID && p.NodeID == t.NodeID && p.SigningKeyID == t.KeyID &&
 		p.Sequence == t.Sequence && p.Operation == t.Operation && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
-		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion) &&
+		p.CurrentVersion == t.CurrentVersion && p.CurrentSHA256 == t.CurrentSHA256 &&
+		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation)) &&
 		p.Architecture == t.Architecture && p.SHA256 == t.SHA256 &&
 		t.NotBefore.Unix() >= p.CreatedAt && t.ExpiresAt.Unix() <= p.ExpiresAt
 }

@@ -1,12 +1,12 @@
 # MCUI Master and empty Agent
 
-MCUI is a multi-Core control plane in staged development. The repository contains the Master panel, a Core-free Agent, and a signed task path with a privileged Helper and isolated signers. Opt-in remote Xray operations cover installation, start, and stop. The first demo target is the complete Xray workflow.
+MCUI is a multi-Core control plane in staged development. The repository contains the Master panel, a Core-free Agent, and a signed task path with a privileged Helper and isolated signers. Opt-in remote Xray operations cover installation, start, stop, upgrade, explicit downgrade, and uninstall. The first demo target is the complete Xray workflow.
 
 ## Current stage
 
 Phase 0/1 engineering work is complete and formal exit evidence remains outstanding. Phase 2 connects scoped status-task creation, external signing, Token-authenticated pull/ACK, durable Agent intake, pending-task cancellation, expired-task skip, a peer-credential-checked Helper socket, and an HTTPS Master lease checkpoint. The remotely executable action is a fixed read-only service status query. [Phase 0/1 status](docs/phase-0-1-implementation.md) · [Phase 2 progress](docs/phase-2-progress.md) · [Phase 2 operations](docs/phase-2-operations.md)
 
-Phase 3 has the Core release catalog, Master backup cache, local `mcui-xray` lifecycle and opt-in remote Xray installation using a signed release manifest. Start and stop bind the exact installed release. Interrupted lifecycle tasks can report a proven commit or rollback to Master after restart. Xray demo work can begin on an isolated node with the existing installation path. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Next batches](docs/phase-3-progress.md#后续工作) · [Operations](docs/phase-3-operations.md) · [Production release](docs/phase-3-release.md#生产发布验收)
+Phase 3 has the Core release catalog, Master backup cache, and signed Xray lifecycle tasks. Version changes bind the exact installed release and an approved target from the signed release manifest. Downgrade and uninstall require separate confirmation. Interrupted tasks can report a proven commit or rollback to Master after restart. Paired Agent and Helper updates are the next Phase 3 work. Debian amd64 receives runtime validation and Linux arm64 receives build validation. [Next batches](docs/phase-3-progress.md#后续工作) · [Operations](docs/phase-3-operations.md) · [Production release](docs/phase-3-release.md#生产发布验收)
 
 ## Development checks
 
