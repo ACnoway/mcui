@@ -204,7 +204,8 @@ func (s *Server) recordSignedXrayInstall(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p := request.Proposal
-	if p.SchemaVersion != lifecycleauth.SignedManifestProposalVersion || p.TaskID != r.PathValue("id") || p.RequesterID != ctx.Admin.ID {
+	if (p.SchemaVersion != lifecycleauth.SignedManifestProposalVersion && p.SchemaVersion != lifecycleauth.ControlProposalVersion) ||
+		p.TaskID != r.PathValue("id") || p.RequesterID != ctx.Admin.ID {
 		http.NotFound(w, r)
 		return
 	}
@@ -298,7 +299,7 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.taskRecordView(existing))
 		return
 	}
-	if !task.SignedManifest {
+	if task.Operation == "core.install" && !task.SignedManifest {
 		http.Error(w, "rebuild the legacy proposal with the signed release manifest", http.StatusConflict)
 		return
 	}
