@@ -61,7 +61,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	trustedNow := func() (time.Time, error) { return now, nil }
+	trustedNow := func() (time.Time, error) { return time.Now().UTC(), nil }
 	runtime := *s.taskRuntime
 	runtime.XrayInstallPolicy, runtime.TrustedNow = policy, trustedNow
 	if err := s.ConfigureTaskRuntime(runtime); err != nil {
@@ -102,7 +102,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	releasePub, releaseKey := generate()
 	sig := ed25519.Sign(releaseKey, rawManifest)
 	current := func(context.Context) (artifacttrust.Manifest, error) {
-		return artifacttrust.VerifyManifest(rawManifest, sig, releasePub, now)
+		return artifacttrust.VerifyManifest(rawManifest, sig, releasePub, time.Now().UTC())
 	}
 	token := strings.Repeat("k", 36)
 	signer, err := lifecycleauth.NewPanelSignerHandler(policy, ledger, key, []byte(token), trustedNow, current)
