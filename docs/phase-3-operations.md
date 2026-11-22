@@ -103,7 +103,7 @@ runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xra
 
 使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 仅为 Helper 开放固定的 Xray 运行目录。Helper 从本地 chrony Unix 套接字读取认证时间。Master 和 Agent 仍须通过阶段 2 文档所述的受控认证时间查询。
 
-原发起运维员上传签名请求和独立签发任务，经面板核验及 MFA 复验后投递，并通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 在面板显示为「待对账」，后续序号暂时阻塞。
+单管理员在节点详情选择安装和经过核验的版本，经面板授权及 MFA 检查，由后台独立签发并投递。手工授权部署由原发起运维员上传签名请求和任务后投递。两种流程均可通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 在面板显示为「待对账」，后续序号暂时阻塞。[签发配置](./phase-3-approval.md)
 
 ### 远程安装对账
 
@@ -115,7 +115,7 @@ runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xra
 ## 6. 远程启停
 
 1. 在已启用远程 Xray 的测试节点部署支持启停的 Master、签发工具、Agent、Helper 和节点端 `mcui-xray`。Helper 和本地工具需同时支持启停事务凭证。旧 Agent 不会领取启停任务。
-2. 用 `mcui-xray status` 核对节点已提交版本和 SHA-256。节点详情的「Xray 远程管理」中选择「启动」或「停止」，填写该版本、节点架构与摘要。按[授权与签发](./phase-3-approval.md)完成 MFA、签发和投递。
+2. 在节点详情的「Xray 远程管理」中选择「启动」或「停止」。单管理员面板从节点心跳读取已提交的版本、架构和 SHA-256。手工签发流程需要用 `mcui-xray status` 核对该版本与摘要并填写提案。[授权与签发](./phase-3-approval.md)
 3. 刷新节点详情查看任务结果。启动确认 `mcui-xray.service` 持续运行及主 PID 稳定，停止确认服务处于 `inactive/dead` 且主 PID 为 0。Helper 用同一租约复验精确目标，只控制固定服务。启停使用节点现有制品。
 4. 中断时沿用远程安装的对账规则。已提交或已回滚的原任务可补报，证据不足时保留待对账。停止会改变持久化运行意图，节点开机恢复后仍保持停止。
 
@@ -123,5 +123,5 @@ runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xra
 
 1. 在已启用远程 Xray 的测试节点部署支持版本切换和卸载的 Master、签发工具、Agent、Helper 和本地 `mcui-xray`。升级与降级使用单签名制品清单。旧 Agent 不会领取这些任务。
 2. 升级或降级前，用 `mcui-xray status` 核对已安装版本和 SHA-256，并核对目标制品档案的版本、架构、摘要及签名清单版本。面板提交的提案同时绑定当前和目标版本。升级要求目标更高，降级要求目标更低。
-3. 按[授权与签发](./phase-3-approval.md)发起、签发和投递。降级对话框显示当前与目标版本及摘要。卸载对话框显示将移除的版本、节点和摘要。两项操作分别确认。
+3. 单管理员面板从当前已验签清单筛选目标版本并请求后台签发。卸载绑定节点已提交的版本和摘要。降级与卸载须分别确认并提供当前 MFA。[授权与签发](./phase-3-approval.md)
 4. 刷新面板结果。升级或降级先预检候选，再按原运行意图提交切换。候选启动失败时，Helper 停止候选，清除已无主进程的 unit 失败状态，并恢复上一可用版本和运行意图。卸载确认服务已停止并清理受管版本，保留账本和签名清单状态。任务待对账时按第 3 节核验节点状态。
