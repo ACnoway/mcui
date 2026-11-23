@@ -315,5 +315,8 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "node_id": node.ID, "inventory": "v1"})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok", "node_id": node.ID, "inventory": "v1",
+		"xray_plan": "v1", "xray_draft": node.XrayDraft,
+	})
 }

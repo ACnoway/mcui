@@ -32,6 +32,7 @@ type InstallTask struct {
 	NotBefore, ExpiresAt                     time.Time
 	SignedManifest                           bool
 	Config                                   xrayconfig.Reference
+	Plan                                     string
 }
 
 func IsControlOperation(operation string) bool {
@@ -110,7 +111,7 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 		Sequence: wire.Sequence, Operation: wire.Operation, Version: payload.Version, ManifestVersion: payload.ManifestVersion,
 		CurrentVersion: payload.CurrentVersion, CurrentSHA256: payload.CurrentSHA256,
 		Architecture: payload.Architecture, SHA256: payload.SHA256, NotBefore: before, ExpiresAt: expires, SignedManifest: signedManifest,
-		Config: config,
+		Config: config, Plan: payload.Plan,
 	}, nil
 }
 
@@ -119,7 +120,7 @@ func (t InstallTask) Matches(p Proposal, id string) bool {
 		p.Sequence == t.Sequence && p.Operation == t.Operation && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
 		p.CurrentVersion == t.CurrentVersion && p.CurrentSHA256 == t.CurrentSHA256 &&
 		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation) || p.Operation == xrayconfig.Operation) &&
-		t.Config == p.Config &&
+		t.Config == p.Config && t.Plan == p.Plan &&
 		p.Architecture == t.Architecture && p.SHA256 == t.SHA256 &&
 		t.NotBefore.Unix() >= p.CreatedAt && t.ExpiresAt.Unix() <= p.ExpiresAt
 }

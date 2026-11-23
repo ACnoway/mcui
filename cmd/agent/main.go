@@ -180,7 +180,7 @@ func main() {
 			}
 			client.EnableXrayInstalls(signedManifest)
 			if reader, ok := executor.(interface {
-				ReadXrayInventory(context.Context, string) (*lifecycleauth.XrayInventory, error)
+				ReadXrayInventory(context.Context, string, *string) (*lifecycleauth.XrayInventory, error)
 			}); signedManifest && ok {
 				client.SetXrayInventory(reader.ReadXrayInventory)
 			}

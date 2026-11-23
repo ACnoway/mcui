@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ACnoway/mcui/internal/runtimehealth"
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,6 +29,7 @@ type socketRequest struct {
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 	Probe            bool            `json:"probe,omitempty"`
 	XrayInventory    bool            `json:"xray_inventory,omitempty"`
+	XrayPlan         *string         `json:"xray_plan,omitempty"`
 }
 
 type socketResponse struct {
@@ -137,6 +139,9 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 	if decoder.Decode(&trailing) != io.EOF {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
+	if request.XrayPlan != nil && (!request.XrayInventory || len(*request.XrayPlan) > xrayconfig.MaxPlanSize) {
+		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
+	}
 	if request.Probe || request.XrayInventory {
 		if (request.Probe && request.XrayInventory) || len(request.Task) != 0 || request.LeaseID != "" || request.ReconcileInstall || h.authorizePeer(conn) != nil {
 			return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
@@ -147,7 +152,7 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 			if install == nil || install.Inventory == nil {
 				return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 			}
-			inventory, err := install.Inventory()
+			inventory, err := install.Inventory(request.XrayPlan)
 			if err != nil || !inventory.Valid() {
 				return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 			}

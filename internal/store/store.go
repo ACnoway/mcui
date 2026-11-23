@@ -105,6 +105,7 @@ type Node struct {
 	InstallCodeHash      string                       `json:"install_code_hash,omitempty"`
 	InstallCodeExpiresAt int64                        `json:"install_code_expires_at,omitempty"`
 	Inventory            *lifecycleauth.NodeInventory `json:"inventory,omitempty"`
+	XrayDraft            string                       `json:"xray_draft,omitempty"`
 }
 
 type Session struct {

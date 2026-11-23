@@ -56,7 +56,7 @@ type XrayInstallConfig struct {
 	Key       lifecycleauth.InstallKey
 	Apply     func(context.Context, lifecycleauth.InstallTask, string, func(context.Context) error) (string, error)
 	Reconcile func(context.Context, lifecycleauth.InstallTask, string) (string, error)
-	Inventory func() (lifecycleauth.XrayInventory, error)
+	Inventory func(*string) (lifecycleauth.XrayInventory, error)
 }
 type Helper struct {
 	dir *os.File

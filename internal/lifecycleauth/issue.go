@@ -22,6 +22,7 @@ type installPayload struct {
 	CurrentSHA256   string         `json:"current_sha256,omitempty"`
 	Port            int            `json:"port,omitempty"`
 	Config          configMetadata `json:"config,omitzero"`
+	Plan            string         `json:"plan,omitempty"`
 }
 
 type configMetadata struct {
@@ -125,7 +126,7 @@ func expectedInstallTask(request Request, requestID string) installTask {
 	switch {
 	case p.Operation == xrayconfig.Operation:
 		payload.Architecture, payload.SHA256, payload.ManifestVersion = p.Architecture, p.SHA256, p.ManifestVersion
-		payload.Port = p.Config.Port
+		payload.Port, payload.Plan = p.Config.Port, p.Plan
 		payload.Config = configMetadata{
 			SchemaVersion: 1, NodeID: p.NodeID, Core: p.Core, CoreVersion: p.Version, Revision: p.Sequence,
 			ContentSHA256: p.Config.SHA256, ContentSize: p.Config.Size, IssuedAt: issued, NotBefore: issued, ExpiresAt: expires,

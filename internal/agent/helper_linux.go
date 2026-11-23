@@ -29,10 +29,14 @@ type helperSocketRequest struct {
 	ReconcileInstall bool            `json:"reconcile_install,omitempty"`
 	Probe            bool            `json:"probe,omitempty"`
 	XrayInventory    bool            `json:"xray_inventory,omitempty"`
+	XrayPlan         *string         `json:"xray_plan,omitempty"`
 }
 
-func (e *unixStatusExecutor) ReadXrayInventory(ctx context.Context, node string) (*lifecycleauth.XrayInventory, error) {
-	result, err := e.execute(ctx, helperSocketRequest{XrayInventory: true}, time.Second)
+func (e *unixStatusExecutor) ReadXrayInventory(ctx context.Context, node string, draft *string) (*lifecycleauth.XrayInventory, error) {
+	result, err := e.execute(ctx, helperSocketRequest{XrayInventory: true, XrayPlan: draft}, time.Second)
+	if err != nil && draft != nil {
+		result, err = e.execute(ctx, helperSocketRequest{XrayInventory: true}, time.Second)
+	}
 	if err != nil {
 		return nil, err
 	}

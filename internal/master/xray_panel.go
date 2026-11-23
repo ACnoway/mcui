@@ -113,12 +113,87 @@ func panelInventory(node store.Node, now time.Time) (lifecycleauth.NodeInventory
 		return lifecycleauth.NodeInventory{}, "", errXrayInventory
 	}
 	raw, _ := json.Marshal(i)
-	return *i, hash(node.ID + ":" + string(raw)), nil
+	return *i, hash(node.ID + ":" + string(raw) + ":" + node.XrayDraft), nil
+}
+
+func xrayDraftPreviewed(i *lifecycleauth.XrayInventory, draft string) bool {
+	return i.Catalog != nil && draft != "" && i.Preview == xrayconfig.PlanDigest(draft)
+}
+
+func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
+	return i.Candidate.Valid() && i.Candidate != i.Config && (i.Catalog == nil || xrayDraftPreviewed(i, draft))
+}
+
+func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		State string          `json:"state"`
+		Plan  xrayconfig.Plan `json:"plan"`
+	}
+	if readJSON(r, &in) != nil || len(in.State) != 64 || !in.Plan.Valid() {
+		http.Error(w, "invalid Xray inbound draft", http.StatusBadRequest)
+		return
+	}
+	s.withTaskHTTP(w, r, func(w http.ResponseWriter) {
+		ctx, ok := s.panelXrayAuth(w, r, nil)
+		if !ok {
+			return
+		}
+		if !csrfOK(r, ctx) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		now, err := s.taskRuntime.currentTime()
+		if err != nil {
+			http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		err = s.store.Update(func(st *store.State) error {
+			p := lifecycleauth.Proposal{NodeID: r.PathValue("node"), RequesterID: ctx.Admin.ID}
+			if !s.panelXrayScope(st, p) {
+				return errXrayInstallScope
+			}
+			node := st.Nodes[p.NodeID]
+			inventory, fingerprint, err := panelInventory(node, now)
+			if err != nil || inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.Allows(in.Plan) {
+				return errXrayInventory
+			}
+			draft := in.Plan.Encode()
+			if draft == node.XrayDraft {
+				return nil
+			}
+			if fingerprint != in.State {
+				return errXrayInventory
+			}
+			for _, record := range st.XrayInstalls {
+				if !record.Panel || record.Dispatched {
+					continue
+				}
+				prior, err := lifecycleauth.ParseProposal(record.Proposal)
+				if err != nil {
+					return err
+				}
+				if prior.NodeID == p.NodeID && prior.Operation == xrayconfig.Operation && prior.ExpiresAt > now.Unix() {
+					return errXrayInstallReserved
+				}
+			}
+			node.XrayDraft = draft
+			st.Nodes[p.NodeID] = node
+			s.appendAudit(st, store.Audit{At: now.Unix(), Actor: p.RequesterID, Action: "xray.config.draft",
+				ResourceType: "node", Resource: p.NodeID, NodeID: p.NodeID, Outcome: "saved"})
+			return nil
+		})
+		if err != nil {
+			writePanelXrayError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+	})
 }
 
 func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	var inventory lifecycleauth.NodeInventory
 	var fingerprint string
+	var draft string
 	if !s.withTaskHTTP(w, r, func(w http.ResponseWriter) {
 		ctx, ok := s.panelXrayAuth(w, r, nil)
 		if !ok {
@@ -135,7 +210,9 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 				return errXrayInstallScope
 			}
 			var err error
-			inventory, fingerprint, err = panelInventory(st.Nodes[p.NodeID], now)
+			node := st.Nodes[p.NodeID]
+			draft = node.XrayDraft
+			inventory, fingerprint, err = panelInventory(node, now)
 			return err
 		})
 		if err != nil {
@@ -151,18 +228,20 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		for _, a := range manifest.Artifacts {
 			if a.Component == "xray" && a.Architecture == inventory.Architecture {
 				versions = append(versions, a.Version)
-				if a.Version == inventory.Xray.Version && a.SHA256 == inventory.Xray.SHA256 && inventory.Xray.Candidate.Valid() &&
-					inventory.Xray.Candidate != inventory.Xray.Config {
+				if a.Version == inventory.Xray.Version && a.SHA256 == inventory.Xray.SHA256 && xrayCandidate(inventory.Xray, draft) {
 					configReady = true
 				}
 			}
 		}
 		sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
 	}
+	plan, _ := xrayconfig.ParsePlan(draft)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
 		"versions": versions, "catalog_version": manifest.ManifestVersion,
-		"config_ready": configReady,
+		"config_ready":    configReady,
+		"draft":           plan,
+		"draft_previewed": xrayDraftPreviewed(inventory.Xray, draft),
 	})
 }
 
@@ -299,7 +378,8 @@ func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest
 			*p = prior
 			return nil
 		}
-		i, fingerprint, err := panelInventory(st.Nodes[p.NodeID], now)
+		node := st.Nodes[p.NodeID]
+		i, fingerprint, err := panelInventory(node, now)
 		if err != nil || fingerprint != in.State {
 			return errXrayInventory
 		}
@@ -349,11 +429,14 @@ func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest
 				p.CurrentVersion, p.CurrentSHA256 = i.Xray.Version, i.Xray.SHA256
 			}
 			if p.Operation == xrayconfig.Operation {
-				if p.Version != i.Xray.Version || p.SHA256 != i.Xray.SHA256 || !i.Xray.Candidate.Valid() ||
-					i.Xray.Candidate == i.Xray.Config || p.Sequence <= i.Xray.ConfigRevision {
+				if p.Version != i.Xray.Version || p.SHA256 != i.Xray.SHA256 || !xrayCandidate(i.Xray, node.XrayDraft) ||
+					p.Sequence <= i.Xray.ConfigRevision {
 					return errXrayInventory
 				}
 				p.Config = i.Xray.Candidate
+				if i.Xray.Catalog != nil {
+					p.Plan = node.XrayDraft
+				}
 			}
 		}
 		if _, _, err := s.taskRuntime.XrayInstallPolicy.PanelEvidence(*p); err != nil {

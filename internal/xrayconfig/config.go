@@ -1,4 +1,4 @@
-// Package xrayconfig defines the first node-local Xray configuration template.
+// Package xrayconfig defines the controlled SOCKS5 Xray configuration.
 package xrayconfig
 
 import (
@@ -106,31 +106,6 @@ func (p Policy) Render(releaseSHA256 string) ([]byte, Reference, error) {
 		!publicIPv4(p.DestinationIP) || !security.ValidNodeSecret(p.Password) {
 		return nil, Reference{}, errors.New("invalid node-local Xray inbound policy")
 	}
-	config := map[string]any{
-		"log": map[string]string{"loglevel": "none"},
-		"inbounds": []any{map[string]any{
-			"listen": "127.0.0.1", "port": p.ListenPort, "protocol": "socks", "tag": "inbound",
-			"settings": map[string]any{
-				"auth": "password", "udp": false,
-				"users": []map[string]string{{"user": Username, "pass": p.Password}},
-			},
-		}},
-		"outbounds": []map[string]string{
-			{"protocol": "blackhole", "tag": "deny"},
-			{"protocol": "freedom", "tag": "allowed"},
-		},
-		"routing": map[string]any{
-			"domainStrategy": "AsIs",
-			"rules": []any{map[string]any{
-				"inboundTag": []string{"inbound"}, "network": "tcp",
-				"ip": []string{p.DestinationIP + "/32"}, "port": p.DestinationPort, "outboundTag": "allowed",
-			}},
-		},
-	}
-	data, err := json.Marshal(config)
-	if err != nil {
-		return nil, Reference{}, err
-	}
-	sum := sha256.Sum256(data)
-	return data, Reference{Port: p.ListenPort, Size: len(data), SHA256: hex.EncodeToString(sum[:])}, nil
+	inbound := socksInbound(p.ListenPort, "inbound", []map[string]string{{"user": Username, "pass": p.Password}})
+	return render([]any{inbound}, []string{"inbound"}, p.ListenPort, p.DestinationIP, p.DestinationPort)
 }

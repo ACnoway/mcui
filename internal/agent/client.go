@@ -32,10 +32,11 @@ type Client struct {
 	taskSequenceProvider func() (int64, error)
 	xrayInstallMode      string
 	inventorySupported   bool
-	readXrayInventory    func(context.Context, string) (*lifecycleauth.XrayInventory, error)
+	xrayDraft            *string
+	readXrayInventory    func(context.Context, string, *string) (*lifecycleauth.XrayInventory, error)
 }
 
-func (c *Client) SetXrayInventory(reader func(context.Context, string) (*lifecycleauth.XrayInventory, error)) {
+func (c *Client) SetXrayInventory(reader func(context.Context, string, *string) (*lifecycleauth.XrayInventory, error)) {
 	c.readXrayInventory = reader
 }
 
@@ -253,7 +254,7 @@ func (c *Client) heartbeat() (localState, error) {
 	if c.inventorySupported && runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") {
 		inventory := lifecycleauth.NodeInventory{Architecture: runtime.GOARCH}
 		if c.readXrayInventory != nil {
-			inventory.Xray, _ = c.readXrayInventory(context.Background(), state.NodeID)
+			inventory.Xray, _ = c.readXrayInventory(context.Background(), state.NodeID, c.xrayDraft)
 		}
 		body["inventory"] = inventory
 	}
@@ -271,11 +272,17 @@ func (c *Client) heartbeat() (localState, error) {
 	var reply struct {
 		NodeID    string `json:"node_id"`
 		Inventory string `json:"inventory"`
+		XrayPlan  string `json:"xray_plan"`
+		XrayDraft string `json:"xray_draft"`
 	}
 	if json.Unmarshal(raw, &reply) != nil || reply.NodeID != state.NodeID {
 		return localState{}, errors.New("Master returned a mismatched heartbeat identity")
 	}
 	c.inventorySupported = reply.Inventory == "v1"
+	c.xrayDraft = nil
+	if reply.XrayPlan == "v1" {
+		c.xrayDraft = &reply.XrayDraft
+	}
 	return state, nil
 }
 

@@ -438,7 +438,7 @@ func TestControlledConfigKeepsLastGoodBytesOnStartFailure(t *testing.T) {
 	calls := 0
 	authorize := func(context.Context) error { calls++; return nil }
 	hash := strings.Repeat("a", 64)
-	if err := r.configure(ctx, path, release, first, 2, hash, authorize); err != nil || calls != 2 {
+	if err := r.configure(ctx, path, release, first, "", 2, hash, authorize); err != nil || calls != 2 {
 		t.Fatalf("apply controlled config: %v, authorization calls %d", err, calls)
 	}
 	if state := readState(t, r); state.Current.Config != first || state.Current.Revision != 2 {
@@ -447,12 +447,12 @@ func TestControlledConfigKeepsLastGoodBytesOnStartFailure(t *testing.T) {
 	policy.ListenPort++
 	_, second := savePolicy()
 	calls = 0
-	if err := r.configure(ctx, path, release, first, 3, hash, authorize); err == nil || calls != 0 {
+	if err := r.configure(ctx, path, release, first, "", 3, hash, authorize); err == nil || calls != 0 {
 		t.Fatal("policy drift did not prevent preflight")
 	}
 	svc.failedConfig = `"port":1081`
 	hash = strings.Repeat("b", 64)
-	if err := r.configure(ctx, path, release, second, 3, hash, authorize); !errors.Is(err, errRollback) {
+	if err := r.configure(ctx, path, release, second, "", 3, hash, authorize); !errors.Is(err, errRollback) {
 		t.Fatalf("failed configuration did not roll back: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(r.dir, "control", "runtime-config.json"))
@@ -463,8 +463,73 @@ func TestControlledConfigKeepsLastGoodBytesOnStartFailure(t *testing.T) {
 	if outcome, err := r.ReconcileTask(ctx, Configure, release, hash); err != nil || outcome != "ROLLED_BACK" {
 		t.Fatalf("reconcile configuration: %s, %v", outcome, err)
 	}
-	if err := r.configure(ctx, path, release, second, 3, hash, authorize); err == nil {
+	if err := r.configure(ctx, path, release, second, "", 3, hash, authorize); err == nil {
 		t.Fatal("accepted a consumed configuration revision")
+	}
+}
+
+func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
+	if runtime.GOARCH != xrayconfig.Architecture {
+		t.Skip("managed Xray configuration requires amd64")
+	}
+	ctx := t.Context()
+	svc := &fakeService{}
+	r := newRuntime(t, svc)
+	svc.dir = r.dir
+	release := stageFixture(t, r, xrayconfig.Version)
+	applyFixture(t, r, Install, selection{Release: release, Running: true})
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "controlled-inbound.json")
+	catalog := xrayconfig.LocalCatalog{
+		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
+		Credentials: map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
+	}
+	save := func() {
+		t.Helper()
+		raw, err := json.Marshal(catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, catalogFilename), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save()
+	plan := xrayconfig.Plan{{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Users: []string{"bob"}}}
+	data, ref, err := readCandidate(path, release, plan.Encode())
+	if err != nil || !ref.Matches(data) {
+		t.Fatalf("preview managed configuration: %v", err)
+	}
+	approve := func(context.Context) error { return nil }
+	hash := strings.Repeat("a", 64)
+	if err := r.configure(ctx, path, release, ref, plan.Encode(), 2, hash, approve); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Credentials["bob"] = strings.Repeat("I", 43)
+	save()
+	if err := r.configure(ctx, path, release, ref, plan.Encode(), 3, hash, approve); err == nil {
+		t.Fatal("applied a stale credential preview")
+	}
+	state := readState(t, r)
+	if state.Current.Config != ref || state.Current.Revision != 2 || !svc.running {
+		t.Fatal("stale preview changed committed state")
+	}
+	empty := xrayconfig.Plan{}.Encode()
+	_, disabled, err := readCandidate(path, release, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash = strings.Repeat("b", 64)
+	if err := r.configure(ctx, path, release, disabled, empty, 3, hash, approve); err != nil {
+		t.Fatal(err)
+	}
+	state = readState(t, r)
+	view := r.Inventory(state, "", true)
+	if state.Current.Config != disabled || state.Current.Revision != 3 || view.Applied == nil || len(*view.Applied) != 0 {
+		t.Fatalf("empty plan did not commit as an explicit revocation: %+v", view)
 	}
 }
 

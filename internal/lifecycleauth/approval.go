@@ -63,6 +63,7 @@ type Proposal struct {
 	CreatedAt       int64                `json:"created_at"`
 	ExpiresAt       int64                `json:"expires_at"`
 	Config          xrayconfig.Reference `json:"config,omitzero"`
+	Plan            string               `json:"plan,omitempty"`
 }
 
 type Request struct {
@@ -195,7 +196,7 @@ func (p Proposal) valid() bool {
 func (p Proposal) validOperation() bool {
 	noCurrent := p.CurrentVersion == "" && p.CurrentSHA256 == ""
 	validManifest := p.ManifestVersion >= 1 && p.ManifestVersion <= maxSequence
-	if p.Operation != xrayconfig.Operation && p.Config != (xrayconfig.Reference{}) {
+	if p.Operation != xrayconfig.Operation && (p.Config != (xrayconfig.Reference{}) || p.Plan != "") {
 		return false
 	}
 	switch p.Operation {
@@ -209,6 +210,11 @@ func (p Proposal) validOperation() bool {
 	case "core.uninstall":
 		return p.SchemaVersion == ChangeProposalVersion && noCurrent && p.ManifestVersion == 0
 	case xrayconfig.Operation:
+		if p.Plan != "" {
+			if _, err := xrayconfig.ParsePlan(p.Plan); err != nil {
+				return false
+			}
+		}
 		return p.SchemaVersion == ConfigProposalVersion && noCurrent && validManifest &&
 			p.Version == xrayconfig.Version && p.Architecture == xrayconfig.Architecture && p.Config.Valid()
 	default:

@@ -163,7 +163,7 @@ func main() {
 				defer runtime.Close()
 				release := xrayruntime.Release{Version: task.Version, SHA256: task.SHA256}
 				if task.Operation == xrayconfig.Operation {
-					return runtime.ConfigureAuthorized(ctx, release, task.Config, task.Sequence, hash, func(ctx context.Context) error {
+					return runtime.ConfigureAuthorized(ctx, release, task.Config, task.Plan, task.Sequence, hash, func(ctx context.Context) error {
 						if err := authorize(ctx); err != nil {
 							return err
 						}
@@ -234,7 +234,7 @@ func main() {
 	}
 }
 
-func readXrayInventory() (lifecycleauth.XrayInventory, error) {
+func readXrayInventory(encoded *string) (lifecycleauth.XrayInventory, error) {
 	runtime, err := xrayruntime.Open(false)
 	if err != nil {
 		return lifecycleauth.XrayInventory{}, err
@@ -247,10 +247,10 @@ func readXrayInventory() (lifecycleauth.XrayInventory, error) {
 	if state.Pending != nil {
 		return lifecycleauth.XrayInventory{}, errors.New("Xray lifecycle requires reconciliation")
 	}
-	return lifecycleauth.XrayInventory{
-		Version: state.Current.Release.Version, SHA256: state.Current.Release.SHA256, Running: state.Current.Running,
-		Candidate: runtime.ConfigCandidate(state), Config: state.Current.Config, ConfigRevision: state.Current.Revision,
-	}, nil
+	if encoded == nil {
+		return runtime.Inventory(state, "", false), nil
+	}
+	return runtime.Inventory(state, *encoded, true), nil
 }
 
 func ensureStateDirectory(path string) error {

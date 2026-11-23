@@ -66,6 +66,7 @@ type XrayDeliveryCapabilities struct {
 	Control     bool
 	Change      bool
 	Config      bool
+	Plan        bool
 }
 
 func (c XrayDeliveryCapabilities) supports(operation string) bool {
@@ -84,6 +85,10 @@ func (c XrayDeliveryCapabilities) supports(operation string) bool {
 	default:
 		return false
 	}
+}
+
+func (c XrayDeliveryCapabilities) supportsTask(task lifecycleauth.InstallTask) bool {
+	return c.supports(task.Operation) && (task.Plan == "" || c.Plan)
 }
 
 // Ack is a persisted observation from an externally authenticated node. Result
@@ -733,7 +738,7 @@ func (s *Store) recoverExpectedSequence(tx *sql.Tx, nodeID string, expected int6
 				return Delivery{}, false, err
 			}
 			if task, err := installKey.Verify(raw); err == nil && task.NodeID == nodeID && task.Sequence == activeSequence.Int64 &&
-				capabilities.supports(task.Operation) {
+				capabilities.supportsTask(task) {
 				return Delivery{}, false, nil // Agent can replay its durable terminal ACK.
 			}
 		}
@@ -893,7 +898,7 @@ func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed2
 			return body, ErrNotFound
 		}
 		if task, err := installKey.Verify(raw); err == nil {
-			if !capabilities.supports(task.Operation) {
+			if !capabilities.supportsTask(task) {
 				return body, ErrNotFound
 			}
 			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: task.Operation, ExpiresAt: task.ExpiresAt, SignedManifest: task.SignedManifest}, nil

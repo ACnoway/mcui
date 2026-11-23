@@ -68,7 +68,7 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace,
 			loopback = loopback || entry == "127.0.0.1/32"
 			endpoint = endpoint || entry == destination
 		}
-		if !loopback || !endpoint {
+		if !loopback || (destination != "" && !endpoint) {
 			return errors.New("Xray service lacks IP allowances for the approved route")
 		}
 	}

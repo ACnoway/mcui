@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 type Kind string
@@ -361,6 +363,9 @@ func validateTaskPayload(operation string, value any) error {
 	case "config.apply":
 		if localConfig {
 			expected = append(expected, "version", "architecture", "sha256", "manifest_version", "port", "config")
+			if _, present := payload["plan"]; present {
+				expected = append(expected, "plan")
+			}
 		} else {
 			expected = append(expected, "revision", "content_sha256", "core_version")
 		}
@@ -401,6 +406,12 @@ func validateTaskPayload(operation string, value any) error {
 		return validInteger(payload, "manifest_version", 1, maxSafeInteger)
 	case "config.apply":
 		if localConfig {
+			if value, present := payload["plan"]; present {
+				text, ok := value.(string)
+				if _, err := xrayconfig.ParsePlan(text); !ok || err != nil {
+					return errors.New("invalid Xray inbound plan")
+				}
+			}
 			if payload["core"] != "xray" || (payload["architecture"] != "amd64" && payload["architecture"] != "arm64") {
 				return errors.New("invalid Xray configuration release identity")
 			}

@@ -12,10 +12,12 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
 const inboundPolicyPath = "/etc/mcui-xray/controlled-inbound.json"
+const catalogFilename = "managed-inbounds.json"
 
 func (s selection) validConfig() bool {
 	if s.Config == (xrayconfig.Reference{}) {
@@ -25,16 +27,76 @@ func (s selection) validConfig() bool {
 		s.Revision > 0 && s.Revision <= (1<<53)-1 && s.Config.Valid()
 }
 
-func (r *Runtime) ConfigCandidate(state Status) xrayconfig.Reference {
-	_, ref, _ := readInbound(inboundPolicyPath, state.Current.Release)
-	return ref
+func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycleauth.XrayInventory {
+	current := state.Current
+	view := lifecycleauth.XrayInventory{
+		Version: current.Release.Version, SHA256: current.Release.SHA256, Running: current.Running,
+		Config: current.Config, ConfigRevision: current.Revision, PlanSupported: managed,
+	}
+	catalog, err := readCatalog(inboundPolicyPath, current.Release)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		_, view.Candidate, _ = readInbound(inboundPolicyPath, current.Release)
+	case err == nil && managed:
+		public, _ := catalog.Public(current.Release.SHA256)
+		view.Catalog = &public
+		if plan, err := xrayconfig.ParsePlan(encoded); err == nil {
+			_, view.Candidate, _ = catalog.Render(current.Release.SHA256, plan)
+			view.Preview = xrayconfig.PlanDigest(encoded)
+		}
+	}
+	if !managed || current.Revision == 0 {
+		return view
+	}
+	if data, err := r.savedConfig(current.Config); err == nil {
+		var config struct {
+			Inbounds []struct {
+				Port     int `json:"port"`
+				Settings struct {
+					Users []struct {
+						User string `json:"user"`
+					} `json:"users"`
+				} `json:"settings"`
+			} `json:"inbounds"`
+		}
+		if json.Unmarshal(data, &config) == nil {
+			plan := make(xrayconfig.Plan, 0, len(config.Inbounds))
+			for _, in := range config.Inbounds {
+				entry := xrayconfig.Inbound{Port: in.Port}
+				for _, user := range in.Settings.Users {
+					entry.Users = append(entry.Users, user.User)
+				}
+				plan = append(plan, entry)
+			}
+			if plan.Valid() {
+				view.Applied = &plan
+			}
+		}
+	}
+	return view
+}
+
+func checkPolicyDirectory(path string, release Release) error {
+	if runtime.GOARCH != xrayconfig.Architecture || release.Version != xrayconfig.Version || !release.valid() {
+		return errors.New("Xray release has no approved inbound template")
+	}
+	return ownDirectory(filepath.Dir(path), 0700, false)
+}
+
+func readCatalog(path string, release Release) (xrayconfig.LocalCatalog, error) {
+	var catalog xrayconfig.LocalCatalog
+	if err := checkPolicyDirectory(path, release); err != nil {
+		return catalog, err
+	}
+	if err := readJSON(filepath.Join(filepath.Dir(path), catalogFilename), 0600, &catalog); err != nil {
+		return catalog, err
+	}
+	_, err := catalog.Public(release.SHA256)
+	return catalog, err
 }
 
 func readInbound(path string, release Release) ([]byte, xrayconfig.Reference, error) {
-	if runtime.GOARCH != xrayconfig.Architecture || release.Version != xrayconfig.Version || !release.valid() {
-		return nil, xrayconfig.Reference{}, errors.New("Xray release has no approved inbound template")
-	}
-	if err := ownDirectory(filepath.Dir(path), 0700, false); err != nil {
+	if err := checkPolicyDirectory(path, release); err != nil {
 		return nil, xrayconfig.Reference{}, err
 	}
 	var policy xrayconfig.Policy
@@ -44,11 +106,23 @@ func readInbound(path string, release Release) ([]byte, xrayconfig.Reference, er
 	return policy.Render(release.SHA256)
 }
 
-func (r *Runtime) ConfigureAuthorized(ctx context.Context, release Release, ref xrayconfig.Reference, revision int64, hash string, authorize func(context.Context) error) (string, error) {
-	return taskOutcome(r.configure(ctx, inboundPolicyPath, release, ref, revision, hash, authorize))
+func readCandidate(path string, release Release, encoded string) ([]byte, xrayconfig.Reference, error) {
+	catalog, err := readCatalog(path, release)
+	if encoded == "" && errors.Is(err, os.ErrNotExist) {
+		return readInbound(path, release)
+	}
+	plan, planErr := xrayconfig.ParsePlan(encoded)
+	if err != nil || planErr != nil {
+		return nil, xrayconfig.Reference{}, errors.New("node-local Xray catalog or plan is unavailable")
+	}
+	return catalog.Render(release.SHA256, plan)
 }
 
-func (r *Runtime) configure(ctx context.Context, path string, release Release, ref xrayconfig.Reference, revision int64, hash string, authorize func(context.Context) error) error {
+func (r *Runtime) ConfigureAuthorized(ctx context.Context, release Release, ref xrayconfig.Reference, encoded string, revision int64, hash string, authorize func(context.Context) error) (string, error) {
+	return taskOutcome(r.configure(ctx, inboundPolicyPath, release, ref, encoded, revision, hash, authorize))
+}
+
+func (r *Runtime) configure(ctx context.Context, path string, release Release, ref xrayconfig.Reference, encoded string, revision int64, hash string, authorize func(context.Context) error) error {
 	if authorize == nil || !ref.Valid() || !validTaskHash(hash) || revision <= 0 || revision > (1<<53)-1 {
 		return errors.New("invalid Xray configuration authorization")
 	}
@@ -59,7 +133,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	if state.Current.Release != release || revision <= state.ConfigRevision {
 		return errors.New("Xray release or configuration revision changed")
 	}
-	data, candidate, err := readInbound(path, release)
+	data, candidate, err := readCandidate(path, release, encoded)
 	if err != nil || candidate != ref {
 		return errors.New("local Xray configuration differs from the approved reference")
 	}
@@ -78,7 +152,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	if err := r.writeControl(configName(ref), data); err != nil {
 		return err
 	}
-	_, candidate, err = readInbound(path, release)
+	_, candidate, err = readCandidate(path, release, encoded)
 	if err != nil || candidate != ref {
 		return errors.New("local Xray configuration changed during preflight")
 	}
@@ -98,13 +172,20 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte) error {
 		return errors.New("Xray service does not support isolated configuration")
 	}
 	var config struct {
-		Routing struct {
+		Inbounds []json.RawMessage `json:"inbounds"`
+		Routing  struct {
 			Rules []struct {
 				IP []string `json:"ip"`
 			} `json:"rules"`
 		} `json:"routing"`
 	}
-	if json.Unmarshal(data, &config) != nil || len(config.Routing.Rules) != 1 || len(config.Routing.Rules[0].IP) != 1 {
+	if json.Unmarshal(data, &config) != nil {
+		return errors.New("invalid saved Xray configuration")
+	}
+	if config.Inbounds != nil && len(config.Inbounds) == 0 && len(config.Routing.Rules) == 0 {
+		return svc.checkConfigUnits(ctx, "")
+	}
+	if len(config.Inbounds) == 0 || len(config.Routing.Rules) != 1 || len(config.Routing.Rules[0].IP) != 1 {
 		return errors.New("invalid saved Xray route")
 	}
 	return svc.checkConfigUnits(ctx, config.Routing.Rules[0].IP[0])
@@ -116,14 +197,9 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) erro
 	}
 	data := []byte(bootstrapConfig)
 	if next.Revision != 0 {
-		file, err := checkedFile(filepath.Join(r.dir, "control", configName(next.Config)), 0600, xrayconfig.MaxSize)
+		raw, err := r.savedConfig(next.Config)
 		if err != nil {
 			return err
-		}
-		raw, err := io.ReadAll(io.LimitReader(file, xrayconfig.MaxSize+1))
-		file.Close()
-		if err != nil || !next.Config.Matches(raw) {
-			return errors.New("saved Xray configuration failed its integrity check")
 		}
 		if next.Running {
 			if err := r.checkConfigUnits(ctx, raw); err != nil {
@@ -133,6 +209,19 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) erro
 		data = raw
 	}
 	return r.writeControl("runtime-config.json", data)
+}
+
+func (r *Runtime) savedConfig(ref xrayconfig.Reference) ([]byte, error) {
+	file, err := checkedFile(filepath.Join(r.dir, "control", configName(ref)), 0600, xrayconfig.MaxSize)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, xrayconfig.MaxSize+1))
+	if err != nil || !ref.Matches(raw) {
+		return nil, errors.New("saved Xray configuration failed its integrity check")
+	}
+	return raw, nil
 }
 
 func configName(ref xrayconfig.Reference) string {

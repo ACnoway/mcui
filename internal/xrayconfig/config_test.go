@@ -44,3 +44,49 @@ func TestControlledInboundPolicy(t *testing.T) {
 		t.Fatal("accepted an incorrectly encoded password")
 	}
 }
+
+func TestManagedInboundsBindGrantsAndCredentialRotation(t *testing.T) {
+	release := strings.Repeat("a", 64)
+	catalog := LocalCatalog{
+		ReleaseSHA256: release, Ports: []int{1081, 1080}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
+		Credentials: map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
+	}
+	plan := Plan{{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Users: []string{"bob"}}}
+	if got, err := ParsePlan(plan.Encode()); err != nil || got.Encode() != plan.Encode() {
+		t.Fatalf("canonical plan rejected: %v", err)
+	}
+	raw, ref, err := catalog.Render(release, plan)
+	if err != nil || ref.Port != 1080 || !ref.Matches(raw) || !strings.Contains(string(raw), `"inboundTag":["socks-1080","socks-1081"]`) {
+		t.Fatalf("managed grants failed to render: %v", err)
+	}
+	public, err := catalog.Public(release)
+	view, _ := json.Marshal(public)
+	if err != nil || strings.Contains(string(view), catalog.Credentials["alice"]) || strings.Contains(string(view), catalog.DestinationIP) {
+		t.Fatalf("unexpected public catalog: %s", view)
+	}
+	delete(catalog.Credentials, "alice")
+	if _, _, err := catalog.Render(release, plan); err == nil {
+		t.Fatal("rendered a removed credential")
+	}
+	catalog.Credentials["alice"] = strings.Repeat("I", 43)
+	if _, rotated, err := catalog.Render(release, plan); err != nil || rotated == ref {
+		t.Fatal("credential rotation did not change the approved content")
+	}
+	raw, ref, err = catalog.Render(release, Plan{})
+	if err != nil || !ref.Matches(raw) || !strings.Contains(string(raw), `"inbounds":[]`) || strings.Contains(string(raw), `"routing"`) {
+		t.Fatalf("empty plan must remove listeners and allow rules: %v", err)
+	}
+	for _, bad := range []string{
+		`null`, `[{"port":1080,"users":[]}]`, `[{"port":1080,"users":["alice","alice"]}]`,
+		`[{"port":1080,"users":["bob","alice"]}]`, `[{"port":1080,"port":1081,"users":["alice"]}]`,
+		`[{"port":1080,"users":["alice"],"destination":"1.2.3.4"}]`,
+	} {
+		if _, err := ParsePlan(bad); err == nil {
+			t.Errorf("accepted invalid plan %s", bad)
+		}
+	}
+	unknown := Plan{{Port: 1082, Users: []string{"alice"}}}
+	if _, _, err := catalog.Render(release, unknown); err == nil {
+		t.Fatal("rendered an unapproved listen port")
+	}
+}

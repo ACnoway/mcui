@@ -185,7 +185,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -242,6 +242,48 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=4&install=xray-manifest-v1", nil, true), http.StatusNoContent)
 	complete(apply.TaskID, 4, newer)
+
+	node.PlanSupported, node.Candidate = true, xrayconfig.Reference{}
+	node.Catalog = &xrayconfig.Catalog{Ports: []int{1080, 1081}, Users: []string{"alice", "bob"}}
+	node.Config, node.ConfigRevision = config, 4
+	heartbeat(&node)
+	draftPath := "https://panel.example.test" + path + "/draft"
+	plan := xrayconfig.Plan{{Port: 1081, Users: []string{"alice", "bob"}}}
+	body := map[string]any{"state": options(), "plan": plan}
+	save := func(url, csrf string) *httptest.ResponseRecorder {
+		return requestAsAdmin(t, s.Handler(), http.MethodPut, url, body, "test-session-token", csrf)
+	}
+	expect(save(draftPath, ""), http.StatusForbidden)
+	expect(save(strings.Replace(draftPath, client.nodeID, "outside-scope", 1), client.csrf), http.StatusNotFound)
+	expect(save(draftPath, client.csrf), http.StatusOK)
+	previous := body["state"]
+	body["plan"] = xrayconfig.Plan{}
+	expect(save(draftPath, client.csrf), http.StatusConflict)
+	body["state"] = options()
+	body["plan"] = xrayconfig.Plan{{Port: 1081, Users: []string{"outside"}}}
+	expect(save(draftPath, client.csrf), http.StatusConflict)
+	body["state"], body["plan"] = previous, plan
+	expect(save(draftPath, client.csrf), http.StatusOK) // Lost-response retry.
+	managed := apply
+	managed.TaskID = "managed-fixture-1234567890"
+	managed.State, managed.MFACode = options(), fmtCode(totpAt(totpKey, time.Now().Unix()/30))
+	expect(admin(http.MethodPost, managed, client.csrf), http.StatusConflict)
+	node.Candidate = xrayconfig.Reference{Port: 1081, SHA256: strings.Repeat("e", 64), Size: 420}
+	node.Preview = xrayconfig.PlanDigest(plan.Encode())
+	heartbeat(&node)
+	managed.State = options()
+	expect(admin(http.MethodPost, managed, client.csrf), http.StatusCreated)
+	signed, err = runtime.Store.GetRecord(managed.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err = policy.InstallKey().Verify(signed.Raw)
+	if err != nil || task.Sequence != 5 || task.Config != node.Candidate || task.Plan != plan.Encode() {
+		t.Fatalf("signed task did not bind plan and configuration: %+v %v", task, err)
+	}
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1", nil, true), http.StatusNoContent)
+	complete(managed.TaskID, 5, newer)
+
 	for i, operation := range []string{"core.start", "core.stop", "core.uninstall"} {
 		heartbeat(&lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256})
 		id := fmt.Sprintf("control-fixture-%010d", i)
@@ -250,7 +292,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			control.Confirm, control.MFACode = operation, fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 		}
 		expect(admin(http.MethodPost, control, client.csrf), http.StatusCreated)
-		complete(id, int64(i)+5, newer)
+		complete(id, int64(i)+6, newer)
 	}
 	if err := s.ReconcileTaskRuntime(); err != nil {
 		t.Fatal(err)

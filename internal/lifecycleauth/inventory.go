@@ -19,6 +19,10 @@ type XrayInventory struct {
 	Candidate      xrayconfig.Reference `json:"candidate,omitzero"`
 	Config         xrayconfig.Reference `json:"config,omitzero"`
 	ConfigRevision int64                `json:"config_revision,omitempty"`
+	Catalog        *xrayconfig.Catalog  `json:"catalog,omitempty"`
+	Preview        string               `json:"preview,omitempty"`
+	Applied        *xrayconfig.Plan     `json:"applied,omitempty"`
+	PlanSupported  bool                 `json:"plan_supported,omitempty"`
 }
 
 func (i NodeInventory) Valid() bool {
@@ -29,10 +33,25 @@ func (i NodeInventory) Valid() bool {
 		return true
 	}
 	return i.Xray.Valid() && (i.Architecture == xrayconfig.Architecture ||
-		(i.Xray.Candidate == (xrayconfig.Reference{}) && i.Xray.Config == (xrayconfig.Reference{})))
+		(i.Xray.Candidate == (xrayconfig.Reference{}) && i.Xray.Config == (xrayconfig.Reference{}) && i.Xray.Catalog == nil))
 }
 
 func (x XrayInventory) Valid() bool {
+	if !x.PlanSupported && (x.Catalog != nil || x.Preview != "" || x.Applied != nil) {
+		return false
+	}
+	if x.Catalog != nil {
+		if x.Version != xrayconfig.Version || !x.Catalog.Valid() ||
+			(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview)) {
+			return false
+		}
+	}
+	if x.Preview != "" && (x.Catalog == nil || !xrayconfig.ValidPlanDigest(x.Preview)) {
+		return false
+	}
+	if x.Applied != nil && (x.ConfigRevision == 0 || !x.Applied.Valid()) {
+		return false
+	}
 	if x.Candidate != (xrayconfig.Reference{}) && (x.Version != xrayconfig.Version || !x.Candidate.Valid()) {
 		return false
 	}

@@ -121,6 +121,13 @@ function vector(id, kind, body, extra = {}) {
 function buildVectors() {
   const configBytes = Buffer.from('{"inbounds":[],"outbounds":[]}', 'utf8')
   const configDigest = createHash('sha256').update(configBytes).digest('hex')
+  const timestamp = {
+    issued_at: '2026-11-16T00:00:00Z', not_before: '2026-11-16T00:00:00Z', expires_at: '2026-11-16T00:10:00Z',
+  }
+  const managedConfig = vector('config-xray-managed-4', 'config', makeObject('config', {
+    schema_version: 1, node_id: 'node-001', core: 'xray', core_version: 'v26.10.31', revision: 4,
+    content_sha256: configDigest, content_size: configBytes.length, ...timestamp,
+  }))
   const vectors = [
     vector('task-core-status', 'task', makeObject('task', {
       schema_version: 1, task_id: 'task-status-001', node_id: 'node-001', sequence: 1,
@@ -155,10 +162,21 @@ function buildVectors() {
         current_version: 'v26.11.9', current_sha256: 'b'.repeat(64),
       },
     })),
+    managedConfig,
+    vector('task-xray-managed-inbounds', 'task', makeObject('task', {
+      schema_version: 1, task_id: 'task-xray-managed-01', node_id: 'node-001', sequence: 4,
+      operation: 'config.apply', approval_id: '3'.repeat(64), ...timestamp,
+      payload: {
+        core: 'xray', version: 'v26.10.31', architecture: 'amd64', sha256: 'a'.repeat(64),
+        manifest_version: 3, port: 1080, config: parseStrict(managedConfig.input_json),
+        plan: '[{"port":1080,"users":["alice","bob"]}]',
+      },
+    })),
   ]
   const task = parseStrict(vectors[0].input_json)
   const negativeCases = [
     { id: 'tampered-node', kind: 'task', input_json: vectors[0].input_json.replace('node-001', 'node-002'), expected_reject: 'signature' },
+    { id: 'tampered-xray-grants', kind: 'task', input_json: vectors.at(-1).input_json.replace('alice', 'abby'), expected_reject: 'signature' },
     { id: 'duplicate-task-id', kind: 'task', input_json: vectors[0].input_json.replace('"task_id":"task-status-001",', '"task_id":"task-status-001","task_id":"task-status-001",'), expected_reject: 'duplicate-key' },
     { id: 'escaped-duplicate-task-id', kind: 'task', input_json: vectors[0].input_json.replace('"task_id":"task-status-001",', '"task_id":"task-status-001","task\\u005fid":"task-status-001",'), expected_reject: 'duplicate-key' },
     { id: 'unknown-field', kind: 'task', input_json: vectors[0].input_json.replace('"signature":', '"extra":"value","signature":'), expected_reject: 'schema' },
