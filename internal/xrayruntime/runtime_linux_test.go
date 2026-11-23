@@ -511,15 +511,21 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	privateKey := strings.Repeat("Q", 43)
+	realityKey, err := xrayconfig.RealityPublicKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	catalog := xrayconfig.LocalCatalog{
 		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081, 1082, 1083}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
 		Credentials:   map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
 		HTTPPorts:     []int{1081},
-		PortProtocols: map[int]string{1082: xrayconfig.VLESS, 1083: xrayconfig.Trojan},
+		PortProtocols: map[int]string{1082: xrayconfig.VLESSReality, 1083: xrayconfig.Trojan},
 		ProtocolCredentials: map[string]map[string]string{
-			xrayconfig.VLESS: {"alice": "cc2f34e1-8197-4751-b505-c27f9e2d841b"}, xrayconfig.Trojan: {"bob": strings.Repeat("M", 43)},
+			xrayconfig.VLESSReality: {"alice": "cc2f34e1-8197-4751-b505-c27f9e2d841b:0123456789abcdef"},
+			xrayconfig.Trojan:       {"bob": strings.Repeat("M", 43)},
 		},
-		TrojanTLS: identity,
+		TrojanTLS: identity, RealityPrivateKey: privateKey,
 	}
 	save := func() {
 		t.Helper()
@@ -534,7 +540,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	save()
 	plan := xrayconfig.Plan{
 		{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Protocol: xrayconfig.HTTP, Users: []string{"bob"}},
-		{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"alice"}},
+		{Port: 1082, Protocol: xrayconfig.VLESSReality, RealityPublicKey: realityKey, Users: []string{"alice"}},
 		{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: certDigest, Users: []string{"bob"}},
 	}
 	data, ref, err := readCandidate(path, release, plan.Encode())

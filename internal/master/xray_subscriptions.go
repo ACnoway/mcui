@@ -21,10 +21,11 @@ const xraySubscriptionLifetime = 30 * 24 * time.Hour
 var errSubscriptionUnavailable = errors.New("an applied Xray authorization is unavailable")
 
 type subscriptionGrant struct {
-	plan     xrayconfig.Plan
-	revision int64
-	sha256   string
-	trojan   *xrayconfig.TrojanTrust
+	plan             xrayconfig.Plan
+	revision         int64
+	sha256           string
+	trojan           *xrayconfig.TrojanTrust
+	realityPublicKey string
 }
 
 func (g subscriptionGrant) ports(user string) (ports, httpPorts []int, protocols map[int]string) {
@@ -69,7 +70,10 @@ func (s *Server) xraySubscriptionGrant(ctx context.Context, node store.Node, now
 		task.Sequence != i.Xray.ConfigRevision || task.Config != i.Xray.Config || task.Plan != i.Xray.Applied.Encode() {
 		return subscriptionGrant{}, errSubscriptionUnavailable
 	}
-	return subscriptionGrant{plan: *i.Xray.Applied, revision: task.Sequence, sha256: task.Config.SHA256, trojan: i.Xray.Catalog.TrojanTrust}, nil
+	return subscriptionGrant{
+		plan: *i.Xray.Applied, revision: task.Sequence, sha256: task.Config.SHA256,
+		trojan: i.Xray.Catalog.TrojanTrust, realityPublicKey: i.Xray.Catalog.RealityPublicKey,
+	}, nil
 }
 
 type xraySubscriptionView struct {
@@ -287,9 +291,11 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 			result["schema_version"] = 3
 			result["port_protocols"] = protocols
 			for _, protocol := range protocols {
-				if protocol == xrayconfig.Trojan {
+				switch protocol {
+				case xrayconfig.Trojan:
 					result["trojan_trust"] = grant.trojan
-					break
+				case xrayconfig.VLESSReality:
+					result["reality_public_key"] = grant.realityPublicKey
 				}
 			}
 		} else if len(httpPorts) > 0 {

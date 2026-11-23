@@ -28,10 +28,11 @@ func ValidUsername(username string) bool {
 }
 
 type Inbound struct {
-	Port          int      `json:"port"`
-	Protocol      string   `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
-	TLSCertSHA256 string   `json:"tls_cert_sha256,omitempty"`
-	Users         []string `json:"users"`
+	Port             int      `json:"port"`
+	Protocol         string   `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
+	TLSCertSHA256    string   `json:"tls_cert_sha256,omitempty"`
+	RealityPublicKey string   `json:"reality_public_key,omitempty"`
+	Users            []string `json:"users"`
 }
 
 // Plan contains only listen ports, approved protocols and node-local credential names.
@@ -45,7 +46,8 @@ func (p Plan) Valid() bool {
 	for _, in := range p {
 		if in.Port <= lastPort || in.Port > 65535 || !validUsers(in.Users) ||
 			(in.Protocol != "" && in.Protocol != HTTP && !UsesProtocolCredentials(in.Protocol)) ||
-			(in.Protocol == Trojan && !digest.MatchString(in.TLSCertSHA256)) || (in.Protocol != Trojan && in.TLSCertSHA256 != "") {
+			(in.Protocol == Trojan && !digest.MatchString(in.TLSCertSHA256)) || (in.Protocol != Trojan && in.TLSCertSHA256 != "") ||
+			(in.Protocol == VLESSReality && !security.ValidNodeSecret(in.RealityPublicKey)) || (in.Protocol != VLESSReality && in.RealityPublicKey != "") {
 			return false
 		}
 		grants += len(in.Users)
@@ -92,12 +94,13 @@ func ParsePlan(encoded string) (Plan, error) {
 }
 
 type Catalog struct {
-	Ports         []int               `json:"ports"`
-	Users         []string            `json:"users"`
-	HTTPPorts     []int               `json:"http_ports,omitempty"`
-	PortProtocols map[int]string      `json:"port_protocols,omitempty"`
-	ProtocolUsers map[string][]string `json:"protocol_users,omitempty"`
-	TrojanTrust   *TrojanTrust        `json:"trojan_trust,omitempty"`
+	Ports            []int               `json:"ports"`
+	Users            []string            `json:"users"`
+	HTTPPorts        []int               `json:"http_ports,omitempty"`
+	PortProtocols    map[int]string      `json:"port_protocols,omitempty"`
+	ProtocolUsers    map[string][]string `json:"protocol_users,omitempty"`
+	TrojanTrust      *TrojanTrust        `json:"trojan_trust,omitempty"`
+	RealityPublicKey string              `json:"reality_public_key,omitempty"`
 }
 
 func (c Catalog) Valid() bool {
@@ -119,14 +122,22 @@ func (c Catalog) Valid() bool {
 		}
 		last = port
 	}
-	needsTrojan := false
+	needsTrojan, needsReality := false, false
 	for port, protocol := range c.PortProtocols {
 		if !UsesProtocolCredentials(protocol) || !slices.Contains(c.Ports, port) || slices.Contains(c.HTTPPorts, port) {
 			return false
 		}
 		needsTrojan = needsTrojan || protocol == Trojan
+		needsReality = needsReality || protocol == VLESSReality
 	}
 	if needsTrojan != (c.TrojanTrust != nil) || (c.TrojanTrust != nil && !c.TrojanTrust.Valid()) {
+		return false
+	}
+	if needsReality {
+		if !security.ValidNodeSecret(c.RealityPublicKey) || slices.Contains(c.Ports, realityTargetPort) {
+			return false
+		}
+	} else if c.RealityPublicKey != "" {
 		return false
 	}
 	names := make(map[string]bool)
@@ -159,6 +170,9 @@ func (c Catalog) Allows(p Plan) bool {
 		if protocol == Trojan && (c.TrojanTrust == nil || c.TrojanTrust.SHA256 != in.TLSCertSHA256) {
 			return false
 		}
+		if protocol == VLESSReality && c.RealityPublicKey != in.RealityPublicKey {
+			return false
+		}
 		users := c.Users
 		if UsesProtocolCredentials(protocol) {
 			users = c.ProtocolUsers[protocol]
@@ -183,6 +197,7 @@ type LocalCatalog struct {
 	ProtocolCredentials  map[string]map[string]string `json:"protocol_credentials,omitempty"`
 	ShadowsocksServerKey string                       `json:"shadowsocks_server_key,omitempty"`
 	TrojanTLS            *TrojanTLS                   `json:"trojan_tls,omitempty"`
+	RealityPrivateKey    string                       `json:"reality_private_key,omitempty"`
 }
 
 func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
@@ -209,10 +224,11 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	}
 	slices.Sort(view.Users)
 	needsShadowsocksKey := c.ShadowsocksServerKey != "" || len(c.ProtocolCredentials[Shadowsocks]) > 0
-	needsTrojan := false
+	needsTrojan, needsReality := false, false
 	for _, protocol := range c.PortProtocols {
 		needsShadowsocksKey = needsShadowsocksKey || protocol == Shadowsocks
 		needsTrojan = needsTrojan || protocol == Trojan
+		needsReality = needsReality || protocol == VLESSReality
 	}
 	if needsTrojan {
 		trust, err := c.TrojanTLS.trust()
@@ -220,6 +236,17 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 			return Catalog{}, err
 		}
 		view.TrojanTrust = trust
+	}
+	if needsReality {
+		publicKey, err := RealityPublicKey(c.RealityPrivateKey)
+		if err != nil {
+			return Catalog{}, err
+		}
+		if passwords[c.RealityPrivateKey] {
+			return Catalog{}, errors.New("repeated node-local Xray credential")
+		}
+		passwords[c.RealityPrivateKey] = true
+		view.RealityPublicKey = publicKey
 	}
 	if needsShadowsocksKey {
 		if !validShadowsocksKey(c.ShadowsocksServerKey) {
@@ -230,16 +257,29 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	if len(c.ProtocolCredentials) > 0 {
 		view.ProtocolUsers = make(map[string][]string, len(c.ProtocolCredentials))
 	}
+	shortIDs := make(map[string]bool)
 	for protocol, credentials := range c.ProtocolCredentials {
 		if !UsesProtocolCredentials(protocol) || len(credentials) == 0 || len(credentials) > maxUsers {
 			return Catalog{}, errors.New("invalid node-local Xray protocol credentials")
 		}
 		names := make([]string, 0, len(credentials))
 		for name, secret := range credentials {
-			if !validTypedCredential(protocol, secret) || passwords[secret] {
+			if !validTypedCredential(protocol, secret) {
 				return Catalog{}, errors.New("invalid or repeated node-local Xray credential")
 			}
-			passwords[secret] = true
+			identity := secret
+			if protocol == VLESSReality {
+				id, shortID, _ := splitRealityCredential(secret)
+				if shortIDs[shortID] {
+					return Catalog{}, errors.New("repeated node-local REALITY short ID")
+				}
+				shortIDs[shortID] = true
+				identity = id
+			}
+			if passwords[identity] {
+				return Catalog{}, errors.New("invalid or repeated node-local Xray credential")
+			}
+			passwords[identity] = true
 			names = append(names, name)
 		}
 		slices.Sort(names)
@@ -271,6 +311,9 @@ func (c LocalCatalog) Render(releaseSHA256 string, plan Plan) ([]byte, Reference
 		}
 		if protocol == Trojan {
 			inbound["streamSettings"] = c.TrojanTLS.streamSettings()
+		} else if protocol == VLESSReality {
+			inbound["protocol"] = VLESS
+			inbound["streamSettings"] = c.realityStreamSettings(entry.Users)
 		}
 		inbounds = append(inbounds, inbound)
 		tags = append(tags, tag)

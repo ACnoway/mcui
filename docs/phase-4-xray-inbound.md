@@ -27,7 +27,7 @@
 }
 ```
 
-可在 Linux 用 `cat /proc/sys/kernel/random/uuid` 生成 UUIDv4，用 `openssl rand -base64 32` 生成每个 Shadowsocks 密钥。为每人、每种协议独立生成凭据。轮换后保存节点文件，等待心跳报告新候选摘要，再从面板签发新修订。用户凭据通过部署方的安全渠道交付。浏览器使用选中端口对应的凭据生成原生 Xray 配置。公网监听和 REALITY 仍待各自的模板与验收。
+可在 Linux 用 `cat /proc/sys/kernel/random/uuid` 生成 UUIDv4，用 `openssl rand -base64 32` 生成每个 Shadowsocks 密钥。为每人、每种协议独立生成凭据。轮换后保存节点文件，等待心跳报告新候选摘要，再从面板签发新修订。用户凭据通过部署方的安全渠道交付。浏览器使用选中端口对应的凭据生成原生 Xray 配置。
 
 ### 三种协议的隔离验收
 
@@ -83,6 +83,25 @@ Trojan 模板适用于 Linux amd64 的 Xray `v26.10.31`。监听固定在专用�
 | 节点策略 | 客户端成功读取批准目标。有效密码所属的用户若没有该端口授权，无法请求目标。另一个已启动且可在命名空间内直连的目标端口也被代理拒绝。 |
 | 证书轮换 | 旧草稿无法渲染新证书。重启应用带新证书摘要的配置后，信任旧证书的客户端连接失败，信任新证书的客户端恢复连接。 |
 | 静态检查与构建 | 本地相关 Go 测试、Linux `go vet`、双架构编译、协议向量和前端构建通过。`ro` 以 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0` 通过 `scripts/check-static.sh`，完成 Master、Agent 双架构安装包与 SHA-256 校验。运行验收使用 amd64。 |
+
+## VLESS 与 REALITY
+
+模板适用于 Linux amd64 的 Xray `v26.10.31`，使用回环 RAW TCP 和 REALITY。Xray 会把未通过 REALITY 握手验证的连接交给握手目标。因此模板把目标固定为同一专用命名空间内的 `127.0.0.1:10443`，使用固定服务器名 `localhost`。节点 root 在启用前为这个地址准备专用 TLS 1.3 应答服务，提供覆盖 `localhost` 的证书和静态响应。`10443` 保留给应答服务。业务连接仍须通过 VLESS 用户授权和原有的固定 IPv4 TCP 目的策略。[Xray REALITY 配置](https://xtls.github.io/en/config/transports/reality.html#realityobject)
+
+1. 更新 Master、独立签发服务、Agent 和 Helper。节点 root 用已校验的 `xray x25519` 生成节点密钥，用 `cat /proc/sys/kernel/random/uuid` 和 `openssl rand -hex 8` 为每个账号分别生成 UUIDv4 和 Short ID。
+2. 在节点 `managed-inbounds.json` 加入如下字段，并保留制品摘要和批准的业务目的。`reality_private_key` 为节点 X25519 私钥，用户名下的凭据采用 `UUID:ShortID`。普通 VLESS 与 REALITY 使用分别登记的 UUID。Short ID 为 16 位小写十六进制。
+
+   ```json
+   {
+     "ports": [1085],
+     "port_protocols": { "1085": "vless-reality" },
+     "protocol_credentials": { "vless-reality": { "alice": "<UUIDv4>:<Short ID>" } },
+     "reality_private_key": "<节点 X25519 私钥>"
+   }
+   ```
+
+3. 在面板核对回环端口及 REALITY 公钥，保存授权草稿并签发。订阅携带已应用修订的公钥。用户在订阅页输入节点管理员交付的 `UUID:ShortID`，下载原生 Xray 配置。同步客户端和节点的时钟，模板允许 120 秒握手时钟偏差。
+4. 轮换节点密钥后核对公钥并重新保存草稿，再签发新修订并重发订阅。撤销账号时移除该用户的端口授权并应用新修订。该用户的 UUID 和对应 Short ID 都会从该端口的生效配置中移除。
 
 ## 面板管理入站与授权
 
@@ -156,7 +175,7 @@ IPAddressAllow=<批准的目标 IPv4>/32
 
 订阅绑定已提交的配置修订和摘要。节点离线、Xray 停止或有未决生命周期任务时暂停拉取。应用新修订、节点重新接入、轮换及撤销会使旧链接失效。撤销链接影响后续下载。撤销已下载配置的连接权限须应用移除用户授权或轮换密码的新修订。
 
-浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess、Shadowsocks 2022 或 Trojan 时返回 `schema_version: 3`，用 `port_protocols` 标记用户获准的各类端口，映射外的授权端口使用原 SOCKS 模板。拥有 Trojan 授权的订阅还返回 `trojan_trust`，内含与已签名修订匹配的公开证书及其摘要。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
+浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess、Shadowsocks 2022、Trojan 或 REALITY 时返回 `schema_version: 3`，用 `port_protocols` 标记用户获准的各类端口，映射外的授权端口使用原 SOCKS 模板。拥有 Trojan 授权的订阅还返回 `trojan_trust`，内含与已签名修订匹配的公开证书及其摘要。拥有 VLESS/REALITY 授权的订阅还返回 `reality_public_key`。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
 
 ### 订阅验收记录（2026-11-23）
 

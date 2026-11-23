@@ -121,7 +121,7 @@
 
 - [x] 为 Xray `v26.10.31` 的首个受控 SOCKS5 模板接入双签名配置修订、节点本地语义校验、低权限预检、切换、对账和 LKG 回滚。[受控入站部署](./phase-4-xray-inbound.md)
 - [x] 在面板保存受控 SOCKS5 端口与用户授权草稿，查看节点已应用配置和候选，复用 MFA、精确签发和回滚。凭据由节点 root 创建和轮换。[面板管理](./phase-4-xray-inbound.md#面板管理入站与授权)
-- [ ] 扩展通用入站、用户和凭据管理。已接入 VLESS、VMess、Shadowsocks 2022 和 Trojan/TLS 的受控入站、逐协议用户授权及客户端订阅。公开监听、REALITY 和独立凭据管理仍待开发。[协议模板](./phase-4-xray-inbound.md#vlessvmess-和-shadowsocks-2022) · [Trojan TLS](./phase-4-xray-inbound.md#trojan-与-tls-13)
+- [ ] 扩展通用入站、用户和凭据管理。已接入 VLESS、VMess、Shadowsocks 2022、Trojan/TLS 和 VLESS/REALITY 的受控入站、逐协议用户授权及客户端订阅。公开监听和独立凭据管理仍待开发。[协议模板](./phase-4-xray-inbound.md#vlessvmess-和-shadowsocks-2022) · [Trojan TLS](./phase-4-xray-inbound.md#trojan-与-tls-13) · [REALITY](./phase-4-xray-inbound.md#vless-与-reality)
 - [x] 验证受控 SOCKS5 的实际连接、用户映射和上下行计数。默认转发的连接中读数存在缺口，进程重启丢失计数。面板明示 `UNSUPPORTED` 并禁用精确额度。[统计实测](./phase-4-xray-inbound.md#计数实测)
 - [ ] 在能持续计量的配置组合上验证持久化上报、去重和离线补报。只有计量与补报可靠的组合才开放近实时额度。
 - [x] 交付受控 SOCKS5 基础订阅，按用户和已应用修订签发，支持令牌到期、撤销与轮换。验证授权变化、日志脱敏边界和 Xray 原生客户端输出。[客户端订阅](./phase-4-xray-inbound.md#客户端订阅)

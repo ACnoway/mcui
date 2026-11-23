@@ -1,7 +1,8 @@
-export type XrayProtocol = 'socks' | 'http' | 'vless' | 'vmess' | 'shadowsocks' | 'trojan'
+export type XrayProtocol = 'socks' | 'http' | 'vless' | 'vless-reality' | 'vmess' | 'shadowsocks' | 'trojan'
 
 export const xrayProtocolName: Record<XrayProtocol, string> = {
   socks: 'SOCKS5', http: 'HTTP', vless: 'VLESS', vmess: 'VMess', shadowsocks: 'Shadowsocks 2022', trojan: 'Trojan / TLS',
+  'vless-reality': 'VLESS / REALITY',
 }
 
 export type XraySubscription = {
@@ -12,6 +13,7 @@ export type XraySubscription = {
   http_ports?: number[]
   port_protocols?: Record<number, Exclude<XrayProtocol, 'socks'>>
   trojan_trust?: { certificate: string; sha256: string }
+  reality_public_key?: string
   revision: number
   expires_at: number
 }
@@ -22,14 +24,15 @@ function validPort(value: number) {
 
 export function validSubscription(value: unknown): value is XraySubscription {
   if (!value || typeof value !== 'object') return false
-  const { schema_version, username, address, ports, http_ports, port_protocols, trojan_trust, revision, expires_at } = value as XraySubscription
+  const { schema_version, username, address, ports, http_ports, port_protocols, trojan_trust, reality_public_key, revision, expires_at } = value as XraySubscription
   if (typeof username !== 'string' || !/^[a-z][a-z0-9_-]{0,23}$/.test(username) || address !== '127.0.0.1' ||
     !Array.isArray(ports) || ports.length === 0 || ports.length > 4 ||
     !ports.every((port, index) => validPort(port) && (index === 0 || ports[index - 1] < port)) ||
     !Number.isSafeInteger(revision) || revision <= 0 || !Number.isSafeInteger(expires_at) || expires_at <= 0) return false
-  if (schema_version === 1) return http_ports === undefined && port_protocols === undefined && trojan_trust === undefined
+  if (schema_version !== 3 && (trojan_trust !== undefined || reality_public_key !== undefined)) return false
+  if (schema_version === 1) return http_ports === undefined && port_protocols === undefined
   if (schema_version === 2) {
-    return port_protocols === undefined && trojan_trust === undefined && Array.isArray(http_ports) && http_ports.length > 0 && http_ports.length <= ports.length &&
+    return port_protocols === undefined && Array.isArray(http_ports) && http_ports.length > 0 && http_ports.length <= ports.length &&
       http_ports.every((port, index) => ports.includes(port) && (index === 0 || http_ports[index - 1] < port))
   }
   if (schema_version !== 3 || http_ports !== undefined || !port_protocols || typeof port_protocols !== 'object' || Array.isArray(port_protocols)) return false
@@ -39,8 +42,11 @@ export function validSubscription(value: unknown): value is XraySubscription {
       !/^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+\n-----END CERTIFICATE-----$/.test(trojan_trust.certificate.trim()) ||
       typeof trojan_trust.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(trojan_trust.sha256)) return false
   } else if (trojan_trust !== undefined) return false
+  if (entries.some(([, protocol]) => protocol === 'vless-reality')) {
+    if (typeof reality_public_key !== 'string' || !passwordPattern.test(reality_public_key)) return false
+  } else if (reality_public_key !== undefined) return false
   return entries.some(([, protocol]) => protocol !== 'http') && entries.every(([port, protocol]) =>
-    String(Number(port)) === port && ports.includes(Number(port)) && ['http', 'vless', 'vmess', 'shadowsocks', 'trojan'].includes(protocol),
+    String(Number(port)) === port && ports.includes(Number(port)) && ['http', 'vless', 'vless-reality', 'vmess', 'shadowsocks', 'trojan'].includes(protocol),
   )
 }
 
@@ -69,6 +75,13 @@ function outboundSettings(subscription: XraySubscription, port: number, protocol
     case 'trojan':
       if (!passwordPattern.test(credential)) throw new Error('请输入节点提供的 43 位 Trojan 密码。')
       return { ...endpoint, password: credential }
+    case 'vless-reality': {
+      const parts = credential.split(':')
+      if (parts.length !== 2 || !uuidV4.test(parts[0]) || !/^[0-9a-f]{16}$/.test(parts[1]) || parts[1] === '0000000000000000') {
+        throw new Error('请输入节点提供的 VLESS UUID 和 REALITY Short ID，中间用冒号连接。')
+      }
+      return { ...endpoint, id: parts[0], encryption: 'none' }
+    }
     default:
       if (!passwordPattern.test(credential)) throw new Error('请输入节点提供的 43 位 Base64URL 密码。')
       return { ...endpoint, user: subscription.username, pass: credential }
@@ -82,7 +95,13 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
   const settings = outboundSettings(subscription, proxyPort, protocol, credential)
   const account = { user: subscription.username, pass: credential }
   const trust = subscription.trojan_trust
-  const streamSettings = protocol === 'trojan' && trust ? {
+  const streamSettings = protocol === 'vless-reality' ? {
+    network: 'raw', security: 'reality',
+    realitySettings: {
+      serverName: 'localhost', fingerprint: 'chrome', password: subscription.reality_public_key,
+      shortId: credential.split(':')[1],
+    },
+  } : protocol === 'trojan' && trust ? {
     network: 'raw', security: 'tls',
     tlsSettings: {
       // This fingerprint setting selects Xray's native Go TLS handshake.
@@ -96,6 +115,6 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
       listen: '127.0.0.1', port: localPort, protocol: 'socks',
       settings: { auth: 'password', udp: false, users: [account] },
     }],
-    outbounds: [{ protocol, settings, ...(streamSettings ? { streamSettings } : {}) }],
+    outbounds: [{ protocol: protocol === 'vless-reality' ? 'vless' : protocol, settings, ...(streamSettings ? { streamSettings } : {}) }],
   }
 }

@@ -61,7 +61,10 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				} `json:"settings"`
 				StreamSettings struct {
 					Security string `json:"security"`
-					TLS      struct {
+					Reality  struct {
+						PrivateKey string `json:"privateKey"`
+					} `json:"realitySettings"`
+					TLS struct {
 						Certificates []struct {
 							Certificate []string `json:"certificate"`
 						} `json:"certificates"`
@@ -78,6 +81,13 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				}
 				if in.Protocol == "" {
 					return view
+				}
+				if in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "reality" {
+					key, err := xrayconfig.RealityPublicKey(in.StreamSettings.Reality.PrivateKey)
+					if err != nil {
+						return view
+					}
+					entry.Protocol, entry.RealityPublicKey = xrayconfig.VLESSReality, key
 				}
 				if entry.Protocol == xrayconfig.Trojan {
 					certs := in.StreamSettings.TLS.Certificates

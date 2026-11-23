@@ -18,11 +18,12 @@ type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade
 type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
 type XrayConfigReference = { port: number; sha256: string; size: number }
 type XrayPortProtocol = Exclude<XrayProtocol, 'socks'>
-type XrayInbound = { port: number; protocol?: XrayPortProtocol; tls_cert_sha256?: string; users: string[] }
+type XrayInbound = { port: number; protocol?: XrayPortProtocol; tls_cert_sha256?: string; reality_public_key?: string; users: string[] }
 type XrayCatalog = {
   ports: number[]; users: string[] | null; http_ports?: number[]
   port_protocols?: Record<number, XrayPortProtocol>; protocol_users?: Partial<Record<XrayPortProtocol, string[]>>
   trojan_trust?: { sha256: string }
+  reality_public_key?: string
 }
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
@@ -104,7 +105,8 @@ const xraySubscriptionCopied = ref(false)
 const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.stringify(panelXray.value?.draft ?? []))
 const xrayDraftPolicyChanged = computed(() => xrayDraft.value.some(inbound =>
   panelXray.value?.current.catalog?.ports.includes(inbound.port) &&
-  (inbound.protocol !== approvedProtocol(inbound.port) || inbound.tls_cert_sha256 !== approvedTLSCert(inbound.port)),
+  (inbound.protocol !== approvedProtocol(inbound.port) || inbound.tls_cert_sha256 !== approvedTLSCert(inbound.port) ||
+    inbound.reality_public_key !== approvedRealityKey(inbound.port)),
 ))
 const draftPorts = computed(() => [...new Set([
   ...(panelXray.value?.current.catalog?.ports ?? []),
@@ -483,6 +485,11 @@ function approvedTLSCert(port: number) {
   return undefined
 }
 
+function approvedRealityKey(port: number) {
+  if (approvedProtocol(port) === 'vless-reality') return panelXray.value?.current.catalog?.reality_public_key
+  return undefined
+}
+
 function inboundProtocolLabel(protocol: XrayInbound['protocol']) {
   if (protocol === 'http') return '仅 HTTP'
   return protocol ? xrayProtocolName[protocol] : 'SOCKS5 / HTTP'
@@ -514,7 +521,8 @@ function toggleDraftUser(port: number, user: string) {
   if (next.length) {
     xrayDraft.value.push({
       port, protocol: existing ? existing.protocol : approvedProtocol(port),
-      tls_cert_sha256: existing ? existing.tls_cert_sha256 : approvedTLSCert(port), users: next,
+      tls_cert_sha256: existing ? existing.tls_cert_sha256 : approvedTLSCert(port),
+      reality_public_key: existing ? existing.reality_public_key : approvedRealityKey(port), users: next,
     })
     xrayDraft.value.sort((left, right) => left.port - right.port)
   }
@@ -526,7 +534,8 @@ async function saveXrayDraft() {
   if (!node || !options?.current.catalog || xrayDraftSaving.value) return
   const { ports } = options.current.catalog
   const plan = xrayDraft.value.map(inbound => ports.includes(inbound.port) ? {
-    port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port), users: inbound.users,
+    port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port),
+    reality_public_key: approvedRealityKey(inbound.port), users: inbound.users,
   } : inbound)
   xrayDraftSaving.value = true
   panelXrayError.value = ''
@@ -840,6 +849,7 @@ onMounted(async () => {
           <fieldset v-for="port in draftPorts" :key="port" :disabled="xrayDraftSaving || panelXraySubmitting">
             <legend>127.0.0.1:{{ port }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
             <p v-if="approvedTLSCert(port)">TLS 证书 SHA-256 <code>{{ approvedTLSCert(port) }}</code></p>
+            <p v-if="approvedRealityKey(port)">REALITY 公钥 <code>{{ approvedRealityKey(port) }}</code></p>
             <label v-for="user in draftUsers(port)" :key="user">
               <input type="checkbox" :checked="draftHasUser(port, user)"
                 :disabled="!draftHasUser(port, user) && !approvedUsers(port).includes(user)"
@@ -848,7 +858,7 @@ onMounted(async () => {
             </label>
             <p v-if="!draftUsers(port).length">节点尚未登记此协议的用户凭据。</p>
           </fieldset>
-          <p v-if="xrayDraftPolicyChanged">节点批准的端口类型或证书有变化。核对后重新保存草稿。</p>
+          <p v-if="xrayDraftPolicyChanged">节点批准的端口类型或服务端身份有变化。核对后重新保存草稿。</p>
           <p v-else-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
           <p v-else-if="panelXray.draft_previewed" class="error">节点策略拒绝了此草稿。请更新授权后重新保存。</p>
           <p v-else-if="panelXray.draft">等待节点预览。可在节点心跳后刷新状态。</p>
