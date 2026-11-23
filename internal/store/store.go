@@ -106,6 +106,14 @@ type Node struct {
 	InstallCodeExpiresAt int64                        `json:"install_code_expires_at,omitempty"`
 	Inventory            *lifecycleauth.NodeInventory `json:"inventory,omitempty"`
 	XrayDraft            string                       `json:"xray_draft,omitempty"`
+	XraySubscriptions    map[string]XraySubscription  `json:"xray_subscriptions,omitempty"`
+}
+
+type XraySubscription struct {
+	TokenHash string `json:"token_hash"`
+	Revision  int64  `json:"revision"`
+	SHA256    string `json:"sha256"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 
 type Session struct {

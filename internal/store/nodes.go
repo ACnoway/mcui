@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 )
@@ -10,6 +12,26 @@ import (
 const nodeTokenHashSQL = `json_extract(CAST(payload AS TEXT), '$.node_token_hash')`
 const createNodeTokenIndex = `CREATE INDEX IF NOT EXISTS nodes_active_token_idx ON nodes (` + nodeTokenHashSQL + `) WHERE disabled = 0`
 const findNodeTokenSQL = `SELECT id, payload FROM nodes WHERE disabled = 0 AND ` + nodeTokenHashSQL + ` = ? LIMIT 2`
+
+func (s *Store) NodeByID(ctx context.Context, id string) (Node, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var raw []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT payload FROM nodes WHERE id = ?`, id).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Node{}, ErrNotFound
+		}
+		return Node{}, err
+	}
+	var node Node
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return Node{}, err
+	}
+	if node.ID != id {
+		return Node{}, ErrNotFound
+	}
+	return node, nil
+}
 
 func (s *Store) NodeByTokenHash(ctx context.Context, digest string) (Node, error) {
 	if digest == "" {

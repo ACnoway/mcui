@@ -261,7 +261,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	node.Config, node.ConfigRevision = config, 4
 	heartbeat(&node)
 	draftPath := "https://panel.example.test" + path + "/draft"
-	plan := xrayconfig.Plan{{Port: 1081, Users: []string{"alice", "bob"}}}
+	plan := xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}}}
 	body := map[string]any{"state": options(), "plan": plan}
 	save := func(url, csrf string) *httptest.ResponseRecorder {
 		return requestAsAdmin(t, s.Handler(), http.MethodPut, url, body, "test-session-token", csrf)
@@ -281,7 +281,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	managed.TaskID = "managed-fixture-1234567890"
 	managed.State, managed.MFACode = options(), fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 	expect(admin(http.MethodPost, managed, client.csrf), http.StatusConflict)
-	node.Candidate = xrayconfig.Reference{Port: 1081, SHA256: strings.Repeat("e", 64), Size: 420}
+	node.Candidate = xrayconfig.Reference{Port: 1080, SHA256: strings.Repeat("e", 64), Size: 420}
 	node.Preview = xrayconfig.PlanDigest(plan.Encode())
 	heartbeat(&node)
 	managed.State = options()
@@ -297,15 +297,168 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1", nil, true), http.StatusNoContent)
 	complete(managed.TaskID, 5, newer)
 
+	subscriptionPath := "https://panel.example.test" + path + "/subscriptions"
+	subscriptionAdmin := func(method, url, csrf string, request any) *httptest.ResponseRecorder {
+		return requestAsAdmin(t, s.Handler(), method, url, request, "test-session-token", csrf)
+	}
+	nextIP := 1
+	fetch := func(url, token, remote string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, url, nil)
+		if remote == "" {
+			remote = fmt.Sprintf("192.0.2.%d:1234", nextIP)
+			nextIP++
+		}
+		request.RemoteAddr = remote
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		s.Handler().ServeHTTP(response, request)
+		return response
+	}
+	const publicURL = "https://panel.example.test/api/v1/subscription"
+	newToken := func(user string) string {
+		t.Helper()
+		request := map[string]string{"action": "issue", "username": user, "mfa_code": fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
+		r := subscriptionAdmin(http.MethodPost, subscriptionPath, client.csrf, request)
+		expect(r, http.StatusOK)
+		var reply struct {
+			Token     string `json:"token"`
+			ExpiresAt int64  `json:"expires_at"`
+		}
+		if err := json.Unmarshal(r.Body.Bytes(), &reply); err != nil || !strings.HasPrefix(reply.Token, client.nodeID+".") ||
+			reply.ExpiresAt < time.Now().Add(29*24*time.Hour).Unix() {
+			t.Fatalf("invalid issue response: %v", err)
+		}
+		return reply.Token
+	}
+	var currentToken string
+	// Subscription tests reuse the same signed and acknowledged lifecycle.
+	{
+		request := map[string]string{"action": "issue", "username": "alice"}
+		expect(subscriptionAdmin(http.MethodPost, subscriptionPath, client.csrf, request), http.StatusConflict)
+		node.Applied, node.Config, node.ConfigRevision = &plan, node.Candidate, 5
+		heartbeat(&node)
+		expect(subscriptionAdmin(http.MethodPost, subscriptionPath, "", request), http.StatusForbidden)
+		expect(subscriptionAdmin(http.MethodPost, strings.Replace(subscriptionPath, client.nodeID, "outside-scope", 1), client.csrf, request), http.StatusNotFound)
+		if err := s.runWithTaskState(t.Context(), func() error {
+			return client.store.Update(func(st *store.State) error {
+				for id, session := range st.Sessions {
+					session.MFAAt = 0
+					st.Sessions[id] = session
+				}
+				return nil
+			})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		expect(subscriptionAdmin(http.MethodPost, subscriptionPath, client.csrf, request), http.StatusPreconditionRequired)
+		alice := newToken("alice")
+		expect(subscriptionAdmin(http.MethodPost, subscriptionPath, client.csrf,
+			map[string]string{"action": "issue", "username": "outside"}), http.StatusConflict)
+		bob := newToken("bob")
+		expect(fetch(publicURL, alice, ""), http.StatusOK)
+		multi := fetch(publicURL, bob, "")
+		expect(multi, http.StatusOK)
+		if !strings.Contains(multi.Body.String(), `"ports":[1080,1081]`) || strings.Contains(multi.Body.String(), "alice") {
+			t.Fatalf("wrong ports or another user's data: %s", multi.Body)
+		}
+		single := fetch(publicURL, alice, "")
+		expect(single, http.StatusOK)
+		if !strings.Contains(single.Body.String(), `"ports":[1081]`) || strings.Contains(single.Body.String(), "bob") ||
+			strings.Contains(single.Body.String(), alice) || single.Header().Get("Cache-Control") != "no-store" ||
+			single.Header().Get("Referrer-Policy") != "no-referrer" {
+			t.Fatal("subscription response violated port scope or privacy headers")
+		}
+		expect(fetch(strings.Replace(publicURL, "https:", "http:", 1), alice, ""), http.StatusNotFound)
+		expect(fetch(publicURL+"?token="+alice, "", ""), http.StatusNotFound)
+		expect(fetch(publicURL, strings.Replace(alice, client.nodeID, "outside-scope", 1), ""), http.StatusNotFound)
+		list := subscriptionAdmin(http.MethodGet, subscriptionPath, "", nil)
+		expect(list, http.StatusOK)
+		if strings.Contains(list.Body.String(), alice) || strings.Contains(list.Body.String(), hash(alice)) {
+			t.Fatal("list exposed a token or digest")
+		}
+		if err := client.store.View(func(st store.State) error {
+			raw, err := json.Marshal(st)
+			if err != nil || strings.Contains(string(raw), alice) ||
+				st.Nodes[client.nodeID].XraySubscriptions["alice"].TokenHash != hash(alice) {
+				t.Fatal("token persistence did not contain only the digest")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rotated := newToken("alice")
+		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
+		expect(fetch(publicURL, rotated, ""), http.StatusOK)
+		expect(subscriptionAdmin(http.MethodPost, subscriptionPath, client.csrf,
+			map[string]string{"action": "revoke", "username": "alice"}), http.StatusOK)
+		expect(fetch(publicURL, rotated, ""), http.StatusNotFound)
+		alice = newToken("alice")
+
+		if err := s.runWithTaskState(t.Context(), func() error {
+			return client.store.Update(func(st *store.State) error {
+				n := st.Nodes[client.nodeID]
+				entry := n.XraySubscriptions["bob"]
+				entry.ExpiresAt = time.Now().Unix() - 1
+				n.XraySubscriptions["bob"] = entry
+				st.Nodes[n.ID] = n
+				return nil
+			})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		expect(fetch(publicURL, bob, ""), http.StatusNotFound)
+		bob = newToken("bob")
+		forged := xrayconfig.Plan{{Port: 1080, Users: []string{"alice", "bob"}}}
+		node.Applied = &forged
+		heartbeat(&node)
+		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
+		node.Applied = &plan
+		heartbeat(&node)
+
+		reduced := xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}}
+		body["state"], body["plan"] = options(), reduced
+		expect(save(draftPath, client.csrf), http.StatusOK)
+		expect(fetch(publicURL, bob, ""), http.StatusOK) // A draft does not change active grants.
+		node.Candidate = xrayconfig.Reference{Port: 1080, SHA256: strings.Repeat("f", 64), Size: 360}
+		node.Preview = xrayconfig.PlanDigest(reduced.Encode())
+		heartbeat(&node)
+		removeAlice := managed
+		removeAlice.TaskID = "reduced-config-fixture-0123456789"
+		removeAlice.State, removeAlice.MFACode = options(), fmtCode(totpAt(totpKey, time.Now().Unix()/30))
+		expect(admin(http.MethodPost, removeAlice, client.csrf), http.StatusCreated)
+		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
+		complete(removeAlice.TaskID, 6, newer)
+		expect(fetch(publicURL, bob, ""), http.StatusNotFound) // ACK arrived before the new heartbeat.
+		node.Applied, node.Config, node.ConfigRevision = &reduced, node.Candidate, 6
+		heartbeat(&node)
+		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
+		expect(fetch(publicURL, bob, ""), http.StatusNotFound)
+		currentToken = newToken("bob")
+		fresh := fetch(publicURL, currentToken, "")
+		expect(fresh, http.StatusOK)
+		if !strings.Contains(fresh.Body.String(), `"ports":[1080]`) {
+			t.Fatalf("fresh subscription retained obsolete ports: %s", fresh.Body)
+		}
+		invalid := client.nodeID + "." + strings.Repeat("A", 43)
+		for range 10 {
+			expect(fetch(publicURL, invalid, "192.0.2.200:1234"), http.StatusNotFound)
+		}
+		expect(fetch(publicURL, invalid, "192.0.2.200:1234"), http.StatusTooManyRequests)
+	}
+
 	for i, operation := range []string{"core.start", "core.stop", "core.uninstall"} {
-		heartbeat(&lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256})
+		heartbeat(&node)
 		id := fmt.Sprintf("control-fixture-%010d", i)
 		control := panelXrayRequest{TaskID: id, Operation: operation, State: options()}
 		if control.dangerous() {
 			control.Confirm, control.MFACode = operation, fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 		}
 		expect(admin(http.MethodPost, control, client.csrf), http.StatusCreated)
-		complete(id, int64(i)+6, newer)
+		complete(id, int64(i)+7, newer)
+		if operation == "core.stop" {
+			expect(fetch(publicURL, currentToken, ""), http.StatusNotFound)
+			node.Running = false
+		}
 	}
 	if err := s.ReconcileTaskRuntime(); err != nil {
 		t.Fatal(err)

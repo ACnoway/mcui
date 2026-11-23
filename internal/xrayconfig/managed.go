@@ -22,6 +22,10 @@ const (
 
 var userID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,23}$`)
 
+func ValidUsername(username string) bool {
+	return userID.MatchString(username)
+}
+
 type Inbound struct {
 	Port  int      `json:"port"`
 	Users []string `json:"users"`
@@ -51,7 +55,7 @@ func validUsers(users []string) bool {
 	}
 	last := ""
 	for _, user := range users {
-		if user <= last || !userID.MatchString(user) {
+		if user <= last || !ValidUsername(user) {
 			return false
 		}
 		last = user

@@ -2,6 +2,7 @@ package taskdispatch
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
@@ -55,6 +56,30 @@ func (s *Store) NextIdleSequence(nodeID string) (int64, error) {
 		return 0, ErrSequence
 	}
 	return last + 1, nil
+}
+
+// XrayConfigForSubscription returns the latest successful configuration-changing
+// task while the ledger has no pending lifecycle transition or later stop.
+func (s *Store) XrayConfigForSubscription(ctx context.Context, nodeID string) ([]byte, error) {
+	const operation = `json_extract(CAST(t.raw AS TEXT),'$.operation')`
+	const succeeded = `EXISTS (SELECT 1 FROM acks WHERE task_id=t.task_id AND status='SUCCEEDED')`
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT t.raw FROM tasks t
+		WHERE t.node_id=? AND t.active=0 AND (`+xrayTaskSQL+`) AND `+succeeded+`
+		  AND `+operation+` IN ('config.apply','core.install','core.uninstall','core.upgrade','core.downgrade')
+		  AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.node_id=? AND t.active=1 AND (`+xrayTaskSQL+`))
+		  AND COALESCE((
+			SELECT `+operation+` FROM tasks t
+			WHERE t.node_id=? AND t.active=0 AND (`+xrayTaskSQL+`) AND `+succeeded+`
+			  AND `+operation+` IN ('core.install','core.uninstall','core.start','core.stop')
+			ORDER BY t.sequence DESC LIMIT 1
+		  ), 'core.start') IN ('core.install','core.start')
+		ORDER BY t.sequence DESC LIMIT 1`, nodeID, nodeID, nodeID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return raw, err
 }
 
 type taskEnvelopeV2 struct {

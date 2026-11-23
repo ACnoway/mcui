@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,21 @@ func testServer(t *testing.T) (*Server, *store.Store) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return New(st, "", ""), st
+}
+
+func TestSubscriptionPageServesBrowserApp(t *testing.T) {
+	_, st := testServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<main id=\"app\"></main>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, "", dir)
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://panel.example.test/subscription", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="app"`) ||
+		response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("unexpected subscription page response: %d %v", response.Code, response.Header())
+	}
 }
 
 func seedAdminSession(t *testing.T, st *store.Store, admin store.Admin, sessionToken, csrfToken string, mfaAt int64) {

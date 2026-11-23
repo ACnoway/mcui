@@ -17,6 +17,7 @@ type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade
 type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
 type XrayConfigReference = { port: number; sha256: string; size: number }
 type XrayInbound = { port: number; users: string[] }
+type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
   architecture: string
   current: {
@@ -88,6 +89,11 @@ const panelXrayError = ref('')
 const panelXraySubmitting = ref(false)
 const xrayDraft = ref<XrayInbound[]>([])
 const xrayDraftSaving = ref(false)
+const xraySubscriptions = ref<XraySubscriptionRow[]>([])
+const xraySubscriptionLink = ref<{ username: string; url: string; expiresAt: number } | null>(null)
+const xraySubscriptionBusy = ref(false)
+const xraySubscriptionError = ref('')
+const xraySubscriptionCopied = ref(false)
 const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.stringify(panelXray.value?.draft ?? []))
 const draftPorts = computed(() => [...new Set([
   ...(panelXray.value?.current.catalog?.ports ?? []),
@@ -142,6 +148,11 @@ const firstLoginSecret = ref('')
 const firstLoginPassword = ref('')
 const admin = ref<AdminInfo | null>(null)
 const selectedNode = ref<NodeRecord | null>(null)
+watch(() => selectedNode.value?.id, () => {
+  xraySubscriptions.value = []
+  xraySubscriptionLink.value = null
+  xraySubscriptionError.value = ''
+})
 const statusCore = ref('xray')
 const newAdminUsername = ref('')
 const newAdminPassword = ref('')
@@ -359,12 +370,70 @@ async function loadXrayInstalls(nodeID: string) {
   }
 }
 async function refreshNodeTasks(nodeID: string) {
-  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadPanelXray(nodeID), loadRuntimeUpdates(nodeID)])
+  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadPanelXray(nodeID), loadRuntimeUpdates(nodeID), loadXraySubscriptions(nodeID)])
 }
 async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); xrayInstalls.value = []; panelXray.value = null; runtimeUpdates.value = []; await refreshNodeTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
 
 function panelXrayPath(nodeID: string) {
   return `/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/xray`
+}
+
+async function loadXraySubscriptions(nodeID: string) {
+  if (!admin.value?.can_manage_xray) return
+  try {
+    const rows = await api<XraySubscriptionRow[]>(panelXrayPath(nodeID) + '/subscriptions')
+    if (selectedNode.value?.id !== nodeID) return
+    xraySubscriptions.value = rows
+    if (!rows.some(row => row.active && row.username === xraySubscriptionLink.value?.username)) {
+      xraySubscriptionLink.value = null
+    }
+    xraySubscriptionError.value = ''
+  } catch (cause) {
+    if (selectedNode.value?.id !== nodeID) return
+    xraySubscriptions.value = []
+    xraySubscriptionLink.value = null
+    xraySubscriptionError.value = cause instanceof Error ? cause.message : '读取订阅失败。'
+  }
+}
+
+async function changeXraySubscription(row: XraySubscriptionRow, action: 'issue' | 'revoke') {
+  const nodeID = selectedNode.value?.id
+  if (!nodeID || xraySubscriptionBusy.value) return
+  if (action === 'revoke' && !confirm(`撤销 ${row.username} 的订阅链接？`)) return
+  if (action === 'issue' && row.active && !confirm(`轮换 ${row.username} 的订阅链接？旧链接会立即失效。`)) return
+  xraySubscriptionBusy.value = true
+  xraySubscriptionError.value = ''
+  xraySubscriptionLink.value = null
+  xraySubscriptionCopied.value = false
+  try {
+    const issued = await apiWithStepUp<{ token?: string; expires_at?: number }>(
+      panelXrayPath(nodeID) + '/subscriptions', { action, username: row.username },
+    )
+    if (selectedNode.value?.id !== nodeID) return
+    if (issued.token && issued.expires_at) {
+      const link = new URL('/subscription', window.location.origin)
+      link.hash = issued.token
+      xraySubscriptionLink.value = { username: row.username, url: link.href, expiresAt: issued.expires_at }
+    }
+    await loadXraySubscriptions(nodeID)
+  } catch (cause) {
+    if (selectedNode.value?.id === nodeID) {
+      xraySubscriptionError.value = cause instanceof Error ? cause.message : '更新订阅失败。'
+    }
+  } finally {
+    xraySubscriptionBusy.value = false
+  }
+}
+
+async function copyXraySubscription() {
+  const link = xraySubscriptionLink.value
+  if (!link) return
+  try {
+    await navigator.clipboard.writeText(link.url)
+    if (xraySubscriptionLink.value === link) xraySubscriptionCopied.value = true
+  } catch {
+    xraySubscriptionError.value = '无法访问剪贴板，请手动复制链接。'
+  }
 }
 
 async function loadPanelXray(nodeID: string) {
@@ -759,6 +828,32 @@ onMounted(async () => {
             <span v-else>{{ xrayInstallStatus[install.status] }}</span>
           </div>
         </div>
+        <section class="subscription-manager" aria-label="Xray 客户端订阅">
+          <h3>客户端订阅</h3>
+          <p v-if="!xraySubscriptions.length && !xraySubscriptionError">节点报告已生效的用户授权后可签发订阅。</p>
+          <div v-for="row in xraySubscriptions" :key="row.username" class="node-row">
+            <div class="node-main">
+              <strong>{{ row.username }}</strong>
+              <span v-if="row.active">{{ row.expires_at ? new Date(row.expires_at * 1000).toLocaleString() : '' }} 到期</span>
+              <span v-else>{{ row.expires_at ? '当前不可拉取' : '尚未签发' }}</span>
+            </div>
+            <button v-if="row.eligible" class="outline" :disabled="xraySubscriptionBusy" @click="changeXraySubscription(row, 'issue')">
+              {{ row.active ? '轮换链接' : '签发链接' }}
+            </button>
+            <button v-if="row.expires_at" class="danger" :disabled="xraySubscriptionBusy" @click="changeXraySubscription(row, 'revoke')">撤销</button>
+          </div>
+          <div v-if="xraySubscriptionLink" class="install-command">
+            <label>{{ xraySubscriptionLink.username }} 的订阅链接
+              <input :value="xraySubscriptionLink.url" readonly spellcheck="false" autocomplete="off" />
+            </label>
+            <p>链接只显示一次。{{ new Date(xraySubscriptionLink.expiresAt * 1000).toLocaleString() }} 到期。</p>
+            <div class="section-head">
+              <button @click="copyXraySubscription">{{ xraySubscriptionCopied ? '已复制' : '复制链接' }}</button>
+              <button class="quiet" @click="xraySubscriptionLink = null">关闭</button>
+            </div>
+          </div>
+          <p v-if="xraySubscriptionError" class="error" role="alert">{{ xraySubscriptionError }}</p>
+        </section>
       </section>
       <section v-if="selectedNode && admin?.can_prepare_xray_installs" class="card">
         <div class="section-head">

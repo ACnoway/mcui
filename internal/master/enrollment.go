@@ -262,6 +262,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		node.Enrolled = true
 		node.TokenHash, node.LastSeen = hash(token), 0
 		node.Inventory = nil
+		node.XraySubscriptions = nil
 		nodeID = node.ID
 		st.Nodes[nodeID] = node
 		s.appendAudit(st, store.Audit{At: now, Actor: nodeID, Action: action, ResourceType: "node", Resource: nodeID, Outcome: "success"})
