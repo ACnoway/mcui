@@ -236,12 +236,20 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
 	}
 	plan, _ := xrayconfig.ParsePlan(draft)
+	usageReason := "capability_unverified"
+	if inventory.Architecture == xrayconfig.Architecture && inventory.Xray.Version == xrayconfig.Version &&
+		inventory.Xray.ConfigRevision > 0 {
+		usageReason = "accounting_incomplete"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
 		"versions": versions, "catalog_version": manifest.ManifestVersion,
 		"config_ready":    configReady,
 		"draft":           plan,
 		"draft_previewed": xrayDraftPreviewed(inventory.Xray, draft),
+		"usage": map[string]string{
+			"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,
+		},
 	})
 }
 

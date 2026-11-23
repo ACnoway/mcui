@@ -61,7 +61,23 @@ IPAddressAllow=<批准的目标 IPv4>/32
 3. 让测试客户端在同一专用命名空间中访问 `127.0.0.1:<监听端口>`，用用户 `mcui` 和本地密码请求批准的字面 IPv4 与端口。分别验证错误密码、目标端口不匹配和域名请求被拒绝。客户端测试凭据使用受限权限的本地配置文件传入。
 4. 配置预检、策略摘要或授权校验失败时，任务返回 `FAILED`。候选启动失败且成功恢复时返回 `ROLLED_BACK`。未决事务用原签名任务对账，必要时由节点 root 执行 `mcui-xray recover`。移除候选策略文件会阻止新的下发。停用运行中的入站可在面板停止 Xray。跨版本切换成功后使用新版本的引导配置。
 
-面板显示候选和已应用配置的摘要与端口，并显示已应用的修订号。完整配置和密码仅在节点以私有文件保留，用于运行和事务恢复。用户级统计、额度及订阅仍在阶段 4 工作列表中。[工作流](./phased-development-workflow.md#阶段-4xray-完整业务闭环与最小演示)
+面板显示候选和已应用配置的摘要与端口，并显示已应用的修订号。完整配置和密码仅在节点以私有文件保留，用于运行和事务恢复。订阅仍在阶段 4 工作列表中。[工作流](./phased-development-workflow.md#阶段-4xray-完整业务闭环与最小演示)
+
+## 用户级统计与额度
+
+面板为已安装的 Xray 显示用户流量 `UNSUPPORTED` 和精确额度禁用。受控 SOCKS5 配置沿用现有节点隔离，统计服务只在独立验证环境临时启用。
+
+锁定版 Xray 将 SOCKS5 认证用户名写入用户计数的标识。默认 `splice` 快速转发路径在该次拷贝返回后才累加下行字节，长连接中的定时读数可能落后于已收到的流量。Go 进程重启后，原有内存计数也无法用于找回漏采的字节。 [Xray 用户映射](https://github.com/XTLS/Xray-core/blob/v26.10.31/proxy/socks/protocol.go#L133-L154) · [Xray 转发计数](https://github.com/XTLS/Xray-core/blob/v26.10.31/proxy/proxy.go#L723-L750)
+
+在测试机准备官方 `v26.10.31` 的 `Xray-linux-64.zip`，从仓库根目录运行以下命令。探针核对 ZIP 摘要，为测试目标配置隔离命名空间的回环地址，通过 `0600` Unix socket 多次读取用户计数，并对比默认和禁用 `splice` 模式在连接中、关闭后与进程重启时的结果。
+
+```bash
+sudo unshare --net -- bash -eu -c '
+  ip link set lo up
+  ip addr add 93.184.216.34/32 dev lo
+  exec python3 scripts/verify-xray-user-stats.py "$1"
+' bash /path/to/Xray-linux-64.zip
+```
 
 ## 隔离验收记录
 

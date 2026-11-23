@@ -25,6 +25,7 @@ type PanelXrayOptions = {
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
+  usage?: { user_statistics: string; exact_quota: string; reason: string }
 }
 type XrayInstall = {
   proposal: {
@@ -705,6 +706,12 @@ onMounted(async () => {
         </div>
         <p v-if="selectedNode.disabled || selectedNode.pending">节点上线后可管理 Xray。</p>
         <p v-if="panelXray">节点架构 {{ panelXray.architecture }} · {{ panelXray.current.version || '未安装' }}</p>
+        <div v-if="panelXray?.current.version && panelXray.usage">
+          <p v-if="panelXray.usage.user_statistics === 'UNSUPPORTED'">
+            用户流量 <code>UNSUPPORTED</code> · {{ panelXray.usage.reason === 'accounting_incomplete' ? '计量无法覆盖连接中和重启前的全部流量' : '当前配置尚未验证用户级计量' }}
+          </p>
+          <p v-if="panelXray.usage.exact_quota === 'UNSUPPORTED'">精确额度已禁用。</p>
+        </div>
         <p v-if="panelXray?.current.config">
           已应用修订 {{ panelXray.current.config_revision }}
           <template v-if="!panelXray.current.applied"> · 参考端口 {{ panelXray.current.config.port }}</template>

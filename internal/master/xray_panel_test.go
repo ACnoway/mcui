@@ -151,13 +151,26 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		r := admin(http.MethodGet, nil, "")
 		expect(r, http.StatusOK)
 		var response struct {
-			State    string   `json:"state"`
-			Versions []string `json:"versions"`
-			Catalog  int64    `json:"catalog_version"`
+			State    string                      `json:"state"`
+			Versions []string                    `json:"versions"`
+			Catalog  int64                       `json:"catalog_version"`
+			Current  lifecycleauth.XrayInventory `json:"current"`
+			Usage    struct {
+				UserStatistics string `json:"user_statistics"`
+				ExactQuota     string `json:"exact_quota"`
+				Reason         string `json:"reason"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil || response.Catalog != 2 ||
 			!reflect.DeepEqual(response.Versions, []string{newer.Version, older.Version}) {
 			t.Fatalf("invalid trusted version selection: %s, %v", r.Body, err)
+		}
+		reason := "capability_unverified"
+		if response.Current.ConfigRevision != 0 {
+			reason = "accounting_incomplete"
+		}
+		if response.Usage.UserStatistics != "UNSUPPORTED" || response.Usage.ExactQuota != "UNSUPPORTED" || response.Usage.Reason != reason {
+			t.Fatalf("unsupported traffic or quota was not explicit: %+v", response.Usage)
 		}
 		return response.State
 	}
