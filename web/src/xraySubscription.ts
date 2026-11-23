@@ -85,7 +85,8 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
   const streamSettings = protocol === 'trojan' && trust ? {
     network: 'raw', security: 'tls',
     tlsSettings: {
-      serverName: 'localhost', minVersion: '1.3', disableSystemRoot: true,
+      // This fingerprint setting selects Xray's native Go TLS handshake.
+      serverName: 'localhost', minVersion: '1.3', fingerprint: 'unsafe', disableSystemRoot: true,
       certificates: [{ usage: 'verify', certificate: [trust.certificate.trim()] }],
     },
   } : undefined
