@@ -51,7 +51,8 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 	if data, err := r.savedConfig(current.Config); err == nil {
 		var config struct {
 			Inbounds []struct {
-				Port     int `json:"port"`
+				Port     int    `json:"port"`
+				Protocol string `json:"protocol"`
 				Settings struct {
 					Users []struct {
 						User string `json:"user"`
@@ -62,7 +63,13 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 		if json.Unmarshal(data, &config) == nil {
 			plan := make(xrayconfig.Plan, 0, len(config.Inbounds))
 			for _, in := range config.Inbounds {
-				entry := xrayconfig.Inbound{Port: in.Port}
+				entry := xrayconfig.Inbound{Port: in.Port, Protocol: in.Protocol}
+				if in.Protocol == "socks" {
+					entry.Protocol = ""
+				}
+				if in.Protocol == "" {
+					return view
+				}
 				for _, user := range in.Settings.Users {
 					entry.Users = append(entry.Users, user.User)
 				}

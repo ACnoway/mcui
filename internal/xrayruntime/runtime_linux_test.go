@@ -486,6 +486,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	catalog := xrayconfig.LocalCatalog{
 		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
 		Credentials: map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
+		HTTPPorts:   []int{1081},
 	}
 	save := func() {
 		t.Helper()
@@ -498,7 +499,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 		}
 	}
 	save()
-	plan := xrayconfig.Plan{{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Users: []string{"bob"}}}
+	plan := xrayconfig.Plan{{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}}
 	data, ref, err := readCandidate(path, release, plan.Encode())
 	if err != nil || !ref.Matches(data) {
 		t.Fatalf("preview managed configuration: %v", err)
@@ -508,6 +509,16 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	if err := r.configure(ctx, path, release, ref, plan.Encode(), 2, hash, approve); err != nil {
 		t.Fatal(err)
 	}
+	view := r.Inventory(readState(t, r), "", true)
+	if view.Applied == nil || view.Applied.Encode() != plan.Encode() {
+		t.Fatal("applied inventory did not preserve the HTTP-only authorization")
+	}
+	catalog.HTTPPorts = nil
+	save()
+	if err := r.configure(ctx, path, release, ref, plan.Encode(), 3, hash, approve); err == nil {
+		t.Fatal("applied a stale protocol preview")
+	}
+	catalog.HTTPPorts = []int{1081}
 	catalog.Credentials["bob"] = strings.Repeat("I", 43)
 	save()
 	if err := r.configure(ctx, path, release, ref, plan.Encode(), 3, hash, approve); err == nil {
@@ -527,7 +538,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	state = readState(t, r)
-	view := r.Inventory(state, "", true)
+	view = r.Inventory(state, "", true)
 	if state.Current.Config != disabled || state.Current.Revision != 3 || view.Applied == nil || len(*view.Applied) != 0 {
 		t.Fatalf("empty plan did not commit as an explicit revocation: %+v", view)
 	}

@@ -1,4 +1,4 @@
-// Package xrayconfig defines the controlled SOCKS5 Xray configuration.
+// Package xrayconfig defines the controlled Xray configuration templates.
 package xrayconfig
 
 import (

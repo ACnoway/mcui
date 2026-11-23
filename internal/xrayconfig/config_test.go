@@ -52,12 +52,38 @@ func TestManagedInboundsBindGrantsAndCredentialRotation(t *testing.T) {
 		Credentials: map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
 	}
 	plan := Plan{{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Users: []string{"bob"}}}
+	const legacyPlan = `[{"port":1080,"users":["alice","bob"]},{"port":1081,"users":["bob"]}]`
+	if plan.Encode() != legacyPlan {
+		t.Fatal("existing authorization encoding changed")
+	}
 	if got, err := ParsePlan(plan.Encode()); err != nil || got.Encode() != plan.Encode() {
 		t.Fatalf("canonical plan rejected: %v", err)
 	}
 	raw, ref, err := catalog.Render(release, plan)
 	if err != nil || ref.Port != 1080 || !ref.Matches(raw) || !strings.Contains(string(raw), `"inboundTag":["socks-1080","socks-1081"]`) {
 		t.Fatalf("managed grants failed to render: %v", err)
+	}
+	catalog.HTTPPorts = []int{1081}
+	if _, _, err := catalog.Render(release, plan); err == nil {
+		t.Fatal("rendered the SOCKS template on an HTTP-only port")
+	}
+	plan[1].Protocol = HTTP
+	if got, err := ParsePlan(plan.Encode()); err != nil || !got.UsesHTTP() {
+		t.Fatalf("HTTP-only authorization did not round trip: %v", err)
+	}
+	data, mixed, err := catalog.Render(release, plan)
+	if err != nil || mixed == ref || !mixed.Matches(data) ||
+		!strings.Contains(string(data), `"inboundTag":["socks-1080","http-1081"]`) ||
+		!strings.Contains(string(data), `"protocol":"http","settings":{"allowTransparent":false,"users":[{"pass":"`+catalog.Credentials["bob"]+`","user":"bob"}]}`) {
+		t.Fatalf("HTTP-only grant did not bind its template and users: %v", err)
+	}
+	ref = mixed
+	for _, ports := range [][]int{{1082}, {1081, 1081}} {
+		invalid := catalog
+		invalid.HTTPPorts = ports
+		if _, err := invalid.Public(release); err == nil {
+			t.Fatal("accepted invalid HTTP port catalog")
+		}
 	}
 	public, err := catalog.Public(release)
 	view, _ := json.Marshal(public)
@@ -80,6 +106,7 @@ func TestManagedInboundsBindGrantsAndCredentialRotation(t *testing.T) {
 		`null`, `[{"port":1080,"users":[]}]`, `[{"port":1080,"users":["alice","alice"]}]`,
 		`[{"port":1080,"users":["bob","alice"]}]`, `[{"port":1080,"port":1081,"users":["alice"]}]`,
 		`[{"port":1080,"users":["alice"],"destination":"1.2.3.4"}]`,
+		`[{"port":1080,"protocol":"socks","users":["alice"]}]`, `[{"port":1080,"protocol":"vless","users":["alice"]}]`,
 	} {
 		if _, err := ParsePlan(bad); err == nil {
 			t.Errorf("accepted invalid plan %s", bad)

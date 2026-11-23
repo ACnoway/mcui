@@ -16,13 +16,13 @@ type RuntimeUpdate = {
 type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade' | 'core.downgrade' | 'core.uninstall' | 'config.apply'
 type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
 type XrayConfigReference = { port: number; sha256: string; size: number }
-type XrayInbound = { port: number; users: string[] }
+type XrayInbound = { port: number; protocol?: 'http'; users: string[] }
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
   architecture: string
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
-    catalog?: { ports: number[]; users: string[] }; applied?: XrayInbound[]
+    catalog?: { ports: number[]; users: string[]; http_ports?: number[] }; applied?: XrayInbound[]
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
@@ -73,7 +73,7 @@ const xrayInstallInput = ref({
 const xrayOperationLabel: Record<XrayOperation, string> = {
   'core.install': '安装', 'core.start': '启动', 'core.stop': '停止',
   'core.upgrade': '升级', 'core.downgrade': '降级', 'core.uninstall': '卸载',
-  'config.apply': '下发受控 SOCKS5 入站',
+  'config.apply': '下发受控入站',
 }
 const legacyXrayOperations: CoreXrayOperation[] = ['core.install', 'core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
 const xrayVersionChange = computed(() => xrayInstallInput.value.operation === 'core.upgrade' || xrayInstallInput.value.operation === 'core.downgrade')
@@ -95,6 +95,9 @@ const xraySubscriptionBusy = ref(false)
 const xraySubscriptionError = ref('')
 const xraySubscriptionCopied = ref(false)
 const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.stringify(panelXray.value?.draft ?? []))
+const xrayDraftProtocolChanged = computed(() => xrayDraft.value.some(inbound =>
+  panelXray.value?.current.catalog?.ports.includes(inbound.port) && inbound.protocol !== approvedProtocol(inbound.port),
+))
 const draftPorts = computed(() => [...new Set([
   ...(panelXray.value?.current.catalog?.ports ?? []),
   ...xrayDraft.value.map(inbound => inbound.port),
@@ -447,7 +450,7 @@ async function loadPanelXray(nodeID: string) {
     const options = await api<PanelXrayOptions>(panelXrayPath(nodeID))
     if (selectedNode.value?.id === nodeID) {
       if (!panelXray.value || JSON.stringify(options.draft) !== JSON.stringify(panelXray.value.draft)) {
-        xrayDraft.value = options.draft?.map(({ port, users }) => ({ port, users: [...users] })) ?? []
+        xrayDraft.value = copyXrayDraft(options.draft)
       }
       panelXray.value = options
     }
@@ -456,6 +459,18 @@ async function loadPanelXray(nodeID: string) {
     panelXray.value = null
     panelXrayError.value = e instanceof Error ? e.message : '读取节点 Xray 状态失败'
   }
+}
+
+function copyXrayDraft(draft: XrayInbound[] | null) {
+  return draft?.map(inbound => ({ ...inbound, users: [...inbound.users] })) ?? []
+}
+
+function approvedProtocol(port: number) {
+  return panelXray.value?.current.catalog?.http_ports?.includes(port) ? 'http' as const : undefined
+}
+
+function inboundProtocolLabel(protocol: XrayInbound['protocol']) {
+  return protocol === 'http' ? '仅 HTTP' : 'SOCKS5 / HTTP'
 }
 
 function draftHasUser(port: number, user: string) {
@@ -470,23 +485,28 @@ function draftUsers(port: number) {
 }
 
 function toggleDraftUser(port: number, user: string) {
-  const users = xrayDraft.value.find(inbound => inbound.port === port)?.users ?? []
+  const existing = xrayDraft.value.find(inbound => inbound.port === port)
+  const users = existing?.users ?? []
   const next = users.includes(user) ? users.filter(name => name !== user) : [...users, user].sort()
   xrayDraft.value = xrayDraft.value.filter(inbound => inbound.port !== port)
   if (next.length) {
-    xrayDraft.value.push({ port, users: next })
+    xrayDraft.value.push({ port, protocol: existing ? existing.protocol : approvedProtocol(port), users: next })
     xrayDraft.value.sort((left, right) => left.port - right.port)
   }
 }
 
 async function saveXrayDraft() {
   const node = selectedNode.value
-  const state = panelXray.value?.state
-  if (!node || !state || xrayDraftSaving.value) return
+  const options = panelXray.value
+  if (!node || !options?.current.catalog || xrayDraftSaving.value) return
+  const { ports } = options.current.catalog
+  const plan = xrayDraft.value.map(({ port, protocol, users }) => ({
+    port, protocol: ports.includes(port) ? approvedProtocol(port) : protocol, users,
+  }))
   xrayDraftSaving.value = true
   panelXrayError.value = ''
   try {
-    await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state, plan: xrayDraft.value }) })
+    await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, plan }) })
     if (selectedNode.value?.id === node.id) await loadPanelXray(node.id)
   } catch (e) {
     if (selectedNode.value?.id === node.id) panelXrayError.value = e instanceof Error ? e.message : '保存入站草稿失败'
@@ -500,7 +520,7 @@ async function submitPanelXray() {
   const options = panelXray.value
   if (!node || !options || panelXraySubmitting.value) return
   const operation = panelXrayOperation.value
-  if (operation === 'config.apply' && (!options.config_ready || (options.current.catalog && (xrayDraftDirty.value || xrayDraftSaving.value)))) return
+  if (operation === 'config.apply' && (!options.config_ready || (options.current.catalog && (xrayDraftDirty.value || xrayDraftProtocolChanged.value || xrayDraftSaving.value)))) return
   const version = operation === 'config.apply' ? options.current.version : panelXrayUsesArtifact.value ? panelXrayVersion.value : ''
   const dangerous = operation === 'core.downgrade' || operation === 'core.uninstall' || operation === 'config.apply'
   const replacesConfig = version !== '' && panelXrayUsesArtifact.value && !!options.current.config
@@ -787,13 +807,13 @@ onMounted(async () => {
           · SHA-256 <code>{{ panelXray.current.config.sha256 }}</code>
         </p>
         <ul v-if="panelXray?.current.applied?.length">
-          <li v-for="inbound in panelXray.current.applied" :key="inbound.port">127.0.0.1:{{ inbound.port }} · {{ inbound.users.join('、') }}</li>
+          <li v-for="inbound in panelXray.current.applied" :key="inbound.port">127.0.0.1:{{ inbound.port }} · {{ inboundProtocolLabel(inbound.protocol) }} · {{ inbound.users.join('、') }}</li>
         </ul>
         <p v-else-if="panelXray?.current.applied">当前没有已授权入站。</p>
         <div v-if="panelXray?.current.catalog" class="xray-draft">
-          <h3>SOCKS5 入站授权草稿</h3>
+          <h3>入站授权草稿</h3>
           <fieldset v-for="port in draftPorts" :key="port" :disabled="xrayDraftSaving || panelXraySubmitting">
-            <legend>127.0.0.1:{{ port }}</legend>
+            <legend>127.0.0.1:{{ port }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
             <label v-for="user in draftUsers(port)" :key="user">
               <input type="checkbox" :checked="draftHasUser(port, user)"
                 :disabled="!draftHasUser(port, user) && (!panelXray.current.catalog.ports.includes(port) || !panelXray.current.catalog.users.includes(user))"
@@ -801,11 +821,12 @@ onMounted(async () => {
               {{ user }}
             </label>
           </fieldset>
-          <p v-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
+          <p v-if="xrayDraftProtocolChanged">节点批准的端口类型有变化，保存草稿以使用上方显示的类型。</p>
+          <p v-else-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
           <p v-else-if="panelXray.draft_previewed" class="error">节点策略拒绝了此草稿。请更新授权后重新保存。</p>
           <p v-else-if="panelXray.draft">等待节点预览。可在节点心跳后刷新状态。</p>
-          <button class="outline" :disabled="xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && panelXray.draft !== null)" @click="saveXrayDraft">保存草稿</button>
-          <button v-if="xrayDraftDirty" class="quiet" :disabled="xrayDraftSaving" @click="xrayDraft = panelXray.draft?.map(({ port, users }) => ({ port, users: [...users] })) ?? []">放弃未保存修改</button>
+          <button class="outline" :disabled="xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && !xrayDraftProtocolChanged && panelXray.draft !== null)" @click="saveXrayDraft">保存草稿</button>
+          <button v-if="xrayDraftDirty" class="quiet" :disabled="xrayDraftSaving" @click="xrayDraft = copyXrayDraft(panelXray.draft)">放弃未保存修改</button>
         </div>
         <p v-else-if="panelXrayOperation === 'config.apply' && panelXray?.current.candidate">
           候选入站 127.0.0.1:{{ panelXray.current.candidate.port }} · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code>
@@ -818,7 +839,7 @@ onMounted(async () => {
             <option v-if="!panelXrayVersions.length" value="" disabled>暂无可用版本</option>
             <option v-for="version in panelXrayVersions" :key="version" :value="version">{{ version }}</option>
           </select></label>
-          <button :disabled="panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion) || (panelXrayOperation === 'config.apply' && !!panelXray.current.catalog && (xrayDraftDirty || xrayDraftSaving))">提交任务</button>
+          <button :disabled="panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion) || (panelXrayOperation === 'config.apply' && !!panelXray.current.catalog && (xrayDraftDirty || xrayDraftProtocolChanged || xrayDraftSaving))">提交任务</button>
         </form>
         <p v-if="panelXrayError || xrayInstallError" class="error" role="alert">{{ panelXrayError || xrayInstallError }}</p>
         <div v-for="install in xrayInstalls" :key="install.proposal.task_id" class="audit-row">

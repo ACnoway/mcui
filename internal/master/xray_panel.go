@@ -121,7 +121,14 @@ func xrayDraftPreviewed(i *lifecycleauth.XrayInventory, draft string) bool {
 }
 
 func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
-	return i.Candidate.Valid() && i.Candidate != i.Config && (i.Catalog == nil || xrayDraftPreviewed(i, draft))
+	if !i.Candidate.Valid() || i.Candidate == i.Config {
+		return false
+	}
+	if i.Catalog == nil {
+		return true
+	}
+	plan, err := xrayconfig.ParsePlan(draft)
+	return err == nil && i.Catalog.Allows(plan) && xrayDraftPreviewed(i, draft)
 }
 
 func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {

@@ -68,13 +68,13 @@ function downloadClient() {
         <p>在能访问节点回环端口的环境运行 Xray 客户端。密码仅用于生成本地文件。</p>
         <label>节点端口
           <select v-model="proxyPort">
-            <option v-for="port in subscription.ports" :key="port" :value="port">127.0.0.1:{{ port }}</option>
+            <option v-for="port in subscription.ports" :key="port" :value="port">127.0.0.1:{{ port }} · {{ subscription.http_ports?.includes(port) ? 'HTTP' : 'SOCKS5' }}</option>
           </select>
         </label>
         <label>客户端 SOCKS5 监听端口
           <input v-model.number="localPort" type="number" required min="1024" max="65535" />
         </label>
-        <label>节点提供的 SOCKS5 密码
+        <label>节点提供的密码
           <input v-model="password" type="password" required minlength="43" maxlength="43" autocomplete="off" />
         </label>
         <button>下载 Xray 客户端配置</button>

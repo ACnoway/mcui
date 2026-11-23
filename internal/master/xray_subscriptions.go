@@ -26,14 +26,16 @@ type subscriptionGrant struct {
 	sha256   string
 }
 
-func (g subscriptionGrant) ports(user string) []int {
-	var ports []int
+func (g subscriptionGrant) ports(user string) (ports, httpPorts []int) {
 	for _, inbound := range g.plan {
 		if slices.Contains(inbound.Users, user) {
 			ports = append(ports, inbound.Port)
+			if inbound.Protocol == xrayconfig.HTTP {
+				httpPorts = append(httpPorts, inbound.Port)
+			}
 		}
 	}
-	return ports
+	return ports, httpPorts
 }
 
 func (g subscriptionGrant) matches(token store.XraySubscription, now time.Time) bool {
@@ -171,7 +173,7 @@ func (s *Server) changeXraySubscription(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				return err
 			}
-			if len(grant.ports(in.Username)) == 0 {
+			if ports, _ := grant.ports(in.Username); len(ports) == 0 {
 				return errSubscriptionUnavailable
 			}
 			auditAction = "xray.subscription.issue"
@@ -265,14 +267,19 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "subscription service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		ports := grant.ports(username)
+		ports, httpPorts := grant.ports(username)
 		if err != nil || !grant.matches(record, now) || len(ports) == 0 {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		result := map[string]any{
 			"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports,
 			"revision": grant.revision, "expires_at": record.ExpiresAt,
-		})
+		}
+		if len(httpPorts) > 0 {
+			result["schema_version"] = 2
+			result["http_ports"] = httpPorts
+		}
+		writeJSON(w, http.StatusOK, result)
 	})
 }

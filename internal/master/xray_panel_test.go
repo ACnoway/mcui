@@ -198,7 +198,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -257,11 +257,11 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	complete(apply.TaskID, 4, newer)
 
 	node.PlanSupported, node.Candidate = true, xrayconfig.Reference{}
-	node.Catalog = &xrayconfig.Catalog{Ports: []int{1080, 1081}, Users: []string{"alice", "bob"}}
+	node.Catalog = &xrayconfig.Catalog{Ports: []int{1080, 1081}, Users: []string{"alice", "bob"}, HTTPPorts: []int{1080}}
 	node.Config, node.ConfigRevision = config, 4
 	heartbeat(&node)
 	draftPath := "https://panel.example.test" + path + "/draft"
-	plan := xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}}}
+	plan := xrayconfig.Plan{{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}}}
 	body := map[string]any{"state": options(), "plan": plan}
 	save := func(url, csrf string) *httptest.ResponseRecorder {
 		return requestAsAdmin(t, s.Handler(), http.MethodPut, url, body, "test-session-token", csrf)
@@ -274,6 +274,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["state"] = options()
 	body["plan"] = xrayconfig.Plan{{Port: 1081, Users: []string{"outside"}}}
+	expect(save(draftPath, client.csrf), http.StatusConflict)
+	body["plan"] = xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["state"], body["plan"] = previous, plan
 	expect(save(draftPath, client.csrf), http.StatusOK) // Lost-response retry.
@@ -295,6 +297,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		t.Fatalf("signed task did not bind plan and configuration: %+v %v", task, err)
 	}
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1", nil, true), http.StatusNoContent)
 	complete(managed.TaskID, 5, newer)
 
 	subscriptionPath := "https://panel.example.test" + path + "/subscriptions"
@@ -358,12 +361,14 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		expect(fetch(publicURL, alice, ""), http.StatusOK)
 		multi := fetch(publicURL, bob, "")
 		expect(multi, http.StatusOK)
-		if !strings.Contains(multi.Body.String(), `"ports":[1080,1081]`) || strings.Contains(multi.Body.String(), "alice") {
+		if !strings.Contains(multi.Body.String(), `"ports":[1080,1081]`) || !strings.Contains(multi.Body.String(), `"http_ports":[1080]`) ||
+			!strings.Contains(multi.Body.String(), `"schema_version":2`) || strings.Contains(multi.Body.String(), "alice") {
 			t.Fatalf("wrong ports or another user's data: %s", multi.Body)
 		}
 		single := fetch(publicURL, alice, "")
 		expect(single, http.StatusOK)
-		if !strings.Contains(single.Body.String(), `"ports":[1081]`) || strings.Contains(single.Body.String(), "bob") ||
+		if !strings.Contains(single.Body.String(), `"ports":[1081]`) || !strings.Contains(single.Body.String(), `"schema_version":1`) ||
+			strings.Contains(single.Body.String(), `"http_ports"`) || strings.Contains(single.Body.String(), "bob") ||
 			strings.Contains(single.Body.String(), alice) || single.Header().Get("Cache-Control") != "no-store" ||
 			single.Header().Get("Referrer-Policy") != "no-referrer" {
 			t.Fatal("subscription response violated port scope or privacy headers")
@@ -408,14 +413,14 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		expect(fetch(publicURL, bob, ""), http.StatusNotFound)
 		bob = newToken("bob")
-		forged := xrayconfig.Plan{{Port: 1080, Users: []string{"alice", "bob"}}}
+		forged := xrayconfig.Plan{{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"alice", "bob"}}}
 		node.Applied = &forged
 		heartbeat(&node)
 		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
 		node.Applied = &plan
 		heartbeat(&node)
 
-		reduced := xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}}
+		reduced := xrayconfig.Plan{{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}}
 		body["state"], body["plan"] = options(), reduced
 		expect(save(draftPath, client.csrf), http.StatusOK)
 		expect(fetch(publicURL, bob, ""), http.StatusOK) // A draft does not change active grants.
