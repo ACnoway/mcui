@@ -17,7 +17,7 @@
 }
 ```
 
-从同一发布提交构建 `mcui-lifecycle`。签发进程使用独立账号，保管 `0600` 的生命周期签发私钥和私有账本。配置经过校验的发布清单及其分离签名，并以签发账号使用 `mcui-manifest init-state` 预置[防回滚状态](./phase-3-release.md)。签发端使用 Cloudflare NTS 认证时间，签发账号需获准查询本机 `/run/chrony/chronyd.sock`。面板与签发进程共用一份高熵 API Token，文件使用 `0600` 或 `0640`。
+从同一发布提交构建 `mcui-lifecycle`。签发进程使用独立账号，保管 `0600` 的生命周期签发私钥和私有账本。配置经过校验的发布清单及其分离签名，并以签发账号使用 `mcui-manifest init-state` 预置[防回滚状态](./phase-3-release.md)。签发服务优先通过[受控 loopback 监控接口](./phase-2-operations.md#11-配置认证-nts-时间)校验 Cloudflare NTS 状态。已有权限的签发账号也可使用本机 `/run/chrony/chronyd.sock`。面板与签发进程共用一份高熵 API Token，文件使用 `0600` 或 `0640`。
 
 ```sh
 mcui-lifecycle init-ledger -ledger /var/lib/mcui-xray-signer/issuance.db

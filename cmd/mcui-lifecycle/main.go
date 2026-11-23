@@ -20,7 +20,19 @@ import (
 )
 
 func main() {
-	err := run(os.Args[1:], os.Stdout, trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource).Now)
+	args := os.Args[1:]
+	localNow := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource).Now
+	now := localNow
+	if len(args) > 0 && args[0] == "serve" {
+		monitor := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+		now = func() (time.Time, error) {
+			if observed, err := monitor.Now(); err == nil {
+				return observed, nil
+			}
+			return localNow()
+		}
+	}
+	err := run(args, os.Stdout, now)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -101,7 +101,7 @@ runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xra
 
 旧任务收尾期间使用原有的 `MCUI_XRAY_TUF_ROOT` 和 `MCUI_XRAY_TUF_ORIGIN`。切换到单签名清单时删除这两个配置项，同时更新两个服务并核对本地 CLI 与 Agent/Helper 使用的发布公钥指纹一致。
 
-使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 仅为 Helper 开放固定的 Xray 运行目录。Helper 从本地 chrony Unix 套接字读取认证时间。Master 和 Agent 仍须通过阶段 2 文档所述的受控认证时间查询。
+使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 为 Helper 开放固定的 Xray 运行目录。Master、Agent 和 Helper 均通过 [受控 loopback 监控接口](./phase-2-operations.md#11-配置认证-nts-时间)读取认证时间。本地 root 工具继续使用 chrony Unix 套接字。
 
 单管理员在节点详情选择安装和经过核验的版本，经面板授权及 MFA 检查，由后台独立签发并投递。手工授权部署由原发起运维员上传签名请求和任务后投递。两种流程均可通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 在面板显示为「待对账」，后续序号暂时阻塞。[签发配置](./phase-3-approval.md)
 

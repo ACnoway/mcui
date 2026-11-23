@@ -132,17 +132,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("parse Xray install public key: %v", err)
 		}
-		clock := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource)
-		config.TrustedTimeHealthy = clock.Healthy
 		var artifacts *artifacttrust.Client
 		if signedManifest {
-			artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(xrayruntime.StateDir, "control", "xray-manifest"), clock.Now, publicKey, key)
+			artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(xrayruntime.StateDir, "control", "xray-manifest"), trustedClock.Now, publicKey, key)
 			if err == nil {
 				err = artifacts.ConfigureMasterBackup(*masterURL, *masterCAPath)
 			}
 		} else {
 			artifacts, err = artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(*stateDir, "xray-tuf"), func() error {
-				_, err := clock.Now()
+				_, err := trustedClock.Now()
 				return err
 			})
 		}
