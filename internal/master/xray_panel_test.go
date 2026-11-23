@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,6 +28,26 @@ import (
 
 func TestPanelXraySelectSignDeliverAndConfirm(t *testing.T) {
 	testPanelXraySelectSignDeliverAndConfirm(t, nil)
+}
+
+func testTrojanTrust(t *testing.T) *xrayconfig.TrojanTrust {
+	t.Helper()
+	public, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	cert := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"localhost"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
+	raw, err := x509.CreateCertificate(rand.Reader, cert, cert, public, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: raw}))
+	sum, err := xrayconfig.TrojanCertificateDigest(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &xrayconfig.TrojanTrust{Certificate: text, SHA256: sum}
 }
 
 func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*testing.T, taskTestClient)) {
@@ -198,7 +221,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -257,9 +280,11 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	complete(apply.TaskID, 4, newer)
 
 	node.PlanSupported, node.Candidate = true, xrayconfig.Reference{}
+	trust := testTrojanTrust(t)
 	node.Catalog = &xrayconfig.Catalog{
-		Ports: []int{1080, 1081, 1082}, Users: []string{"alice", "bob"}, HTTPPorts: []int{1080},
-		PortProtocols: map[int]string{1082: xrayconfig.VLESS}, ProtocolUsers: map[string][]string{xrayconfig.VLESS: {"carol"}},
+		Ports: []int{1080, 1081, 1082, 1083}, Users: []string{"alice", "bob"}, HTTPPorts: []int{1080},
+		PortProtocols: map[int]string{1082: xrayconfig.VLESS, 1083: xrayconfig.Trojan},
+		ProtocolUsers: map[string][]string{xrayconfig.VLESS: {"carol"}, xrayconfig.Trojan: {"dave"}}, TrojanTrust: trust,
 	}
 	node.Config, node.ConfigRevision = config, 4
 	heartbeat(&node)
@@ -267,6 +292,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	plan := xrayconfig.Plan{
 		{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}},
 		{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"carol"}},
+		{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: trust.SHA256, Users: []string{"dave"}},
 	}
 	body := map[string]any{"state": options(), "plan": plan}
 	save := func(url, csrf string) *httptest.ResponseRecorder {
@@ -284,6 +310,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	body["plan"] = xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["plan"] = xrayconfig.Plan{{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"alice"}}}
+	expect(save(draftPath, client.csrf), http.StatusConflict)
+	body["plan"] = xrayconfig.Plan{{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: strings.Repeat("f", 64), Users: []string{"dave"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["state"], body["plan"] = previous, plan
 	expect(save(draftPath, client.csrf), http.StatusOK) // Lost-response retry.
@@ -307,6 +335,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1", nil, true), http.StatusNoContent)
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1", nil, true), http.StatusNoContent)
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1", nil, true), http.StatusNoContent)
 	complete(managed.TaskID, 5, newer)
 
 	subscriptionPath := "https://panel.example.test" + path + "/subscriptions"
@@ -385,9 +414,28 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		vless := fetch(publicURL, newToken("carol"), "")
 		expect(vless, http.StatusOK)
 		if !strings.Contains(vless.Body.String(), `"schema_version":3`) || !strings.Contains(vless.Body.String(), `"port_protocols":{"1082":"vless"}`) ||
-			!strings.Contains(vless.Body.String(), `"ports":[1082]`) || strings.Contains(vless.Body.String(), `"http_ports"`) {
+			!strings.Contains(vless.Body.String(), `"ports":[1082]`) || strings.Contains(vless.Body.String(), `"http_ports"`) ||
+			strings.Contains(vless.Body.String(), `"trojan_trust"`) {
 			t.Fatal("typed subscription did not bind the protocol to the authorized port")
 		}
+		dave := newToken("dave")
+		response := fetch(publicURL, dave, "")
+		expect(response, http.StatusOK)
+		var trojan struct {
+			Trust xrayconfig.TrojanTrust `json:"trojan_trust"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &trojan); err != nil || trojan.Trust != *trust ||
+			!strings.Contains(response.Body.String(), `"port_protocols":{"1083":"trojan"}`) {
+			t.Fatalf("Trojan subscription did not carry the approved TLS identity: %v", err)
+		}
+		otherTrust := testTrojanTrust(t)
+		otherPlan := append(xrayconfig.Plan(nil), plan...)
+		otherPlan[3].TLSCertSHA256 = otherTrust.SHA256
+		node.Catalog.TrojanTrust, node.Applied = otherTrust, &otherPlan
+		heartbeat(&node)
+		expect(fetch(publicURL, dave, ""), http.StatusNotFound)
+		node.Catalog.TrojanTrust, node.Applied = trust, &plan
+		heartbeat(&node)
 		expect(fetch(strings.Replace(publicURL, "https:", "http:", 1), alice, ""), http.StatusNotFound)
 		expect(fetch(publicURL+"?token="+alice, "", ""), http.StatusNotFound)
 		expect(fetch(publicURL, strings.Replace(alice, client.nodeID, "outside-scope", 1), ""), http.StatusNotFound)

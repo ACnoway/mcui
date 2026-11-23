@@ -59,6 +59,14 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						Name string `json:"email"`
 					} `json:"users"`
 				} `json:"settings"`
+				StreamSettings struct {
+					Security string `json:"security"`
+					TLS      struct {
+						Certificates []struct {
+							Certificate []string `json:"certificate"`
+						} `json:"certificates"`
+					} `json:"tlsSettings"`
+				} `json:"streamSettings"`
 			} `json:"inbounds"`
 		}
 		if json.Unmarshal(data, &config) == nil {
@@ -71,9 +79,20 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				if in.Protocol == "" {
 					return view
 				}
+				if entry.Protocol == xrayconfig.Trojan {
+					certs := in.StreamSettings.TLS.Certificates
+					if in.StreamSettings.Security != "tls" || len(certs) != 1 {
+						return view
+					}
+					digest, err := xrayconfig.TrojanCertificateDigest(strings.Join(certs[0].Certificate, "\n"))
+					if err != nil {
+						return view
+					}
+					entry.TLSCertSHA256 = digest
+				}
 				for _, user := range in.Settings.Users {
 					name := user.User
-					if entry.Protocol == xrayconfig.VLESS || entry.Protocol == xrayconfig.VMess || entry.Protocol == xrayconfig.Shadowsocks {
+					if xrayconfig.UsesProtocolCredentials(entry.Protocol) {
 						name = user.Name
 					}
 					entry.Users = append(entry.Users, name)

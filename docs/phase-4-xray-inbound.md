@@ -27,7 +27,7 @@
 }
 ```
 
-可在 Linux 用 `cat /proc/sys/kernel/random/uuid` 生成 UUIDv4，用 `openssl rand -base64 32` 生成每个 Shadowsocks 密钥。为每人、每种协议独立生成凭据。轮换后保存节点文件，等待心跳报告新候选摘要，再从面板签发新修订。订阅只返回端口、协议和用户，凭据通过部署方的安全渠道交付。浏览器使用选中端口对应的凭据生成原生 Xray 配置。公网监听、TLS、REALITY 和 Trojan 仍待各自的模板与验收。
+可在 Linux 用 `cat /proc/sys/kernel/random/uuid` 生成 UUIDv4，用 `openssl rand -base64 32` 生成每个 Shadowsocks 密钥。为每人、每种协议独立生成凭据。轮换后保存节点文件，等待心跳报告新候选摘要，再从面板签发新修订。用户凭据通过部署方的安全渠道交付。浏览器使用选中端口对应的凭据生成原生 Xray 配置。公网监听和 REALITY 仍待各自的模板与验收。
 
 ### 三种协议的隔离验收
 
@@ -41,6 +41,36 @@
 | 静态检查与构建 | 本地通过相关 Go 测试、Linux `go vet`、双架构编译、协议向量和前端构建。`ro` 使用 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0` 通过 `scripts/check-static.sh`，完成 Master 与 Agent 的 amd64/arm64 安装包构建及 SHA-256 校验。运行验收使用 amd64。 |
 
 此轮数据面使用真实 Xray 进程，签发、投递和恢复边界由代码集成测试覆盖。Xray 用量显示 `UNSUPPORTED`，精确额度禁用。
+
+## Trojan 与 TLS 1.3
+
+Trojan 模板适用于 Linux amd64 的 Xray `v26.10.31`。监听固定在专用命名空间的 `127.0.0.1`，使用 RAW TCP 和 TLS 1.3，业务流量只允许到达节点批准的 IPv4 TCP 目的端点。启用前更新 Master、独立签发服务、Agent 和 Helper。[Xray Trojan 配置](https://xtls.github.io/en/config/inbounds/trojan.html) · [Xray TLS 配置](https://xtls.github.io/en/config/transports/tls.html)
+
+1. 节点 root 在私有目录生成用于 `localhost` 的自签名 Ed25519 服务器证书和 PKCS#8 私钥。为每位用户生成独立的 32 字节随机密码，按无填充 Base64URL 编码。
+
+   ```sh
+   umask 077
+   openssl req -x509 -newkey ed25519 -noenc -days 90 -subj '/CN=localhost' \
+     -addext 'subjectAltName=DNS:localhost' \
+     -addext 'basicConstraints=critical,CA:FALSE' \
+     -addext 'keyUsage=critical,digitalSignature' \
+     -addext 'extendedKeyUsage=serverAuth' \
+     -keyout trojan.key -out trojan.crt
+   ```
+
+2. 在节点的 `managed-inbounds.json` 中配置下列字段，并保留同一文件中的制品摘要与批准目的端点。`certificate` 和 `private_key` 分别使用生成文件的完整 PEM 文本，按 JSON 字符串保存。文件归节点 root 所有，权限设为 `0600`。同一节点的受控 Trojan 端口共用这套服务器证书。
+
+   ```json
+   {
+     "ports": [1084],
+     "port_protocols": { "1084": "trojan" },
+     "protocol_credentials": { "trojan": { "alice": "<Alice 的 Trojan 密码>" } },
+     "trojan_tls": { "certificate": "<证书 PEM>", "private_key": "<私钥 PEM>" }
+   }
+   ```
+
+3. 在面板核对端口的 TLS 证书 SHA-256，勾选用户，保存草稿并签发。Helper 校验证书与私钥匹配、证书有效期及签名草稿中的摘要。客户端下载的配置只信任该公开证书，校验 `localhost` 和有效期。密码由节点管理员交付。
+4. 轮换证书时原子更新节点目录中的证书和私钥，等待新心跳，核对新摘要并重新保存草稿，再签发新修订。新修订生效后重新签发订阅，让客户端下载带新证书的配置。旧证书的客户端连接会被拒绝。
 
 ## 面板管理入站与授权
 
@@ -114,7 +144,7 @@ IPAddressAllow=<批准的目标 IPv4>/32
 
 订阅绑定已提交的配置修订和摘要。节点离线、Xray 停止或有未决生命周期任务时暂停拉取。应用新修订、节点重新接入、轮换及撤销会使旧链接失效。撤销链接影响后续下载。撤销已下载配置的连接权限须应用移除用户授权或轮换密码的新修订。
 
-浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess 或 Shadowsocks 2022 时返回 `schema_version: 3`，用 `port_protocols` 标记用户获准的各类端口，映射外的授权端口使用原 SOCKS 模板。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
+浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess、Shadowsocks 2022 或 Trojan 时返回 `schema_version: 3`，用 `port_protocols` 标记用户获准的各类端口，映射外的授权端口使用原 SOCKS 模板。拥有 Trojan 授权的订阅还返回 `trojan_trust`，内含与已签名修订匹配的公开证书及其摘要。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
 
 ### 订阅验收记录（2026-11-23）
 

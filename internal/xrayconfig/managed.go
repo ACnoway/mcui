@@ -28,9 +28,10 @@ func ValidUsername(username string) bool {
 }
 
 type Inbound struct {
-	Port     int      `json:"port"`
-	Protocol string   `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
-	Users    []string `json:"users"`
+	Port          int      `json:"port"`
+	Protocol      string   `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
+	TLSCertSHA256 string   `json:"tls_cert_sha256,omitempty"`
+	Users         []string `json:"users"`
 }
 
 // Plan contains only listen ports, approved protocols and node-local credential names.
@@ -42,7 +43,9 @@ func (p Plan) Valid() bool {
 	}
 	lastPort, grants := 1023, 0
 	for _, in := range p {
-		if in.Port <= lastPort || in.Port > 65535 || (in.Protocol != "" && in.Protocol != HTTP && !typedProtocol(in.Protocol)) || !validUsers(in.Users) {
+		if in.Port <= lastPort || in.Port > 65535 || !validUsers(in.Users) ||
+			(in.Protocol != "" && in.Protocol != HTTP && !UsesProtocolCredentials(in.Protocol)) ||
+			(in.Protocol == Trojan && !digest.MatchString(in.TLSCertSHA256)) || (in.Protocol != Trojan && in.TLSCertSHA256 != "") {
 			return false
 		}
 		grants += len(in.Users)
@@ -94,6 +97,7 @@ type Catalog struct {
 	HTTPPorts     []int               `json:"http_ports,omitempty"`
 	PortProtocols map[int]string      `json:"port_protocols,omitempty"`
 	ProtocolUsers map[string][]string `json:"protocol_users,omitempty"`
+	TrojanTrust   *TrojanTrust        `json:"trojan_trust,omitempty"`
 }
 
 func (c Catalog) Valid() bool {
@@ -115,17 +119,22 @@ func (c Catalog) Valid() bool {
 		}
 		last = port
 	}
+	needsTrojan := false
 	for port, protocol := range c.PortProtocols {
-		if !typedProtocol(protocol) || !slices.Contains(c.Ports, port) || slices.Contains(c.HTTPPorts, port) {
+		if !UsesProtocolCredentials(protocol) || !slices.Contains(c.Ports, port) || slices.Contains(c.HTTPPorts, port) {
 			return false
 		}
+		needsTrojan = needsTrojan || protocol == Trojan
+	}
+	if needsTrojan != (c.TrojanTrust != nil) || (c.TrojanTrust != nil && !c.TrojanTrust.Valid()) {
+		return false
 	}
 	names := make(map[string]bool)
 	for _, user := range c.Users {
 		names[user] = true
 	}
 	for protocol, users := range c.ProtocolUsers {
-		if !typedProtocol(protocol) || !validUsers(users) {
+		if !UsesProtocolCredentials(protocol) || !validUsers(users) {
 			return false
 		}
 		for _, user := range users {
@@ -147,8 +156,11 @@ func (c Catalog) Allows(p Plan) bool {
 		if !slices.Contains(c.Ports, in.Port) || in.Protocol != protocol {
 			return false
 		}
+		if protocol == Trojan && (c.TrojanTrust == nil || c.TrojanTrust.SHA256 != in.TLSCertSHA256) {
+			return false
+		}
 		users := c.Users
-		if typedProtocol(protocol) {
+		if UsesProtocolCredentials(protocol) {
 			users = c.ProtocolUsers[protocol]
 		}
 		for _, user := range in.Users {
@@ -170,6 +182,7 @@ type LocalCatalog struct {
 	PortProtocols        map[int]string               `json:"port_protocols,omitempty"`
 	ProtocolCredentials  map[string]map[string]string `json:"protocol_credentials,omitempty"`
 	ShadowsocksServerKey string                       `json:"shadowsocks_server_key,omitempty"`
+	TrojanTLS            *TrojanTLS                   `json:"trojan_tls,omitempty"`
 }
 
 func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
@@ -196,8 +209,17 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	}
 	slices.Sort(view.Users)
 	needsShadowsocksKey := c.ShadowsocksServerKey != "" || len(c.ProtocolCredentials[Shadowsocks]) > 0
+	needsTrojan := false
 	for _, protocol := range c.PortProtocols {
 		needsShadowsocksKey = needsShadowsocksKey || protocol == Shadowsocks
+		needsTrojan = needsTrojan || protocol == Trojan
+	}
+	if needsTrojan {
+		trust, err := c.TrojanTLS.trust()
+		if err != nil {
+			return Catalog{}, err
+		}
+		view.TrojanTrust = trust
 	}
 	if needsShadowsocksKey {
 		if !validShadowsocksKey(c.ShadowsocksServerKey) {
@@ -209,7 +231,7 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 		view.ProtocolUsers = make(map[string][]string, len(c.ProtocolCredentials))
 	}
 	for protocol, credentials := range c.ProtocolCredentials {
-		if !typedProtocol(protocol) || len(credentials) == 0 || len(credentials) > maxUsers {
+		if !UsesProtocolCredentials(protocol) || len(credentials) == 0 || len(credentials) > maxUsers {
 			return Catalog{}, errors.New("invalid node-local Xray protocol credentials")
 		}
 		names := make([]string, 0, len(credentials))
@@ -243,10 +265,14 @@ func (c LocalCatalog) Render(releaseSHA256 string, plan Plan) ([]byte, Reference
 			protocol = "socks"
 		}
 		tag := fmt.Sprintf("%s-%d", protocol, entry.Port)
-		inbounds = append(inbounds, map[string]any{
+		inbound := map[string]any{
 			"listen": "127.0.0.1", "port": entry.Port, "protocol": protocol, "tag": tag,
 			"settings": c.inboundSettings(protocol, entry.Users),
-		})
+		}
+		if protocol == Trojan {
+			inbound["streamSettings"] = c.TrojanTLS.streamSettings()
+		}
+		inbounds = append(inbounds, inbound)
 		tags = append(tags, tag)
 	}
 	if len(plan) != 0 {

@@ -13,6 +13,7 @@ const credentialLabel = computed(() => {
   const protocol = subscriptionProtocol(subscription.value, proxyPort.value)
   if (protocol === 'vless' || protocol === 'vmess') return '节点提供的 UUID'
   if (protocol === 'shadowsocks') return 'Shadowsocks 密钥（服务端密钥:用户密钥）'
+  if (protocol === 'trojan') return '节点提供的 Trojan 密码'
   return '节点提供的密码'
 })
 watch(proxyPort, () => {

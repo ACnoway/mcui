@@ -6,17 +6,23 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
@@ -483,14 +489,37 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "controlled-inbound.json")
+	public, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	cert := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"localhost"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, cert, cert, public, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := &xrayconfig.TrojanTLS{
+		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		PrivateKey:  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
+	}
+	certDigest, err := xrayconfig.TrojanCertificateDigest(identity.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
 	catalog := xrayconfig.LocalCatalog{
-		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081, 1082}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
+		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081, 1082, 1083}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
 		Credentials:   map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
 		HTTPPorts:     []int{1081},
-		PortProtocols: map[int]string{1082: xrayconfig.VLESS},
+		PortProtocols: map[int]string{1082: xrayconfig.VLESS, 1083: xrayconfig.Trojan},
 		ProtocolCredentials: map[string]map[string]string{
-			xrayconfig.VLESS: {"alice": "cc2f34e1-8197-4751-b505-c27f9e2d841b"},
+			xrayconfig.VLESS: {"alice": "cc2f34e1-8197-4751-b505-c27f9e2d841b"}, xrayconfig.Trojan: {"bob": strings.Repeat("M", 43)},
 		},
+		TrojanTLS: identity,
 	}
 	save := func() {
 		t.Helper()
@@ -506,6 +535,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	plan := xrayconfig.Plan{
 		{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Protocol: xrayconfig.HTTP, Users: []string{"bob"}},
 		{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"alice"}},
+		{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: certDigest, Users: []string{"bob"}},
 	}
 	data, ref, err := readCandidate(path, release, plan.Encode())
 	if err != nil || !ref.Matches(data) {

@@ -24,6 +24,7 @@ type subscriptionGrant struct {
 	plan     xrayconfig.Plan
 	revision int64
 	sha256   string
+	trojan   *xrayconfig.TrojanTrust
 }
 
 func (g subscriptionGrant) ports(user string) (ports, httpPorts []int, protocols map[int]string) {
@@ -68,7 +69,7 @@ func (s *Server) xraySubscriptionGrant(ctx context.Context, node store.Node, now
 		task.Sequence != i.Xray.ConfigRevision || task.Config != i.Xray.Config || task.Plan != i.Xray.Applied.Encode() {
 		return subscriptionGrant{}, errSubscriptionUnavailable
 	}
-	return subscriptionGrant{plan: *i.Xray.Applied, revision: task.Sequence, sha256: task.Config.SHA256}, nil
+	return subscriptionGrant{plan: *i.Xray.Applied, revision: task.Sequence, sha256: task.Config.SHA256, trojan: i.Xray.Catalog.TrojanTrust}, nil
 }
 
 type xraySubscriptionView struct {
@@ -285,6 +286,12 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 		if len(protocols) > len(httpPorts) {
 			result["schema_version"] = 3
 			result["port_protocols"] = protocols
+			for _, protocol := range protocols {
+				if protocol == xrayconfig.Trojan {
+					result["trojan_trust"] = grant.trojan
+					break
+				}
+			}
 		} else if len(httpPorts) > 0 {
 			result["schema_version"] = 2
 			result["http_ports"] = httpPorts

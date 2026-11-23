@@ -18,10 +18,11 @@ type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade
 type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
 type XrayConfigReference = { port: number; sha256: string; size: number }
 type XrayPortProtocol = Exclude<XrayProtocol, 'socks'>
-type XrayInbound = { port: number; protocol?: XrayPortProtocol; users: string[] }
+type XrayInbound = { port: number; protocol?: XrayPortProtocol; tls_cert_sha256?: string; users: string[] }
 type XrayCatalog = {
   ports: number[]; users: string[] | null; http_ports?: number[]
   port_protocols?: Record<number, XrayPortProtocol>; protocol_users?: Partial<Record<XrayPortProtocol, string[]>>
+  trojan_trust?: { sha256: string }
 }
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
@@ -101,8 +102,9 @@ const xraySubscriptionBusy = ref(false)
 const xraySubscriptionError = ref('')
 const xraySubscriptionCopied = ref(false)
 const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.stringify(panelXray.value?.draft ?? []))
-const xrayDraftProtocolChanged = computed(() => xrayDraft.value.some(inbound =>
-  panelXray.value?.current.catalog?.ports.includes(inbound.port) && inbound.protocol !== approvedProtocol(inbound.port),
+const xrayDraftPolicyChanged = computed(() => xrayDraft.value.some(inbound =>
+  panelXray.value?.current.catalog?.ports.includes(inbound.port) &&
+  (inbound.protocol !== approvedProtocol(inbound.port) || inbound.tls_cert_sha256 !== approvedTLSCert(inbound.port)),
 ))
 const draftPorts = computed(() => [...new Set([
   ...(panelXray.value?.current.catalog?.ports ?? []),
@@ -476,6 +478,11 @@ function approvedProtocol(port: number): XrayPortProtocol | undefined {
   return catalog?.port_protocols?.[port] ?? (catalog?.http_ports?.includes(port) ? 'http' : undefined)
 }
 
+function approvedTLSCert(port: number) {
+  if (approvedProtocol(port) === 'trojan') return panelXray.value?.current.catalog?.trojan_trust?.sha256
+  return undefined
+}
+
 function inboundProtocolLabel(protocol: XrayInbound['protocol']) {
   if (protocol === 'http') return '仅 HTTP'
   return protocol ? xrayProtocolName[protocol] : 'SOCKS5 / HTTP'
@@ -505,7 +512,10 @@ function toggleDraftUser(port: number, user: string) {
   const next = users.includes(user) ? users.filter(name => name !== user) : [...users, user].sort()
   xrayDraft.value = xrayDraft.value.filter(inbound => inbound.port !== port)
   if (next.length) {
-    xrayDraft.value.push({ port, protocol: existing ? existing.protocol : approvedProtocol(port), users: next })
+    xrayDraft.value.push({
+      port, protocol: existing ? existing.protocol : approvedProtocol(port),
+      tls_cert_sha256: existing ? existing.tls_cert_sha256 : approvedTLSCert(port), users: next,
+    })
     xrayDraft.value.sort((left, right) => left.port - right.port)
   }
 }
@@ -515,9 +525,9 @@ async function saveXrayDraft() {
   const options = panelXray.value
   if (!node || !options?.current.catalog || xrayDraftSaving.value) return
   const { ports } = options.current.catalog
-  const plan = xrayDraft.value.map(({ port, protocol, users }) => ({
-    port, protocol: ports.includes(port) ? approvedProtocol(port) : protocol, users,
-  }))
+  const plan = xrayDraft.value.map(inbound => ports.includes(inbound.port) ? {
+    port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port), users: inbound.users,
+  } : inbound)
   xrayDraftSaving.value = true
   panelXrayError.value = ''
   try {
@@ -535,7 +545,7 @@ async function submitPanelXray() {
   const options = panelXray.value
   if (!node || !options || panelXraySubmitting.value) return
   const operation = panelXrayOperation.value
-  if (operation === 'config.apply' && (!options.config_ready || (options.current.catalog && (xrayDraftDirty.value || xrayDraftProtocolChanged.value || xrayDraftSaving.value)))) return
+  if (operation === 'config.apply' && (!options.config_ready || (options.current.catalog && (xrayDraftDirty.value || xrayDraftPolicyChanged.value || xrayDraftSaving.value)))) return
   const version = operation === 'config.apply' ? options.current.version : panelXrayUsesArtifact.value ? panelXrayVersion.value : ''
   const dangerous = operation === 'core.downgrade' || operation === 'core.uninstall' || operation === 'config.apply'
   const replacesConfig = version !== '' && panelXrayUsesArtifact.value && !!options.current.config
@@ -829,6 +839,7 @@ onMounted(async () => {
           <h3>入站授权草稿</h3>
           <fieldset v-for="port in draftPorts" :key="port" :disabled="xrayDraftSaving || panelXraySubmitting">
             <legend>127.0.0.1:{{ port }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
+            <p v-if="approvedTLSCert(port)">TLS 证书 SHA-256 <code>{{ approvedTLSCert(port) }}</code></p>
             <label v-for="user in draftUsers(port)" :key="user">
               <input type="checkbox" :checked="draftHasUser(port, user)"
                 :disabled="!draftHasUser(port, user) && !approvedUsers(port).includes(user)"
@@ -837,11 +848,11 @@ onMounted(async () => {
             </label>
             <p v-if="!draftUsers(port).length">节点尚未登记此协议的用户凭据。</p>
           </fieldset>
-          <p v-if="xrayDraftProtocolChanged">节点批准的端口类型有变化，保存草稿以使用上方显示的类型。</p>
+          <p v-if="xrayDraftPolicyChanged">节点批准的端口类型或证书有变化。核对后重新保存草稿。</p>
           <p v-else-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
           <p v-else-if="panelXray.draft_previewed" class="error">节点策略拒绝了此草稿。请更新授权后重新保存。</p>
           <p v-else-if="panelXray.draft">等待节点预览。可在节点心跳后刷新状态。</p>
-          <button class="outline" :disabled="xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && !xrayDraftProtocolChanged && panelXray.draft !== null)" @click="saveXrayDraft">保存草稿</button>
+          <button class="outline" :disabled="xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && !xrayDraftPolicyChanged && panelXray.draft !== null)" @click="saveXrayDraft">保存草稿</button>
           <button v-if="xrayDraftDirty" class="quiet" :disabled="xrayDraftSaving" @click="xrayDraft = copyXrayDraft(panelXray.draft)">放弃未保存修改</button>
         </div>
         <p v-else-if="panelXrayOperation === 'config.apply' && panelXray?.current.candidate">
@@ -855,7 +866,7 @@ onMounted(async () => {
             <option v-if="!panelXrayVersions.length" value="" disabled>暂无可用版本</option>
             <option v-for="version in panelXrayVersions" :key="version" :value="version">{{ version }}</option>
           </select></label>
-          <button :disabled="panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion) || (panelXrayOperation === 'config.apply' && !!panelXray.current.catalog && (xrayDraftDirty || xrayDraftProtocolChanged || xrayDraftSaving))">提交任务</button>
+          <button :disabled="panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion) || (panelXrayOperation === 'config.apply' && !!panelXray.current.catalog && (xrayDraftDirty || xrayDraftPolicyChanged || xrayDraftSaving))">提交任务</button>
         </form>
         <p v-if="panelXrayError || xrayInstallError" class="error" role="alert">{{ panelXrayError || xrayInstallError }}</p>
         <div v-for="install in xrayInstalls" :key="install.proposal.task_id" class="audit-row">

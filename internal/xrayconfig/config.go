@@ -17,7 +17,7 @@ const (
 	Operation    = "config.apply"
 	Version      = "v26.10.31"
 	Architecture = "amd64"
-	MaxSize      = 4096
+	MaxSize      = 8192
 	Username     = "mcui"
 )
 

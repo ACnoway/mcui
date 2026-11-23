@@ -3,6 +3,8 @@ package xrayconfig
 import (
 	"encoding/base64"
 	"regexp"
+
+	"github.com/ACnoway/mcui/internal/security"
 )
 
 const (
@@ -10,13 +12,14 @@ const (
 	VLESS             = "vless"
 	VMess             = "vmess"
 	Shadowsocks       = "shadowsocks"
+	Trojan            = "trojan"
 	shadowsocksMethod = "2022-blake3-aes-256-gcm"
 )
 
 var uuidV4 = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
 
-func typedProtocol(protocol string) bool {
-	return protocol == VLESS || protocol == VMess || protocol == Shadowsocks
+func UsesProtocolCredentials(protocol string) bool {
+	return protocol == VLESS || protocol == VMess || protocol == Shadowsocks || protocol == Trojan
 }
 
 func validShadowsocksKey(key string) bool {
@@ -25,10 +28,14 @@ func validShadowsocksKey(key string) bool {
 }
 
 func validTypedCredential(protocol, value string) bool {
-	if protocol == Shadowsocks {
+	switch protocol {
+	case Shadowsocks:
 		return validShadowsocksKey(value)
+	case Trojan:
+		return security.ValidNodeSecret(value)
+	default:
+		return uuidV4.MatchString(value)
 	}
-	return uuidV4.MatchString(value)
 }
 
 func (c LocalCatalog) inboundSettings(protocol string, names []string) map[string]any {
@@ -37,7 +44,7 @@ func (c LocalCatalog) inboundSettings(protocol string, names []string) map[strin
 		switch protocol {
 		case VLESS, VMess:
 			users = append(users, map[string]string{"email": name, "id": c.ProtocolCredentials[protocol][name]})
-		case Shadowsocks:
+		case Shadowsocks, Trojan:
 			users = append(users, map[string]string{"email": name, "password": c.ProtocolCredentials[protocol][name]})
 		default:
 			users = append(users, map[string]string{"user": name, "pass": c.Credentials[name]})

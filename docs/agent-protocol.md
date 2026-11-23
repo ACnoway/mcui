@@ -51,13 +51,15 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 
 任务签名只授权固定动作；制品 ID、版本、架构及摘要须匹配独立受信任且未过期的发布清单，降级须独立授权。任务时间为启动与新步骤授权边界，不是可无限续租的通行证。[Agent/Helper 成对更新](./phase-3-runtime-update.md)使用本地监督器和独立签名授权。节点 Token 轮换按第 2 节接入流程处理。
 
-**配置签名对象**必填字段：`schema_version`、`node_id`、`core`、`core_version`、`revision`、`content_sha256`、`content_size`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`。通用 `content_size` 上限为 4194304 字节，当前 Xray 模板只接受 1..4096 字节。摘要覆盖精确原始配置字节。
+**配置签名对象**必填字段：`schema_version`、`node_id`、`core`、`core_version`、`revision`、`content_sha256`、`content_size`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`。通用 `content_size` 上限为 4194304 字节，当前 Xray 模板只接受 1..8192 字节。摘要覆盖精确原始配置字节。
 
 Xray 任务的 `payload.config` 是独立签名的配置元数据。它与任务共用独立 Xray 运维公钥，分别使用 `MCUI-CONFIG-V1` 与 `MCUI-TASK-V1` 签名域。两份签名的节点、Core、精确版本、时间窗与密钥必须一致，配置 `revision` 等于任务 `sequence`。支持 `xray_config=v1` 且使用签名发布清单的 Agent 才能领取此形态。配置正文按节点 root 策略确定性生成，摘要、长度与监听端口均须匹配。Helper 持久化已进入切换的最高修订，配置失败恢复上一次已提交的精确内容和运行意图。通过原任务凭证对账，重复投递不重新应用。要恢复更早的配置需发起更高修订。 [受控入站部署](./phase-4-xray-inbound.md)
 
 面板管理配置任务另含外层签名字段 `payload.plan`。其值是紧凑 JSON 字符串，内含按端口升序排列的对象。原模板使用 `{"port":1080,"users":["alice","bob"]}`，节点明确授权的 HTTP 专用端口使用 `{"port":1081,"protocol":"http","users":["alice"]}`。用户名按字典序排列。端口及同一端口上的用户名均唯一，空数组表示移除全部监听。Agent 须额外声明 `xray_plan=v1` 才会领取包含此字段的任务，含 HTTP 专用端口的草稿还要求 `xray_http=v1`。节点 Token 心跳获取本节点草稿，Helper 只读预览并上报草稿摘要及候选引用。签发前 Master 校验该摘要仍对应保存的草稿，端口类型和用户名仍获节点目录许可。执行时 Helper 使用外层签名的草稿及本地目录重新渲染，独立核对精确配置引用。空数组时引用中的端口仍使用节点许可的非特权端口，实际监听以已应用授权数组为准。
 
 新模板在同一字段中使用 `protocol: "vless"`、`"vmess"` 或 `"shadowsocks"`，领取时额外要求 `xray_protocols=v1`。心跳目录的 `port_protocols` 和 `protocol_users` 分别对应节点批准的端口类型和各协议的可授权用户名。签发及执行均要求两者与草稿一致。目录快照、授权和订阅只传输端口、类型和用户名，UUID 与密钥保存在节点本地。
+
+Trojan 专用草稿项使用 `protocol: "trojan"`，并在 `users` 之前写入 `tls_cert_sha256`，值为已批准叶证书 DER 的小写 SHA-256。领取还要求 `xray_trojan_tls=v1`。节点心跳的 `trojan_trust` 仅包含公开证书和摘要。Master 签发前对照目录，Helper 渲染前按本地证书复验摘要。发布订阅时核对已应用草稿与已签名任务，只有获准 Trojan 用户的订阅包含该证书。证书私钥仅由节点保管，密码由部署方另行交付。
 
 **取消对象**字段：`schema_version`、`node_id`、`task_id`、`sequence`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`，使用任务用途密钥和取消域。取消须目标精确匹配；可独立于顺序任务领取并持久化。取消先于开始则任务消费为 CANCELED；已开始只在操作定义的安全点停止并回滚，无法安全中止时继续完成既有已授权步骤或安全恢复，返回 `CANCEL_TOO_LATE`，不能虚报取消成功。取消与开始由本地同一事务/锁线性化。
 
