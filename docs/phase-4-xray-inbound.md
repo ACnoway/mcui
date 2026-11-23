@@ -151,3 +151,18 @@ sudo unshare --net -- bash -eu -c '
 | 静态检查与构建 | 本地通过相关 Go 测试、Linux `go vet`、受影响命令构建、协议向量和 shell 语法检查。`ro` 通过 `scripts/check-static.sh`，完成 Master 与 Agent 的 amd64/arm64 安装包构建及 SHA-256 校验。Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0`。实际启动和连接验收使用 amd64。 |
 
 客户机输出 `PHASE4_DEMO_PASS` 并正常关机。生产 NTS 服务和签名信任的验收见[第三阶段生产发布验收](./phase-3-release.md#生产发布验收)。
+
+### HTTP 专用入站验收
+
+2026-11-23 在 `ro` 从 `/root/mcui` 建立隔离检出，验证提交 `093b8c25ad6b44f620da75e27c13b3a362cdb8c3`。使用无外网网卡的 Debian 13.7 amd64 KVM/QEMU 客户机，内核 `6.12.107+deb13-cloud-amd64`，systemd `257.13-1~deb13u1`。chrony `4.9` 使用隔离 NTS 和测试 CA。清单和任务使用独立测试密钥签发。制品为上述官方 Xray `v26.10.31` amd64 ZIP，已核对 SHA-256。
+
+| 检查 | 结果 |
+|---|---|
+| 注册、安装和下发 | 空 Agent 注册成功。`#1 core.install` 和包含两种端口的 `#2 config.apply` 返回 `SUCCEEDED`。未批准端口及类型不符的草稿返回 HTTP `409`。集成测试确认未声明 `xray_http=v1` 的 Agent 不会领取包含 HTTP 专用端口的任务。 |
+| 订阅与连接 | SOCKS5 用户取得原格式订阅，拥有 HTTP 专用端口的用户取得带 `http_ports` 的订阅。用两份订阅分别生成原生 Xray 配置并连接批准目标。锁定版的原 SOCKS 端口也通过同凭据的 HTTP 请求验证。 |
+| 代理边界 | HTTP 专用端口拒绝 SOCKS5、缺失凭据、错误密码及该端口未授权的用户。测试确认目的主机名、回环地址和未批准的目标 TCP 端口均可在客户机内直连，经过 HTTP 专用端口时请求被拒绝。 |
+| 回滚和撤销 | 本地占用候选监听端口，`#3 config.apply` 返回 `ROLLED_BACK`，两个原客户端恢复连接。撤销链接后请求旧订阅返回 HTTP `404`。`#4 config.apply` 移除节点用户授权后，该用户的原客户端无法继续连接，另一用户仍可使用。 |
+| 密码轮换 | 节点 root 原子更新目录密码。`#5 config.apply` 返回 `SUCCEEDED` 后，旧凭据被 HTTP 专用端口拒绝，新凭据可连接。 |
+| 检查与构建 | 本地通过相关 Go 测试、Linux `go vet`、双架构编译、协议向量、前端类型检查与构建。`ro` 以 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0` 通过 `scripts/check-static.sh`，构建并校验 Master 和 Agent 双架构安装包。运行验收使用 amd64，输出 `PHASE4_DEMO_PASS`。 |
+
+面板将 Xray 用量标为 `UNSUPPORTED`，精确额度禁用。持久化计量和独立凭据管理仍待完成。
