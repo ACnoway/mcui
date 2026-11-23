@@ -9,10 +9,12 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/xrayconfig"
 	"golang.org/x/sys/unix"
 )
 
@@ -22,7 +24,12 @@ const networkNamespace = "/run/netns/mcui-xray"
 
 type systemdService struct{}
 
-func (systemdService) checkConfigUnits(ctx context.Context, destination string) error {
+type publishedInbound struct {
+	port     int
+	endpoint xrayconfig.PublicEndpoint
+}
+
+func (systemdService) checkConfigUnits(ctx context.Context, destination string, published []publishedInbound, checkSockets bool) error {
 	ns, err := os.Lstat(networkNamespace)
 	if err != nil {
 		return errors.New("Xray requires a dedicated network namespace")
@@ -33,13 +40,23 @@ func (systemdService) checkConfigUnits(ctx context.Context, destination string) 
 		unix.Statfs(networkNamespace, &fs) != nil || fs.Type != unix.NSFS_MAGIC {
 		return errors.New("invalid dedicated Xray network namespace")
 	}
-	if err := checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", ""); err != nil {
+	if err := checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", "", false); err != nil {
 		return err
 	}
-	return checkConfigUnit(ctx, serviceUnit, "current", "runtime-config.json", "", networkNamespace, destination)
+	if err := checkConfigUnit(ctx, serviceUnit, "current", "runtime-config.json", "", networkNamespace, destination, len(published) > 0); err != nil {
+		return err
+	}
+	if checkSockets {
+		for _, inbound := range published {
+			if err := checkPublishUnit(ctx, inbound); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace, destination string) error {
+func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace, destination string, published bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	cmd := systemctlCommand(ctx, "show", "--property=ExecStart,StandardInput,NeedDaemonReload,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow", unit)
@@ -49,11 +66,10 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace,
 	}
 	values := systemdProperties(raw)
 	argv := "argv[]=" + StateDir + "/" + bundle + "/xray run " + flag + "-config stdin: ;"
-	deny := strings.Fields(values["IPAddressDeny"])
 	if values["PrivateNetwork"] != "yes" || values["NetworkNamespacePath"] != namespace ||
 		values["DynamicUser"] != "yes" || values["NoNewPrivileges"] != "yes" ||
 		values["StandardInput"] != "file" || values["NeedDaemonReload"] != "no" || !strings.Contains(values["ExecStart"], argv) ||
-		len(deny) != 2 || !strings.Contains(values["IPAddressDeny"], "0.0.0.0/0") || !strings.Contains(values["IPAddressDeny"], "::/0") ||
+		!deniesAllIP(values) ||
 		(namespace == "" && values["IPAddressAllow"] != "") {
 		return fmt.Errorf("Xray configuration sandbox does not match the required settings for %s", unit)
 	}
@@ -71,12 +87,46 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace,
 		if !loopback || (destination != "" && !endpoint) {
 			return errors.New("Xray service lacks IP allowances for the approved route")
 		}
+		if published && !slices.Contains(allow, xrayconfig.PublicListenAddress+"/32") {
+			return errors.New("Xray service lacks the public ingress loopback allowance")
+		}
 	}
 	// systemd exposes the input type through D-Bus, but omits the file path.
 	// Read the unit and its drop-ins after checking that they match the loaded unit.
 	raw, err = systemctlCommand(ctx, "cat", unit).Output()
 	if err != nil || unitStandardInput(raw) != "file:"+StateDir+"/control/"+config {
 		return fmt.Errorf("Xray unit %s does not use the required private configuration", unit)
+	}
+	return nil
+}
+
+func deniesAllIP(values map[string]string) bool {
+	deny := strings.Fields(values["IPAddressDeny"])
+	return len(deny) == 2 && slices.Contains(deny, "0.0.0.0/0") && slices.Contains(deny, "::/0")
+}
+
+func checkPublishUnit(ctx context.Context, inbound publishedInbound) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	port := strconv.Itoa(inbound.port)
+	name := "mcui-xray-publish@" + port
+	socket, service := name+".socket", name+".service"
+	raw, err := systemctlCommand(ctx, "show", "--property=LoadState,NeedDaemonReload,Listen,Accept,Triggers,NetworkNamespacePath,PrivateNetwork", socket).Output()
+	values := systemdProperties(raw)
+	if err != nil || values["LoadState"] != "loaded" || values["NeedDaemonReload"] != "no" || values["Accept"] != "no" ||
+		values["Listen"] != inbound.endpoint.String()+" (Stream)" || values["Triggers"] != service ||
+		values["PrivateNetwork"] == "yes" || values["NetworkNamespacePath"] != "" {
+		return fmt.Errorf("Xray public socket %s does not match the approved endpoint", socket)
+	}
+	raw, err = systemctlCommand(ctx, "show", "--property=LoadState,NeedDaemonReload,ExecStart,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow,BindsTo", service).Output()
+	values = systemdProperties(raw)
+	argv := "argv[]=/usr/lib/systemd/systemd-socket-proxyd --connections-max=128 " + xrayconfig.PublicListenAddress + ":" + port + " ;"
+	allow := strings.Fields(values["IPAddressAllow"])
+	if err != nil || values["LoadState"] != "loaded" || values["NeedDaemonReload"] != "no" || values["BindsTo"] != socket ||
+		values["PrivateNetwork"] != "yes" || values["NetworkNamespacePath"] != networkNamespace || values["DynamicUser"] != "yes" ||
+		values["NoNewPrivileges"] != "yes" || !strings.Contains(values["ExecStart"], argv) || !deniesAllIP(values) ||
+		len(allow) != 2 || !slices.Contains(allow, "127.0.0.1/32") || !slices.Contains(allow, xrayconfig.PublicListenAddress+"/32") {
+		return fmt.Errorf("Xray public ingress service %s does not use the required isolated relay", service)
 	}
 	return nil
 }

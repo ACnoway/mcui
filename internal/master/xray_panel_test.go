@@ -221,7 +221,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -285,11 +285,13 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	publicEndpoint := xrayconfig.PublicEndpoint{Address: "93.184.216.35", Port: 443}
 	node.Catalog = &xrayconfig.Catalog{
 		Ports: []int{1080, 1081, 1082, 1083}, Users: []string{"alice", "bob"}, HTTPPorts: []int{1080},
 		PortProtocols: map[int]string{1082: xrayconfig.VLESSReality, 1083: xrayconfig.Trojan},
 		ProtocolUsers: map[string][]string{xrayconfig.VLESSReality: {"carol"}, xrayconfig.Trojan: {"dave"}}, TrojanTrust: trust,
 		RealityPublicKey: realityKey,
+		PublicEndpoints:  map[int]xrayconfig.PublicEndpoint{1083: publicEndpoint},
 	}
 	node.Config, node.ConfigRevision = config, 4
 	heartbeat(&node)
@@ -297,7 +299,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	plan := xrayconfig.Plan{
 		{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}},
 		{Port: 1082, Protocol: xrayconfig.VLESSReality, RealityPublicKey: realityKey, Users: []string{"carol"}},
-		{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: trust.SHA256, Users: []string{"dave"}},
+		{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: trust.SHA256, PublicEndpoint: publicEndpoint, Users: []string{"dave"}},
 	}
 	body := map[string]any{"state": options(), "plan": plan}
 	save := func(url, csrf string) *httptest.ResponseRecorder {
@@ -318,7 +320,9 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["plan"] = xrayconfig.Plan{{Port: 1082, Protocol: xrayconfig.VLESSReality, RealityPublicKey: strings.Repeat("M", 43), Users: []string{"carol"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
-	body["plan"] = xrayconfig.Plan{{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: strings.Repeat("f", 64), Users: []string{"dave"}}}
+	body["plan"] = xrayconfig.Plan{{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: strings.Repeat("f", 64), PublicEndpoint: publicEndpoint, Users: []string{"dave"}}}
+	expect(save(draftPath, client.csrf), http.StatusConflict)
+	body["plan"] = xrayconfig.Plan{{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: trust.SHA256, Users: []string{"dave"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["state"], body["plan"] = previous, plan
 	expect(save(draftPath, client.csrf), http.StatusOK) // Lost-response retry.
@@ -344,6 +348,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1", nil, true), http.StatusNoContent)
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1", nil, true), http.StatusNoContent)
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1", nil, true), http.StatusNoContent)
 	complete(managed.TaskID, 5, newer)
 
 	subscriptionPath := "https://panel.example.test" + path + "/subscriptions"
@@ -423,16 +428,20 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		expect(reality, http.StatusOK)
 		if !strings.Contains(reality.Body.String(), `"schema_version":3`) || !strings.Contains(reality.Body.String(), `"port_protocols":{"1082":"vless-reality"}`) ||
 			!strings.Contains(reality.Body.String(), `"ports":[1082]`) || !strings.Contains(reality.Body.String(), `"reality_public_key":"`+realityKey+`"`) ||
-			strings.Contains(reality.Body.String(), `"http_ports"`) || strings.Contains(reality.Body.String(), `"trojan_trust"`) {
+			strings.Contains(reality.Body.String(), `"http_ports"`) || strings.Contains(reality.Body.String(), `"trojan_trust"`) ||
+			strings.Contains(reality.Body.String(), `"public_endpoints"`) {
 			t.Fatal("REALITY subscription did not bind the authorized port and public key")
 		}
 		dave := newToken("dave")
 		response := fetch(publicURL, dave, "")
 		expect(response, http.StatusOK)
 		var trojan struct {
-			Trust xrayconfig.TrojanTrust `json:"trojan_trust"`
+			Trust     xrayconfig.TrojanTrust            `json:"trojan_trust"`
+			Version   int                               `json:"schema_version"`
+			Published map[int]xrayconfig.PublicEndpoint `json:"public_endpoints"`
 		}
 		if err := json.Unmarshal(response.Body.Bytes(), &trojan); err != nil || trojan.Trust != *trust ||
+			trojan.Version != 4 || len(trojan.Published) != 1 || trojan.Published[1083] != publicEndpoint ||
 			!strings.Contains(response.Body.String(), `"port_protocols":{"1083":"trojan"}`) || strings.Contains(response.Body.String(), `"reality_public_key"`) {
 			t.Fatalf("Trojan subscription did not carry the approved TLS identity: %v", err)
 		}

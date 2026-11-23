@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { buildXrayClient, subscriptionProtocol, validSubscription, xrayProtocolName, type XraySubscription } from './xraySubscription'
+import { buildXrayClient, subscriptionEndpoint, subscriptionProtocol, validSubscription, xrayProtocolName, type XraySubscription } from './xraySubscription'
 
 const subscription = ref<XraySubscription | null>(null)
 const status = ref('正在读取订阅…')
@@ -78,10 +78,10 @@ function downloadClient() {
       <p v-if="status" role="status">{{ status }}</p>
       <form v-if="subscription" @submit.prevent="downloadClient">
         <p>账号 {{ subscription.username }} · 修订 {{ subscription.revision }} · {{ new Date(subscription.expires_at * 1000).toLocaleString() }} 到期</p>
-        <p>在能访问节点回环端口的环境运行 Xray 客户端。凭据仅用于生成本地文件。</p>
+        <p>回环端点需在可访问节点回环的环境中连接。凭据仅用于生成本地文件。</p>
         <label>节点端口
           <select v-model="proxyPort">
-            <option v-for="port in subscription.ports" :key="port" :value="port">127.0.0.1:{{ port }} · {{ xrayProtocolName[subscriptionProtocol(subscription, port)] }}</option>
+            <option v-for="port in subscription.ports" :key="port" :value="port">{{ subscriptionEndpoint(subscription, port).address }}:{{ subscriptionEndpoint(subscription, port).port }} · {{ xrayProtocolName[subscriptionProtocol(subscription, port)] }}</option>
           </select>
         </label>
         <label>客户端 SOCKS5 监听端口

@@ -516,6 +516,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	publicEndpoint := xrayconfig.PublicEndpoint{Address: "93.184.216.35", Port: 443}
 	catalog := xrayconfig.LocalCatalog{
 		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081, 1082, 1083}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
 		Credentials:   map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
@@ -526,6 +527,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 			xrayconfig.Trojan:       {"bob": strings.Repeat("M", 43)},
 		},
 		TrojanTLS: identity, RealityPrivateKey: privateKey,
+		PublicEndpoints: map[int]xrayconfig.PublicEndpoint{1082: publicEndpoint},
 	}
 	save := func() {
 		t.Helper()
@@ -540,7 +542,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	save()
 	plan := xrayconfig.Plan{
 		{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Protocol: xrayconfig.HTTP, Users: []string{"bob"}},
-		{Port: 1082, Protocol: xrayconfig.VLESSReality, RealityPublicKey: realityKey, Users: []string{"alice"}},
+		{Port: 1082, Protocol: xrayconfig.VLESSReality, RealityPublicKey: realityKey, PublicEndpoint: publicEndpoint, Users: []string{"alice"}},
 		{Port: 1083, Protocol: xrayconfig.Trojan, TLSCertSHA256: certDigest, Users: []string{"bob"}},
 	}
 	data, ref, err := readCandidate(path, release, plan.Encode())
@@ -596,8 +598,10 @@ type fakeService struct {
 	failedConfig  string
 }
 
-func (s *fakeService) preflight(context.Context) error                { return nil }
-func (s *fakeService) checkConfigUnits(context.Context, string) error { return nil }
+func (s *fakeService) preflight(context.Context) error { return nil }
+func (s *fakeService) checkConfigUnits(context.Context, string, []publishedInbound, bool) error {
+	return nil
+}
 
 func (s *fakeService) start(context.Context) error {
 	s.starts++

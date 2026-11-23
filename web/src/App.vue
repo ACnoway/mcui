@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { xrayProtocolName, type XrayProtocol } from './xraySubscription'
+import { xrayProtocolName, type XrayProtocol, type XrayPublicEndpoint } from './xraySubscription'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; pending: boolean }
 type Audit = { at: number; actor: string; action: string; resource: string; outcome: string }
@@ -18,12 +18,16 @@ type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade
 type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
 type XrayConfigReference = { port: number; sha256: string; size: number }
 type XrayPortProtocol = Exclude<XrayProtocol, 'socks'>
-type XrayInbound = { port: number; protocol?: XrayPortProtocol; tls_cert_sha256?: string; reality_public_key?: string; users: string[] }
+type XrayInbound = {
+  port: number; protocol?: XrayPortProtocol; tls_cert_sha256?: string; reality_public_key?: string
+  public_endpoint?: XrayPublicEndpoint; users: string[]
+}
 type XrayCatalog = {
   ports: number[]; users: string[] | null; http_ports?: number[]
   port_protocols?: Record<number, XrayPortProtocol>; protocol_users?: Partial<Record<XrayPortProtocol, string[]>>
   trojan_trust?: { sha256: string }
   reality_public_key?: string
+  public_endpoints?: Record<number, XrayPublicEndpoint>
 }
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
@@ -106,7 +110,8 @@ const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.s
 const xrayDraftPolicyChanged = computed(() => xrayDraft.value.some(inbound =>
   panelXray.value?.current.catalog?.ports.includes(inbound.port) &&
   (inbound.protocol !== approvedProtocol(inbound.port) || inbound.tls_cert_sha256 !== approvedTLSCert(inbound.port) ||
-    inbound.reality_public_key !== approvedRealityKey(inbound.port)),
+    inbound.reality_public_key !== approvedRealityKey(inbound.port) ||
+    endpointLabel(inbound.public_endpoint, inbound.port) !== endpointLabel(approvedPublicEndpoint(inbound.port), inbound.port)),
 ))
 const draftPorts = computed(() => [...new Set([
   ...(panelXray.value?.current.catalog?.ports ?? []),
@@ -490,6 +495,14 @@ function approvedRealityKey(port: number) {
   return undefined
 }
 
+function approvedPublicEndpoint(port: number) {
+  return panelXray.value?.current.catalog?.public_endpoints?.[port]
+}
+
+function endpointLabel(endpoint: XrayPublicEndpoint | undefined, port: number) {
+  return endpoint ? `${endpoint.address}:${endpoint.port}` : `127.0.0.1:${port}`
+}
+
 function inboundProtocolLabel(protocol: XrayInbound['protocol']) {
   if (protocol === 'http') return '仅 HTTP'
   return protocol ? xrayProtocolName[protocol] : 'SOCKS5 / HTTP'
@@ -522,7 +535,8 @@ function toggleDraftUser(port: number, user: string) {
     xrayDraft.value.push({
       port, protocol: existing ? existing.protocol : approvedProtocol(port),
       tls_cert_sha256: existing ? existing.tls_cert_sha256 : approvedTLSCert(port),
-      reality_public_key: existing ? existing.reality_public_key : approvedRealityKey(port), users: next,
+      reality_public_key: existing ? existing.reality_public_key : approvedRealityKey(port),
+      public_endpoint: existing ? existing.public_endpoint : approvedPublicEndpoint(port), users: next,
     })
     xrayDraft.value.sort((left, right) => left.port - right.port)
   }
@@ -535,7 +549,7 @@ async function saveXrayDraft() {
   const { ports } = options.current.catalog
   const plan = xrayDraft.value.map(inbound => ports.includes(inbound.port) ? {
     port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port),
-    reality_public_key: approvedRealityKey(inbound.port), users: inbound.users,
+    reality_public_key: approvedRealityKey(inbound.port), public_endpoint: approvedPublicEndpoint(inbound.port), users: inbound.users,
   } : inbound)
   xrayDraftSaving.value = true
   panelXrayError.value = ''
@@ -841,13 +855,13 @@ onMounted(async () => {
           · SHA-256 <code>{{ panelXray.current.config.sha256 }}</code>
         </p>
         <ul v-if="panelXray?.current.applied?.length">
-          <li v-for="inbound in panelXray.current.applied" :key="inbound.port">127.0.0.1:{{ inbound.port }} · {{ inboundProtocolLabel(inbound.protocol) }} · {{ inbound.users.join('、') }}</li>
+          <li v-for="inbound in panelXray.current.applied" :key="inbound.port">{{ endpointLabel(inbound.public_endpoint, inbound.port) }} · {{ inboundProtocolLabel(inbound.protocol) }} · {{ inbound.users.join('、') }}</li>
         </ul>
         <p v-else-if="panelXray?.current.applied">当前没有已授权入站。</p>
         <div v-if="panelXray?.current.catalog" class="xray-draft">
           <h3>入站授权草稿</h3>
           <fieldset v-for="port in draftPorts" :key="port" :disabled="xrayDraftSaving || panelXraySubmitting">
-            <legend>127.0.0.1:{{ port }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
+            <legend>{{ endpointLabel(approvedPublicEndpoint(port), port) }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
             <p v-if="approvedTLSCert(port)">TLS 证书 SHA-256 <code>{{ approvedTLSCert(port) }}</code></p>
             <p v-if="approvedRealityKey(port)">REALITY 公钥 <code>{{ approvedRealityKey(port) }}</code></p>
             <label v-for="user in draftUsers(port)" :key="user">
@@ -858,7 +872,7 @@ onMounted(async () => {
             </label>
             <p v-if="!draftUsers(port).length">节点尚未登记此协议的用户凭据。</p>
           </fieldset>
-          <p v-if="xrayDraftPolicyChanged">节点批准的端口类型或服务端身份有变化。核对后重新保存草稿。</p>
+          <p v-if="xrayDraftPolicyChanged">节点批准的端口、接入地址或服务端身份有变化。核对后重新保存草稿。</p>
           <p v-else-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
           <p v-else-if="panelXray.draft_previewed" class="error">节点策略拒绝了此草稿。请更新授权后重新保存。</p>
           <p v-else-if="panelXray.draft">等待节点预览。可在节点心跳后刷新状态。</p>

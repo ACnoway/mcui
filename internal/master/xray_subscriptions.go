@@ -28,22 +28,36 @@ type subscriptionGrant struct {
 	realityPublicKey string
 }
 
-func (g subscriptionGrant) ports(user string) (ports, httpPorts []int, protocols map[int]string) {
+type subscriptionPorts struct {
+	ports     []int
+	httpPorts []int
+	protocols map[int]string
+	published map[int]xrayconfig.PublicEndpoint
+}
+
+func (g subscriptionGrant) ports(user string) subscriptionPorts {
+	var result subscriptionPorts
 	for _, inbound := range g.plan {
 		if slices.Contains(inbound.Users, user) {
-			ports = append(ports, inbound.Port)
+			result.ports = append(result.ports, inbound.Port)
 			if inbound.Protocol == xrayconfig.HTTP {
-				httpPorts = append(httpPorts, inbound.Port)
+				result.httpPorts = append(result.httpPorts, inbound.Port)
 			}
 			if inbound.Protocol != "" {
-				if protocols == nil {
-					protocols = make(map[int]string)
+				if result.protocols == nil {
+					result.protocols = make(map[int]string)
 				}
-				protocols[inbound.Port] = inbound.Protocol
+				result.protocols[inbound.Port] = inbound.Protocol
+			}
+			if inbound.PublicEndpoint != (xrayconfig.PublicEndpoint{}) {
+				if result.published == nil {
+					result.published = make(map[int]xrayconfig.PublicEndpoint)
+				}
+				result.published[inbound.Port] = inbound.PublicEndpoint
 			}
 		}
 	}
-	return ports, httpPorts, protocols
+	return result
 }
 
 func (g subscriptionGrant) matches(token store.XraySubscription, now time.Time) bool {
@@ -184,7 +198,7 @@ func (s *Server) changeXraySubscription(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				return err
 			}
-			if ports, _, _ := grant.ports(in.Username); len(ports) == 0 {
+			if len(grant.ports(in.Username).ports) == 0 {
 				return errSubscriptionUnavailable
 			}
 			auditAction = "xray.subscription.issue"
@@ -278,19 +292,19 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "subscription service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		ports, httpPorts, protocols := grant.ports(username)
-		if err != nil || !grant.matches(record, now) || len(ports) == 0 {
+		ports := grant.ports(username)
+		if err != nil || !grant.matches(record, now) || len(ports.ports) == 0 {
 			http.NotFound(w, r)
 			return
 		}
 		result := map[string]any{
-			"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports,
+			"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports.ports,
 			"revision": grant.revision, "expires_at": record.ExpiresAt,
 		}
-		if len(protocols) > len(httpPorts) {
+		if len(ports.protocols) > len(ports.httpPorts) {
 			result["schema_version"] = 3
-			result["port_protocols"] = protocols
-			for _, protocol := range protocols {
+			result["port_protocols"] = ports.protocols
+			for _, protocol := range ports.protocols {
 				switch protocol {
 				case xrayconfig.Trojan:
 					result["trojan_trust"] = grant.trojan
@@ -298,9 +312,13 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 					result["reality_public_key"] = grant.realityPublicKey
 				}
 			}
-		} else if len(httpPorts) > 0 {
+			if len(ports.published) > 0 {
+				result["schema_version"] = 4
+				result["public_endpoints"] = ports.published
+			}
+		} else if len(ports.httpPorts) > 0 {
 			result["schema_version"] = 2
-			result["http_ports"] = httpPorts
+			result["http_ports"] = ports.httpPorts
 		}
 		writeJSON(w, http.StatusOK, result)
 	})

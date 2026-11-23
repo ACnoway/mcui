@@ -18,7 +18,7 @@ const (
 	maxPorts    = 4
 	maxUsers    = 8
 	maxGrants   = 16
-	MaxPlanSize = 1024
+	MaxPlanSize = 1536
 )
 
 var userID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,23}$`)
@@ -28,11 +28,12 @@ func ValidUsername(username string) bool {
 }
 
 type Inbound struct {
-	Port             int      `json:"port"`
-	Protocol         string   `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
-	TLSCertSHA256    string   `json:"tls_cert_sha256,omitempty"`
-	RealityPublicKey string   `json:"reality_public_key,omitempty"`
-	Users            []string `json:"users"`
+	Port             int            `json:"port"`
+	Protocol         string         `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
+	TLSCertSHA256    string         `json:"tls_cert_sha256,omitempty"`
+	RealityPublicKey string         `json:"reality_public_key,omitempty"`
+	PublicEndpoint   PublicEndpoint `json:"public_endpoint,omitzero"`
+	Users            []string       `json:"users"`
 }
 
 // Plan contains only listen ports, approved protocols and node-local credential names.
@@ -43,12 +44,19 @@ func (p Plan) Valid() bool {
 		return false
 	}
 	lastPort, grants := 1023, 0
+	publicEndpoints := make(map[PublicEndpoint]bool)
 	for _, in := range p {
 		if in.Port <= lastPort || in.Port > 65535 || !validUsers(in.Users) ||
 			(in.Protocol != "" && in.Protocol != HTTP && !UsesProtocolCredentials(in.Protocol)) ||
 			(in.Protocol == Trojan && !digest.MatchString(in.TLSCertSHA256)) || (in.Protocol != Trojan && in.TLSCertSHA256 != "") ||
 			(in.Protocol == VLESSReality && !security.ValidNodeSecret(in.RealityPublicKey)) || (in.Protocol != VLESSReality && in.RealityPublicKey != "") {
 			return false
+		}
+		if in.PublicEndpoint != (PublicEndpoint{}) {
+			if !Publishable(in.Protocol) || !in.PublicEndpoint.Valid() || publicEndpoints[in.PublicEndpoint] {
+				return false
+			}
+			publicEndpoints[in.PublicEndpoint] = true
 		}
 		grants += len(in.Users)
 		lastPort = in.Port
@@ -94,13 +102,14 @@ func ParsePlan(encoded string) (Plan, error) {
 }
 
 type Catalog struct {
-	Ports            []int               `json:"ports"`
-	Users            []string            `json:"users"`
-	HTTPPorts        []int               `json:"http_ports,omitempty"`
-	PortProtocols    map[int]string      `json:"port_protocols,omitempty"`
-	ProtocolUsers    map[string][]string `json:"protocol_users,omitempty"`
-	TrojanTrust      *TrojanTrust        `json:"trojan_trust,omitempty"`
-	RealityPublicKey string              `json:"reality_public_key,omitempty"`
+	Ports            []int                  `json:"ports"`
+	Users            []string               `json:"users"`
+	HTTPPorts        []int                  `json:"http_ports,omitempty"`
+	PortProtocols    map[int]string         `json:"port_protocols,omitempty"`
+	ProtocolUsers    map[string][]string    `json:"protocol_users,omitempty"`
+	TrojanTrust      *TrojanTrust           `json:"trojan_trust,omitempty"`
+	RealityPublicKey string                 `json:"reality_public_key,omitempty"`
+	PublicEndpoints  map[int]PublicEndpoint `json:"public_endpoints,omitempty"`
 }
 
 func (c Catalog) Valid() bool {
@@ -140,6 +149,16 @@ func (c Catalog) Valid() bool {
 	} else if c.RealityPublicKey != "" {
 		return false
 	}
+	if len(c.PublicEndpoints) > len(c.PortProtocols) {
+		return false
+	}
+	endpoints := make(map[PublicEndpoint]bool)
+	for port, endpoint := range c.PublicEndpoints {
+		if !Publishable(c.PortProtocols[port]) || !endpoint.Valid() || endpoints[endpoint] {
+			return false
+		}
+		endpoints[endpoint] = true
+	}
 	names := make(map[string]bool)
 	for _, user := range c.Users {
 		names[user] = true
@@ -164,7 +183,7 @@ func (c Catalog) Allows(p Plan) bool {
 		if slices.Contains(c.HTTPPorts, in.Port) {
 			protocol = HTTP
 		}
-		if !slices.Contains(c.Ports, in.Port) || in.Protocol != protocol {
+		if !slices.Contains(c.Ports, in.Port) || in.Protocol != protocol || in.PublicEndpoint != c.PublicEndpoints[in.Port] {
 			return false
 		}
 		if protocol == Trojan && (c.TrojanTrust == nil || c.TrojanTrust.SHA256 != in.TLSCertSHA256) {
@@ -198,6 +217,7 @@ type LocalCatalog struct {
 	ShadowsocksServerKey string                       `json:"shadowsocks_server_key,omitempty"`
 	TrojanTLS            *TrojanTLS                   `json:"trojan_tls,omitempty"`
 	RealityPrivateKey    string                       `json:"reality_private_key,omitempty"`
+	PublicEndpoints      map[int]PublicEndpoint       `json:"public_endpoints,omitempty"`
 }
 
 func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
@@ -208,10 +228,14 @@ func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
 func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	if !digest.MatchString(c.ReleaseSHA256) || c.ReleaseSHA256 != releaseSHA256 ||
 		!publicIPv4(c.DestinationIP) || c.DestinationPort < 1 || c.DestinationPort > 65535 ||
-		len(c.Credentials) > maxUsers || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) {
+		len(c.Credentials) > maxUsers || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) ||
+		len(c.PublicEndpoints) > len(c.PortProtocols) {
 		return Catalog{}, errors.New("invalid node-local Xray catalog")
 	}
-	view := Catalog{Ports: slices.Clone(c.Ports), HTTPPorts: slices.Clone(c.HTTPPorts), PortProtocols: maps.Clone(c.PortProtocols)}
+	view := Catalog{
+		Ports: slices.Clone(c.Ports), HTTPPorts: slices.Clone(c.HTTPPorts),
+		PortProtocols: maps.Clone(c.PortProtocols), PublicEndpoints: maps.Clone(c.PublicEndpoints),
+	}
 	slices.Sort(view.Ports)
 	slices.Sort(view.HTTPPorts)
 	passwords := make(map[string]bool, len(c.Credentials))
@@ -305,8 +329,12 @@ func (c LocalCatalog) Render(releaseSHA256 string, plan Plan) ([]byte, Reference
 			protocol = "socks"
 		}
 		tag := fmt.Sprintf("%s-%d", protocol, entry.Port)
+		listen := "127.0.0.1"
+		if entry.PublicEndpoint != (PublicEndpoint{}) {
+			listen, tag = PublicListenAddress, publicTagPrefix+entry.PublicEndpoint.String()
+		}
 		inbound := map[string]any{
-			"listen": "127.0.0.1", "port": entry.Port, "protocol": protocol, "tag": tag,
+			"listen": listen, "port": entry.Port, "protocol": protocol, "tag": tag,
 			"settings": c.inboundSettings(protocol, entry.Users),
 		}
 		if protocol == Trojan {

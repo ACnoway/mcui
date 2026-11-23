@@ -1,0 +1,24 @@
+[Unit]
+Description=MCUI public Xray TCP ingress to port %i
+Documentation=https://github.com/ACnoway/mcui
+BindsTo=mcui-xray-publish@%i.socket
+After=mcui-xray-publish@%i.socket mcui-xray.service
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=128 127.0.0.2:%i
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateNetwork=yes
+NetworkNamespacePath=/run/netns/mcui-xray
+RestrictAddressFamilies=AF_INET
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32 127.0.0.2/32
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+InaccessiblePaths=-/etc/mcui -/etc/mcui-agent -/etc/mcui-xray -/var/lib/mcui -/var/lib/mcui-agent -/var/lib/mcui-xray -/run/mcui

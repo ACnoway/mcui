@@ -53,6 +53,8 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 			Inbounds []struct {
 				Port     int    `json:"port"`
 				Protocol string `json:"protocol"`
+				Listen   string `json:"listen"`
+				Tag      string `json:"tag"`
 				Settings struct {
 					Users []struct {
 						User string `json:"user"`
@@ -99,6 +101,13 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						return view
 					}
 					entry.TLSCertSHA256 = digest
+				}
+				if in.Listen == xrayconfig.PublicListenAddress {
+					endpoint, ok := xrayconfig.PublishedEndpoint(in.Tag)
+					if !ok {
+						return view
+					}
+					entry.PublicEndpoint = endpoint
 				}
 				for _, user := range in.Settings.Users {
 					name := user.User
@@ -181,7 +190,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	if err := r.verifyBundle(release); err != nil {
 		return err
 	}
-	if err := r.checkConfigUnits(ctx, data); err != nil {
+	if err := r.checkConfigUnits(ctx, data, true); err != nil {
 		return err
 	}
 	if err := authorize(ctx); err != nil {
@@ -205,16 +214,24 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	return r.change(ctx, state, intent{Action: Configure, Next: next, ConfigHash: hash})
 }
 
-func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte) error {
+func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSockets bool) error {
 	svc, ok := r.service.(interface {
-		checkConfigUnits(context.Context, string) error
+		checkConfigUnits(context.Context, string, []publishedInbound, bool) error
 	})
 	if !ok {
 		return errors.New("Xray service does not support isolated configuration")
 	}
 	var config struct {
-		Inbounds []json.RawMessage `json:"inbounds"`
-		Routing  struct {
+		Inbounds []struct {
+			Listen   string `json:"listen"`
+			Tag      string `json:"tag"`
+			Port     int    `json:"port"`
+			Protocol string `json:"protocol"`
+			Stream   struct {
+				Security string `json:"security"`
+			} `json:"streamSettings"`
+		} `json:"inbounds"`
+		Routing struct {
 			Rules []struct {
 				IP []string `json:"ip"`
 			} `json:"rules"`
@@ -224,12 +241,25 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte) error {
 		return errors.New("invalid saved Xray configuration")
 	}
 	if config.Inbounds != nil && len(config.Inbounds) == 0 && len(config.Routing.Rules) == 0 {
-		return svc.checkConfigUnits(ctx, "")
+		return svc.checkConfigUnits(ctx, "", nil, checkSockets)
 	}
 	if len(config.Inbounds) == 0 || len(config.Routing.Rules) != 1 || len(config.Routing.Rules[0].IP) != 1 {
 		return errors.New("invalid saved Xray route")
 	}
-	return svc.checkConfigUnits(ctx, config.Routing.Rules[0].IP[0])
+	var published []publishedInbound
+	for _, inbound := range config.Inbounds {
+		endpoint, ok := xrayconfig.PublishedEndpoint(inbound.Tag)
+		if inbound.Listen == "127.0.0.1" && !ok {
+			continue
+		}
+		encrypted := (inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
+			(inbound.Protocol == xrayconfig.VLESS && inbound.Stream.Security == "reality")
+		if inbound.Listen != xrayconfig.PublicListenAddress || !ok || !encrypted || inbound.Port < 1024 || inbound.Port > 65535 {
+			return errors.New("invalid saved Xray public listener")
+		}
+		published = append(published, publishedInbound{port: inbound.Port, endpoint: endpoint})
+	}
+	return svc.checkConfigUnits(ctx, config.Routing.Rules[0].IP[0], published, checkSockets)
 }
 
 func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) error {
@@ -243,7 +273,7 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) erro
 			return err
 		}
 		if next.Running {
-			if err := r.checkConfigUnits(ctx, raw); err != nil {
+			if err := r.checkConfigUnits(ctx, raw, false); err != nil {
 				return err
 			}
 		}

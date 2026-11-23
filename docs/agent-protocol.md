@@ -63,6 +63,8 @@ Trojan 专用草稿项使用 `protocol: "trojan"`，并在 `users` 之前写入 
 
 VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之前写入 `reality_public_key`，值为节点 X25519 公钥的无填充 Base64URL 编码。领取还要求 `xray_reality=v1`。Helper 从节点私钥派生公钥并复验签名草稿，订阅只向对应端口的获准用户返回已应用修订的公钥。UUID 和 Short ID 由节点管理员另行交付。
 
+启用公网入口的 Trojan/TLS 或 VLESS/REALITY 草稿项在 `users` 之前附加 `public_endpoint`，对象字段为宿主公网 IPv4 `address` 和外部 TCP `port`。领取要求 `xray_public=v1`。Helper 复验目录中的映射、渲染后入站标记和固定 systemd 单元，已应用快照从已提交配置复原相同映射。受控草稿最大 1536 字节，订阅仅返回对应用户已签发且已应用的端点。
+
 **取消对象**字段：`schema_version`、`node_id`、`task_id`、`sequence`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`，使用任务用途密钥和取消域。取消须目标精确匹配；可独立于顺序任务领取并持久化。取消先于开始则任务消费为 CANCELED；已开始只在操作定义的安全点停止并回滚，无法安全中止时继续完成既有已授权步骤或安全恢复，返回 `CANCEL_TOO_LATE`，不能虚报取消成功。取消与开始由本地同一事务/锁线性化。
 
 **缺口跳过对象**字段：`schema_version`、`node_id`、`sequence`、`reason`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`；`reason` 仅 `VOID_UNISSUED`、`EXPIRED`、`CANCELED`。仅当前期望序号可消费，必须验签且有效；Master 必须证明该序号未签发或已有不可启动的终态，不能借 skip 替换已启动任务。为避免跳过未知已开始任务，节点存在该序号 RUNNING/未决记录时拒绝 skip 并进入对账。跳过是独立签名的空槽声明，不是新任务或任意跳号授权；其序号和不可变内容须持久化。签发 skip 后不得再签发该槽任务。

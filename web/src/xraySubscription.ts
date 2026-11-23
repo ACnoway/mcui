@@ -5,8 +5,10 @@ export const xrayProtocolName: Record<XrayProtocol, string> = {
   'vless-reality': 'VLESS / REALITY',
 }
 
+export type XrayPublicEndpoint = { address: string; port: number }
+
 export type XraySubscription = {
-  schema_version: 1 | 2 | 3
+  schema_version: 1 | 2 | 3 | 4
   username: string
   address: '127.0.0.1'
   ports: number[]
@@ -14,6 +16,7 @@ export type XraySubscription = {
   port_protocols?: Record<number, Exclude<XrayProtocol, 'socks'>>
   trojan_trust?: { certificate: string; sha256: string }
   reality_public_key?: string
+  public_endpoints?: Record<number, XrayPublicEndpoint>
   revision: number
   expires_at: number
 }
@@ -22,21 +25,55 @@ function validPort(value: number) {
   return Number.isInteger(value) && value >= 1024 && value <= 65535
 }
 
+function validPublishedEndpoint(value: unknown): value is XrayPublicEndpoint {
+  if (!value || typeof value !== 'object') return false
+  const { address, port } = value as XrayPublicEndpoint
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || typeof address !== 'string' ||
+    !/^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$/.test(address)) return false
+  const bytes = address.split('.').map(Number)
+  const [a, b, c, d] = bytes
+  return bytes.every(byte => byte <= 255) && a > 0 && a < 224 && a !== 10 && a !== 127 &&
+    !(a === 100 && b >= 64 && b <= 127) && !(a === 168 && b === 63 && c === 129 && d === 16) &&
+    !(a === 169 && b === 254) && !(a === 172 && b >= 16 && b <= 31) &&
+    !(a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) &&
+    !(a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) && !(a === 203 && b === 0 && c === 113)
+}
+
 export function validSubscription(value: unknown): value is XraySubscription {
   if (!value || typeof value !== 'object') return false
-  const { schema_version, username, address, ports, http_ports, port_protocols, trojan_trust, reality_public_key, revision, expires_at } = value as XraySubscription
+  const {
+    schema_version, username, address, ports, http_ports, port_protocols, trojan_trust, reality_public_key, public_endpoints,
+    revision, expires_at,
+  } = value as XraySubscription
   if (typeof username !== 'string' || !/^[a-z][a-z0-9_-]{0,23}$/.test(username) || address !== '127.0.0.1' ||
     !Array.isArray(ports) || ports.length === 0 || ports.length > 4 ||
     !ports.every((port, index) => validPort(port) && (index === 0 || ports[index - 1] < port)) ||
     !Number.isSafeInteger(revision) || revision <= 0 || !Number.isSafeInteger(expires_at) || expires_at <= 0) return false
-  if (schema_version !== 3 && (trojan_trust !== undefined || reality_public_key !== undefined)) return false
+  const typed = schema_version === 3 || schema_version === 4
+  if (!typed && (trojan_trust !== undefined || reality_public_key !== undefined)) return false
+  if (schema_version !== 4 && public_endpoints !== undefined) return false
   if (schema_version === 1) return http_ports === undefined && port_protocols === undefined
   if (schema_version === 2) {
     return port_protocols === undefined && Array.isArray(http_ports) && http_ports.length > 0 && http_ports.length <= ports.length &&
       http_ports.every((port, index) => ports.includes(port) && (index === 0 || http_ports[index - 1] < port))
   }
-  if (schema_version !== 3 || http_ports !== undefined || !port_protocols || typeof port_protocols !== 'object' || Array.isArray(port_protocols)) return false
+  if (!typed || http_ports !== undefined || !port_protocols || typeof port_protocols !== 'object' || Array.isArray(port_protocols)) return false
   const entries = Object.entries(port_protocols)
+  if (schema_version === 4) {
+    if (!public_endpoints || typeof public_endpoints !== 'object' || Array.isArray(public_endpoints)) return false
+    const published = Object.entries(public_endpoints)
+    const seen = new Set<string>()
+    if (!published.length || published.some(([key, endpoint]) => {
+      const port = Number(key)
+      const protocol = port_protocols[port]
+      if (String(port) !== key || !ports.includes(port) || (protocol !== 'trojan' && protocol !== 'vless-reality') ||
+        !validPublishedEndpoint(endpoint)) return true
+      const address = `${endpoint.address}:${endpoint.port}`
+      if (seen.has(address)) return true
+      seen.add(address)
+      return false
+    })) return false
+  }
   if (entries.some(([, protocol]) => protocol === 'trojan')) {
     if (!trojan_trust || typeof trojan_trust.certificate !== 'string' || trojan_trust.certificate.length > 1024 ||
       !/^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+\n-----END CERTIFICATE-----$/.test(trojan_trust.certificate.trim()) ||
@@ -54,12 +91,17 @@ export function subscriptionProtocol(subscription: XraySubscription, port: numbe
   return subscription.port_protocols?.[port] ?? (subscription.http_ports?.includes(port) ? 'http' : 'socks')
 }
 
+export function subscriptionEndpoint(subscription: XraySubscription, port: number): XrayPublicEndpoint {
+  return subscription.public_endpoints?.[port] ?? { address: subscription.address, port }
+}
+
 const passwordPattern = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/
 const uuidV4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const shadowsocksKey = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/
 
 function outboundSettings(subscription: XraySubscription, port: number, protocol: XrayProtocol, credential: string) {
-  const endpoint = { address: subscription.address, port }
+  const { address, port: endpointPort } = subscriptionEndpoint(subscription, port)
+  const endpoint = { address, port: endpointPort }
   switch (protocol) {
     case 'vless':
     case 'vmess':

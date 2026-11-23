@@ -115,6 +115,28 @@ Trojan 模板适用于 Linux amd64 的 Xray `v26.10.31`。监听固定在专用�
 | 密钥轮换与撤销 | 更换节点密钥后，绑定旧公钥的草稿被拒绝。新配置运行后，旧公钥客户端无法连接，新公钥客户端可用。重新应用授权后，撤销账号无法连接，获准的另一账号可以连接。 |
 | 静态检查与构建 | 本地相关 Go 测试、Linux `go vet`、双架构编译、协议向量和前端构建通过。`ro` 以 Go `1.27.4`、Node.js `26.13.1`、pnpm `12.17.0` 通过 `scripts/check-static.sh`，完成 Master、Agent 双架构安装包及 SHA-256 校验。运行验收使用 amd64。 |
 
+## 受控公网 TCP 接入
+
+节点 root 可为 Trojan/TLS 或 VLESS/REALITY 端口配置一个已绑定于节点宿主机的公网 IPv4 和一个 TCP 端口。systemd 在宿主网络接受连接，将连接交给专用命名空间中的 `systemd-socket-proxyd`。中继固定连向 `127.0.0.2:<节点端口>`，由 Xray 做协议认证及业务目的校验。普通回环入站仍使用 `127.0.0.1`。[systemd-socket-proxyd](https://www.freedesktop.org/software/systemd/man/latest/systemd-socket-proxyd.html)
+
+1. 确认本机具有所选公网 IPv4，更新 Master、独立签发服务、Agent 和 Helper。将仓库中的 [`mcui-xray-publish@.service`](../deploy/systemd/mcui-xray-publish@.service) 安装到 `/etc/systemd/system/`。在当前 Xray 服务 drop-in 的 `IPAddressAllow` 中追加 `127.0.0.2/32`，保留原回环、已批准业务目的和 `IPAddressDeny=any`。
+2. 为当前节点内端口准备对应的 `.socket`。例如节点内端口为 `1084` 时，创建 `/etc/systemd/system/mcui-xray-publish@1084.socket`，用节点实际公网地址替换 `PUBLIC_IPV4`。编辑完执行 `systemctl daemon-reload`。
+
+   ```ini
+   [Socket]
+   ListenStream=PUBLIC_IPV4:443
+   Accept=no
+   Service=mcui-xray-publish@1084.service
+
+   [Install]
+   WantedBy=sockets.target
+   ```
+
+3. 在节点 `managed-inbounds.json` 的现有加密端口配置中加入 `"public_endpoints": {"1084": {"address": "PUBLIC_IPV4", "port": 443}}`。等待节点心跳，核对面板地址、服务端身份及用户，保存草稿并签发。Helper 复验公网套接字的地址、端口、启动单元和中继的命名空间与回环限制。
+4. 配置任务成功后，由节点 root 执行 `systemctl enable --now mcui-xray-publish@1084.socket`。签发订阅，使用可达该 IPv4 的客户端连接，核对凭据拒绝及批准目标。停止公网入口时停用 `.socket` 并停止其 `.service`。更换宿主地址或端口前先关闭旧入口，更新单元与节点目录，再重新保存草稿、签发及激活。
+
+公网入口为 TCP 字节中继，Xray 看到的对端是命名空间内的中继地址。移除授权或将该端口恢复为回环模板后，原公网套接字无法到达该端口的本地服务。外部来访地址过滤可在宿主机防火墙配置。
+
 ## 面板管理入站与授权
 
 1. 在节点 root 的 `/etc/mcui-xray` 目录下创建 `managed-inbounds.json`，目录和文件分别为 `root:root`、`0700` 和 `0600`。发布摘要、目的 IPv4 和 TCP 端口须匹配已审核制品和节点网络策略。每个用户分别生成 32 字节随机密码，再按无填充 Base64URL 编码。
@@ -187,7 +209,7 @@ IPAddressAllow=<批准的目标 IPv4>/32
 
 订阅绑定已提交的配置修订和摘要。节点离线、Xray 停止或有未决生命周期任务时暂停拉取。应用新修订、节点重新接入、轮换及撤销会使旧链接失效。撤销链接影响后续下载。撤销已下载配置的连接权限须应用移除用户授权或轮换密码的新修订。
 
-浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess、Shadowsocks 2022、Trojan 或 REALITY 时返回 `schema_version: 3`，用 `port_protocols` 标记用户获准的各类端口，映射外的授权端口使用原 SOCKS 模板。拥有 Trojan 授权的订阅还返回 `trojan_trust`，内含与已签名修订匹配的公开证书及其摘要。拥有 VLESS/REALITY 授权的订阅还返回 `reality_public_key`。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
+浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess、Shadowsocks 2022、Trojan 或 REALITY 时用 `port_protocols` 标明类型，默认返回 `schema_version: 3`。用户获准的端口中含公网接入时返回 `schema_version: 4`，以 `public_endpoints` 将节点内端口映射到签名批准的公网地址和 TCP 端口。Trojan 订阅返回 `trojan_trust`，VLESS/REALITY 订阅返回 `reality_public_key`。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
 
 ### 订阅验收记录（2026-11-23）
 
