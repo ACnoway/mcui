@@ -484,9 +484,13 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	}
 	path := filepath.Join(dir, "controlled-inbound.json")
 	catalog := xrayconfig.LocalCatalog{
-		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
-		Credentials: map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
-		HTTPPorts:   []int{1081},
+		ReleaseSHA256: release.SHA256, Ports: []int{1080, 1081, 1082}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
+		Credentials:   map[string]string{"alice": strings.Repeat("A", 43), "bob": strings.Repeat("E", 43)},
+		HTTPPorts:     []int{1081},
+		PortProtocols: map[int]string{1082: xrayconfig.VLESS},
+		ProtocolCredentials: map[string]map[string]string{
+			xrayconfig.VLESS: {"alice": "cc2f34e1-8197-4751-b505-c27f9e2d841b"},
+		},
 	}
 	save := func() {
 		t.Helper()
@@ -499,7 +503,10 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 		}
 	}
 	save()
-	plan := xrayconfig.Plan{{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}}
+	plan := xrayconfig.Plan{
+		{Port: 1080, Users: []string{"alice", "bob"}}, {Port: 1081, Protocol: xrayconfig.HTTP, Users: []string{"bob"}},
+		{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"alice"}},
+	}
 	data, ref, err := readCandidate(path, release, plan.Encode())
 	if err != nil || !ref.Matches(data) {
 		t.Fatalf("preview managed configuration: %v", err)
@@ -511,7 +518,7 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	}
 	view := r.Inventory(readState(t, r), "", true)
 	if view.Applied == nil || view.Applied.Encode() != plan.Encode() {
-		t.Fatal("applied inventory did not preserve the HTTP-only authorization")
+		t.Fatal("applied inventory did not preserve the typed authorizations")
 	}
 	catalog.HTTPPorts = nil
 	save()

@@ -7,6 +7,7 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 
@@ -18,7 +19,6 @@ const (
 	maxUsers    = 8
 	maxGrants   = 16
 	MaxPlanSize = 1024
-	HTTP        = "http"
 )
 
 var userID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,23}$`)
@@ -42,7 +42,7 @@ func (p Plan) Valid() bool {
 	}
 	lastPort, grants := 1023, 0
 	for _, in := range p {
-		if in.Port <= lastPort || in.Port > 65535 || (in.Protocol != "" && in.Protocol != HTTP) || !validUsers(in.Users) {
+		if in.Port <= lastPort || in.Port > 65535 || (in.Protocol != "" && in.Protocol != HTTP && !typedProtocol(in.Protocol)) || !validUsers(in.Users) {
 			return false
 		}
 		grants += len(in.Users)
@@ -70,10 +70,6 @@ func (p Plan) Encode() string {
 	return string(raw)
 }
 
-func (p Plan) UsesHTTP() bool {
-	return slices.ContainsFunc(p, func(in Inbound) bool { return in.Protocol == HTTP })
-}
-
 func PlanDigest(encoded string) string {
 	sum := sha256.Sum256([]byte(encoded))
 	return hex.EncodeToString(sum[:])
@@ -93,13 +89,16 @@ func ParsePlan(encoded string) (Plan, error) {
 }
 
 type Catalog struct {
-	Ports     []int    `json:"ports"`
-	Users     []string `json:"users"`
-	HTTPPorts []int    `json:"http_ports,omitempty"`
+	Ports         []int               `json:"ports"`
+	Users         []string            `json:"users"`
+	HTTPPorts     []int               `json:"http_ports,omitempty"`
+	PortProtocols map[int]string      `json:"port_protocols,omitempty"`
+	ProtocolUsers map[string][]string `json:"protocol_users,omitempty"`
 }
 
 func (c Catalog) Valid() bool {
-	if len(c.Ports) == 0 || len(c.Ports) > maxPorts || len(c.HTTPPorts) > len(c.Ports) || !validUsers(c.Users) {
+	if len(c.Ports) == 0 || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) ||
+		(len(c.Users) > 0 && !validUsers(c.Users)) {
 		return false
 	}
 	last := 1023
@@ -116,7 +115,24 @@ func (c Catalog) Valid() bool {
 		}
 		last = port
 	}
-	return true
+	for port, protocol := range c.PortProtocols {
+		if !typedProtocol(protocol) || !slices.Contains(c.Ports, port) || slices.Contains(c.HTTPPorts, port) {
+			return false
+		}
+	}
+	names := make(map[string]bool)
+	for _, user := range c.Users {
+		names[user] = true
+	}
+	for protocol, users := range c.ProtocolUsers {
+		if !typedProtocol(protocol) || !validUsers(users) {
+			return false
+		}
+		for _, user := range users {
+			names[user] = true
+		}
+	}
+	return len(names) > 0 && len(names) <= maxUsers
 }
 
 func (c Catalog) Allows(p Plan) bool {
@@ -124,11 +140,19 @@ func (c Catalog) Allows(p Plan) bool {
 		return false
 	}
 	for _, in := range p {
-		if !slices.Contains(c.Ports, in.Port) || (in.Protocol == HTTP) != slices.Contains(c.HTTPPorts, in.Port) {
+		protocol := c.PortProtocols[in.Port]
+		if slices.Contains(c.HTTPPorts, in.Port) {
+			protocol = HTTP
+		}
+		if !slices.Contains(c.Ports, in.Port) || in.Protocol != protocol {
 			return false
 		}
+		users := c.Users
+		if typedProtocol(protocol) {
+			users = c.ProtocolUsers[protocol]
+		}
 		for _, user := range in.Users {
-			if !slices.Contains(c.Users, user) {
+			if !slices.Contains(users, user) {
 				return false
 			}
 		}
@@ -137,12 +161,15 @@ func (c Catalog) Allows(p Plan) bool {
 }
 
 type LocalCatalog struct {
-	ReleaseSHA256   string            `json:"release_sha256"`
-	Ports           []int             `json:"ports"`
-	Credentials     map[string]string `json:"credentials"`
-	DestinationIP   string            `json:"destination_ip"`
-	DestinationPort int               `json:"destination_port"`
-	HTTPPorts       []int             `json:"http_ports,omitempty"`
+	ReleaseSHA256        string                       `json:"release_sha256"`
+	Ports                []int                        `json:"ports"`
+	Credentials          map[string]string            `json:"credentials"`
+	DestinationIP        string                       `json:"destination_ip"`
+	DestinationPort      int                          `json:"destination_port"`
+	HTTPPorts            []int                        `json:"http_ports,omitempty"`
+	PortProtocols        map[int]string               `json:"port_protocols,omitempty"`
+	ProtocolCredentials  map[string]map[string]string `json:"protocol_credentials,omitempty"`
+	ShadowsocksServerKey string                       `json:"shadowsocks_server_key,omitempty"`
 }
 
 func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
@@ -153,10 +180,10 @@ func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
 func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	if !digest.MatchString(c.ReleaseSHA256) || c.ReleaseSHA256 != releaseSHA256 ||
 		!publicIPv4(c.DestinationIP) || c.DestinationPort < 1 || c.DestinationPort > 65535 ||
-		len(c.Credentials) > maxUsers || len(c.Ports) > maxPorts || len(c.HTTPPorts) > len(c.Ports) {
+		len(c.Credentials) > maxUsers || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) {
 		return Catalog{}, errors.New("invalid node-local Xray catalog")
 	}
-	view := Catalog{Ports: slices.Clone(c.Ports), HTTPPorts: slices.Clone(c.HTTPPorts)}
+	view := Catalog{Ports: slices.Clone(c.Ports), HTTPPorts: slices.Clone(c.HTTPPorts), PortProtocols: maps.Clone(c.PortProtocols)}
 	slices.Sort(view.Ports)
 	slices.Sort(view.HTTPPorts)
 	passwords := make(map[string]bool, len(c.Credentials))
@@ -168,6 +195,34 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 		view.Users = append(view.Users, user)
 	}
 	slices.Sort(view.Users)
+	needsShadowsocksKey := c.ShadowsocksServerKey != "" || len(c.ProtocolCredentials[Shadowsocks]) > 0
+	for _, protocol := range c.PortProtocols {
+		needsShadowsocksKey = needsShadowsocksKey || protocol == Shadowsocks
+	}
+	if needsShadowsocksKey {
+		if !validShadowsocksKey(c.ShadowsocksServerKey) {
+			return Catalog{}, errors.New("invalid node-local Shadowsocks server key")
+		}
+		passwords[c.ShadowsocksServerKey] = true
+	}
+	if len(c.ProtocolCredentials) > 0 {
+		view.ProtocolUsers = make(map[string][]string, len(c.ProtocolCredentials))
+	}
+	for protocol, credentials := range c.ProtocolCredentials {
+		if !typedProtocol(protocol) || len(credentials) == 0 || len(credentials) > maxUsers {
+			return Catalog{}, errors.New("invalid node-local Xray protocol credentials")
+		}
+		names := make([]string, 0, len(credentials))
+		for name, secret := range credentials {
+			if !validTypedCredential(protocol, secret) || passwords[secret] {
+				return Catalog{}, errors.New("invalid or repeated node-local Xray credential")
+			}
+			passwords[secret] = true
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		view.ProtocolUsers[protocol] = names
+	}
 	if !view.Valid() {
 		return Catalog{}, errors.New("invalid node-local Xray catalog")
 	}
@@ -188,18 +243,10 @@ func (c LocalCatalog) Render(releaseSHA256 string, plan Plan) ([]byte, Reference
 			protocol = "socks"
 		}
 		tag := fmt.Sprintf("%s-%d", protocol, entry.Port)
-		users := make([]map[string]string, 0, len(entry.Users))
-		for _, user := range entry.Users {
-			users = append(users, map[string]string{"user": user, "pass": c.Credentials[user]})
-		}
-		if protocol == HTTP {
-			inbounds = append(inbounds, map[string]any{
-				"listen": "127.0.0.1", "port": entry.Port, "protocol": HTTP, "tag": tag,
-				"settings": map[string]any{"allowTransparent": false, "users": users},
-			})
-		} else {
-			inbounds = append(inbounds, socksInbound(entry.Port, tag, users))
-		}
+		inbounds = append(inbounds, map[string]any{
+			"listen": "127.0.0.1", "port": entry.Port, "protocol": protocol, "tag": tag,
+			"settings": c.inboundSettings(protocol, entry.Users),
+		})
 		tags = append(tags, tag)
 	}
 	if len(plan) != 0 {

@@ -68,6 +68,7 @@ type XrayDeliveryCapabilities struct {
 	Config      bool
 	Plan        bool
 	HTTP        bool
+	Protocols   bool
 }
 
 func (c XrayDeliveryCapabilities) supports(operation string) bool {
@@ -92,11 +93,27 @@ func (c XrayDeliveryCapabilities) supportsTask(task lifecycleauth.InstallTask) b
 	if !c.supports(task.Operation) || (task.Plan != "" && !c.Plan) {
 		return false
 	}
-	if task.Plan == "" || c.HTTP {
+	if task.Plan == "" || (c.HTTP && c.Protocols) {
 		return true
 	}
 	plan, err := xrayconfig.ParsePlan(task.Plan)
-	return err == nil && !plan.UsesHTTP()
+	if err != nil {
+		return false
+	}
+	for _, inbound := range plan {
+		switch inbound.Protocol {
+		case "":
+		case xrayconfig.HTTP:
+			if !c.HTTP {
+				return false
+			}
+		default:
+			if !c.Protocols {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Ack is a persisted observation from an externally authenticated node. Result

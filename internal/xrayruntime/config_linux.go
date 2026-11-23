@@ -56,6 +56,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				Settings struct {
 					Users []struct {
 						User string `json:"user"`
+						Name string `json:"email"`
 					} `json:"users"`
 				} `json:"settings"`
 			} `json:"inbounds"`
@@ -71,7 +72,11 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 					return view
 				}
 				for _, user := range in.Settings.Users {
-					entry.Users = append(entry.Users, user.User)
+					name := user.User
+					if entry.Protocol == xrayconfig.VLESS || entry.Protocol == xrayconfig.VMess || entry.Protocol == xrayconfig.Shadowsocks {
+						name = user.Name
+					}
+					entry.Users = append(entry.Users, name)
 				}
 				plan = append(plan, entry)
 			}

@@ -1,6 +1,8 @@
 package xrayconfig
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -68,7 +70,7 @@ func TestManagedInboundsBindGrantsAndCredentialRotation(t *testing.T) {
 		t.Fatal("rendered the SOCKS template on an HTTP-only port")
 	}
 	plan[1].Protocol = HTTP
-	if got, err := ParsePlan(plan.Encode()); err != nil || !got.UsesHTTP() {
+	if got, err := ParsePlan(plan.Encode()); err != nil || got[1].Protocol != HTTP {
 		t.Fatalf("HTTP-only authorization did not round trip: %v", err)
 	}
 	data, mixed, err := catalog.Render(release, plan)
@@ -106,7 +108,7 @@ func TestManagedInboundsBindGrantsAndCredentialRotation(t *testing.T) {
 		`null`, `[{"port":1080,"users":[]}]`, `[{"port":1080,"users":["alice","alice"]}]`,
 		`[{"port":1080,"users":["bob","alice"]}]`, `[{"port":1080,"port":1081,"users":["alice"]}]`,
 		`[{"port":1080,"users":["alice"],"destination":"1.2.3.4"}]`,
-		`[{"port":1080,"protocol":"socks","users":["alice"]}]`, `[{"port":1080,"protocol":"vless","users":["alice"]}]`,
+		`[{"port":1080,"protocol":"socks","users":["alice"]}]`, `[{"port":1080,"protocol":"trojan","users":["alice"]}]`,
 	} {
 		if _, err := ParsePlan(bad); err == nil {
 			t.Errorf("accepted invalid plan %s", bad)
@@ -115,5 +117,56 @@ func TestManagedInboundsBindGrantsAndCredentialRotation(t *testing.T) {
 	unknown := Plan{{Port: 1082, Users: []string{"alice"}}}
 	if _, _, err := catalog.Render(release, unknown); err == nil {
 		t.Fatal("rendered an unapproved listen port")
+	}
+}
+
+func TestProtocolCredentialsStayLocalAndBindTheApprovedPort(t *testing.T) {
+	release := strings.Repeat("a", 64)
+	vlessID := "cc2f34e1-8197-4751-b505-c27f9e2d841b"
+	vmessID := "d631da39-7a6d-4ac4-8b3e-a0a39ec02f38"
+	serverKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	userKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
+	catalog := LocalCatalog{
+		ReleaseSHA256: release, Ports: []int{1081, 1082, 1083}, DestinationIP: "93.184.216.34", DestinationPort: 8080,
+		PortProtocols: map[int]string{1081: VLESS, 1082: VMess, 1083: Shadowsocks},
+		ProtocolCredentials: map[string]map[string]string{
+			VLESS: {"alice": vlessID}, VMess: {"bob": vmessID}, Shadowsocks: {"alice": userKey},
+		},
+		ShadowsocksServerKey: serverKey,
+	}
+	document, err := json.Marshal(catalog)
+	var decoded LocalCatalog
+	if err != nil || json.Unmarshal(document, &decoded) != nil {
+		t.Fatal("unable to read the typed node catalog")
+	}
+	plan := Plan{
+		{Port: 1081, Protocol: VLESS, Users: []string{"alice"}},
+		{Port: 1082, Protocol: VMess, Users: []string{"bob"}},
+		{Port: 1083, Protocol: Shadowsocks, Users: []string{"alice"}},
+	}
+	view, err := decoded.Public(release)
+	if err != nil || !view.Allows(plan) {
+		t.Fatalf("three-protocol plan rejected: %v", err)
+	}
+	public, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{vlessID, vmessID, serverKey, userKey} {
+		if bytes.Contains(public, []byte(secret)) || strings.Contains(plan.Encode(), secret) {
+			t.Fatal("configuration credentials leaked into a public catalog or plan")
+		}
+	}
+	data, ref, err := decoded.Render(release, plan)
+	if err != nil || !ref.Matches(data) || !bytes.Contains(data, []byte(`"method":"2022-blake3-aes-256-gcm","network":"tcp"`)) {
+		t.Fatalf("typed configuration did not bind the protocol settings: %v", err)
+	}
+	if view.Allows(Plan{{Port: 1082, Protocol: VMess, Users: []string{"alice"}}}) ||
+		view.Allows(Plan{{Port: 1081, Protocol: Shadowsocks, Users: []string{"alice"}}}) {
+		t.Fatal("granted a user for the wrong protocol or port")
+	}
+	decoded.ProtocolCredentials[Shadowsocks]["alice"] = serverKey
+	if _, err := decoded.Public(release); err == nil {
+		t.Fatal("accepted a Shadowsocks user key matching the server key")
 	}
 }

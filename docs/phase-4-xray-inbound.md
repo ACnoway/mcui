@@ -2,6 +2,33 @@
 
 面板管理模式允许单管理员给节点预先批准的端口分配用户。使用该模式时，先完成本页的节点准备第 1–3 步，再建立节点目录和面板草稿。节点、Master、Agent、Helper 和独立签发服务须使用支持该模式的版本。
 
+## VLESS、VMess 和 Shadowsocks 2022
+
+这些模板适用于 Linux amd64 的 Xray `v26.10.31`，沿用独立签名清单、节点预配端口及用户授权。监听地址固定为专用命名空间的 `127.0.0.1`，业务路由只允许节点批准的字面 IPv4 和 TCP 端口。启用前更新 Master、独立签发服务、Agent 和 Helper。
+
+| 协议 | 使用方式 |
+|---|---|
+| VLESS | 用户使用小写 UUIDv4，模板使用本地 RAW TCP，VLESS `decryption` 为 `none`。 |
+| VMess | 用户使用独立的小写 UUIDv4，客户端使用 `aes-128-gcm`，服务端与客户端需要正确时间。 |
+| Shadowsocks 2022 | 固定 `2022-blake3-aes-256-gcm`，服务端和各用户分别使用 32 字节随机值的有填充 Base64 密钥。向用户交付 `服务端密钥:该用户密钥`。 |
+
+在 `managed-inbounds.json` 中用 `port_protocols` 为 `ports` 中的端口指定模板，并在 `protocol_credentials` 中登记各协议可授权的用户。以下展示新增字段，可与下节的 `credentials` 配合使用。
+
+```json
+{
+  "ports": [1081, 1082, 1083],
+  "port_protocols": { "1081": "vless", "1082": "vmess", "1083": "shadowsocks" },
+  "protocol_credentials": {
+    "vless": { "alice": "<Alice 的 VLESS UUID>" },
+    "vmess": { "alice": "<Alice 的另一个 VMess UUID>" },
+    "shadowsocks": { "alice": "<Alice 的 Shadowsocks 用户密钥>" }
+  },
+  "shadowsocks_server_key": "<节点的 Shadowsocks 服务端密钥>"
+}
+```
+
+可在 Linux 用 `cat /proc/sys/kernel/random/uuid` 生成 UUIDv4，用 `openssl rand -base64 32` 生成每个 Shadowsocks 密钥。为每人、每种协议独立生成凭据。轮换后保存节点文件，等待心跳报告新候选摘要，再从面板签发新修订。订阅只返回端口、协议和用户，凭据通过部署方的安全渠道交付。浏览器使用选中端口对应的凭据生成原生 Xray 配置。公网监听、TLS、REALITY 和 Trojan 仍待各自的模板与验收。
+
 ## 面板管理入站与授权
 
 1. 在节点 root 的 `/etc/mcui-xray` 目录下创建 `managed-inbounds.json`，目录和文件分别为 `root:root`、`0700` 和 `0600`。发布摘要、目的 IPv4 和 TCP 端口须匹配已审核制品和节点网络策略。每个用户分别生成 32 字节随机密码，再按无填充 Base64URL 编码。
@@ -74,7 +101,7 @@ IPAddressAllow=<批准的目标 IPv4>/32
 
 订阅绑定已提交的配置修订和摘要。节点离线、Xray 停止或有未决生命周期任务时暂停拉取。应用新修订、节点重新接入、轮换及撤销会使旧链接失效。撤销链接影响后续下载。撤销已下载配置的连接权限须应用移除用户授权或轮换密码的新修订。
 
-浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。含 HTTP 专用端口时返回 `schema_version: 2`，由 `http_ports` 标识该用户获准端口中的 HTTP 专用端口。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
+浏览器把 URL 片段中的令牌作为 HTTPS `Authorization: Bearer` 请求 `GET /api/v1/subscription`。该端点按来源地址限流并禁用响应缓存，返回当前修订许可的回环端口及用户名。只有原 SOCKS 端口时继续返回 `schema_version: 1`。仅增加 HTTP 专用类型时返回 `schema_version: 2` 和 `http_ports`。含 VLESS、VMess 或 Shadowsocks 2022 时返回 `schema_version: 3`，用 `port_protocols` 标记用户获准的各类端口，映射外的授权端口使用原 SOCKS 模板。Master 只保存订阅令牌的 SHA-256 摘要、修订及到期时间，审计记录操作和目标用户。部署方的反向代理须避免记录 `Authorization` 请求头和签发响应正文。恢复旧备份时，使用独立检查点核对撤销状态，或由管理员复核并撤销恢复的链接后再开放订阅端点。
 
 ### 订阅验收记录（2026-11-23）
 

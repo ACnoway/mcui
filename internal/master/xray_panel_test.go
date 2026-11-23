@@ -198,7 +198,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -257,11 +257,17 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	complete(apply.TaskID, 4, newer)
 
 	node.PlanSupported, node.Candidate = true, xrayconfig.Reference{}
-	node.Catalog = &xrayconfig.Catalog{Ports: []int{1080, 1081}, Users: []string{"alice", "bob"}, HTTPPorts: []int{1080}}
+	node.Catalog = &xrayconfig.Catalog{
+		Ports: []int{1080, 1081, 1082}, Users: []string{"alice", "bob"}, HTTPPorts: []int{1080},
+		PortProtocols: map[int]string{1082: xrayconfig.VLESS}, ProtocolUsers: map[string][]string{xrayconfig.VLESS: {"carol"}},
+	}
 	node.Config, node.ConfigRevision = config, 4
 	heartbeat(&node)
 	draftPath := "https://panel.example.test" + path + "/draft"
-	plan := xrayconfig.Plan{{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}}}
+	plan := xrayconfig.Plan{
+		{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}, {Port: 1081, Users: []string{"alice", "bob"}},
+		{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"carol"}},
+	}
 	body := map[string]any{"state": options(), "plan": plan}
 	save := func(url, csrf string) *httptest.ResponseRecorder {
 		return requestAsAdmin(t, s.Handler(), http.MethodPut, url, body, "test-session-token", csrf)
@@ -276,6 +282,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	body["plan"] = xrayconfig.Plan{{Port: 1081, Users: []string{"outside"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["plan"] = xrayconfig.Plan{{Port: 1080, Users: []string{"bob"}}}
+	expect(save(draftPath, client.csrf), http.StatusConflict)
+	body["plan"] = xrayconfig.Plan{{Port: 1082, Protocol: xrayconfig.VLESS, Users: []string{"alice"}}}
 	expect(save(draftPath, client.csrf), http.StatusConflict)
 	body["state"], body["plan"] = previous, plan
 	expect(save(draftPath, client.csrf), http.StatusOK) // Lost-response retry.
@@ -298,6 +306,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1", nil, true), http.StatusNoContent)
 	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1", nil, true), http.StatusNoContent)
 	complete(managed.TaskID, 5, newer)
 
 	subscriptionPath := "https://panel.example.test" + path + "/subscriptions"
@@ -372,6 +381,12 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			strings.Contains(single.Body.String(), alice) || single.Header().Get("Cache-Control") != "no-store" ||
 			single.Header().Get("Referrer-Policy") != "no-referrer" {
 			t.Fatal("subscription response violated port scope or privacy headers")
+		}
+		vless := fetch(publicURL, newToken("carol"), "")
+		expect(vless, http.StatusOK)
+		if !strings.Contains(vless.Body.String(), `"schema_version":3`) || !strings.Contains(vless.Body.String(), `"port_protocols":{"1082":"vless"}`) ||
+			!strings.Contains(vless.Body.String(), `"ports":[1082]`) || strings.Contains(vless.Body.String(), `"http_ports"`) {
+			t.Fatal("typed subscription did not bind the protocol to the authorized port")
 		}
 		expect(fetch(strings.Replace(publicURL, "https:", "http:", 1), alice, ""), http.StatusNotFound)
 		expect(fetch(publicURL+"?token="+alice, "", ""), http.StatusNotFound)

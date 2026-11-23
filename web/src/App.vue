@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { xrayProtocolName, type XrayProtocol } from './xraySubscription'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; pending: boolean }
 type Audit = { at: number; actor: string; action: string; resource: string; outcome: string }
@@ -16,13 +17,18 @@ type RuntimeUpdate = {
 type XrayOperation = 'core.install' | 'core.start' | 'core.stop' | 'core.upgrade' | 'core.downgrade' | 'core.uninstall' | 'config.apply'
 type CoreXrayOperation = Exclude<XrayOperation, 'config.apply'>
 type XrayConfigReference = { port: number; sha256: string; size: number }
-type XrayInbound = { port: number; protocol?: 'http'; users: string[] }
+type XrayPortProtocol = Exclude<XrayProtocol, 'socks'>
+type XrayInbound = { port: number; protocol?: XrayPortProtocol; users: string[] }
+type XrayCatalog = {
+  ports: number[]; users: string[] | null; http_ports?: number[]
+  port_protocols?: Record<number, XrayPortProtocol>; protocol_users?: Partial<Record<XrayPortProtocol, string[]>>
+}
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
   architecture: string
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
-    catalog?: { ports: number[]; users: string[]; http_ports?: number[] }; applied?: XrayInbound[]
+    catalog?: XrayCatalog; applied?: XrayInbound[]
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
@@ -465,12 +471,21 @@ function copyXrayDraft(draft: XrayInbound[] | null) {
   return draft?.map(inbound => ({ ...inbound, users: [...inbound.users] })) ?? []
 }
 
-function approvedProtocol(port: number) {
-  return panelXray.value?.current.catalog?.http_ports?.includes(port) ? 'http' as const : undefined
+function approvedProtocol(port: number): XrayPortProtocol | undefined {
+  const catalog = panelXray.value?.current.catalog
+  return catalog?.port_protocols?.[port] ?? (catalog?.http_ports?.includes(port) ? 'http' : undefined)
 }
 
 function inboundProtocolLabel(protocol: XrayInbound['protocol']) {
-  return protocol === 'http' ? '仅 HTTP' : 'SOCKS5 / HTTP'
+  if (protocol === 'http') return '仅 HTTP'
+  return protocol ? xrayProtocolName[protocol] : 'SOCKS5 / HTTP'
+}
+
+function approvedUsers(port: number): string[] {
+  const catalog = panelXray.value?.current.catalog
+  if (!catalog?.ports.includes(port)) return []
+  const protocol = approvedProtocol(port)
+  return (protocol && protocol !== 'http' ? catalog.protocol_users?.[protocol] : catalog.users) ?? []
 }
 
 function draftHasUser(port: number, user: string) {
@@ -479,7 +494,7 @@ function draftHasUser(port: number, user: string) {
 
 function draftUsers(port: number) {
   return [...new Set([
-    ...(panelXray.value?.current.catalog?.users ?? []),
+    ...approvedUsers(port),
     ...(xrayDraft.value.find(inbound => inbound.port === port)?.users ?? []),
   ])].sort()
 }
@@ -816,10 +831,11 @@ onMounted(async () => {
             <legend>127.0.0.1:{{ port }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
             <label v-for="user in draftUsers(port)" :key="user">
               <input type="checkbox" :checked="draftHasUser(port, user)"
-                :disabled="!draftHasUser(port, user) && (!panelXray.current.catalog.ports.includes(port) || !panelXray.current.catalog.users.includes(user))"
+                :disabled="!draftHasUser(port, user) && !approvedUsers(port).includes(user)"
                 @change="toggleDraftUser(port, user)" />
               {{ user }}
             </label>
+            <p v-if="!draftUsers(port).length">节点尚未登记此协议的用户凭据。</p>
           </fieldset>
           <p v-if="xrayDraftProtocolChanged">节点批准的端口类型有变化，保存草稿以使用上方显示的类型。</p>
           <p v-else-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>

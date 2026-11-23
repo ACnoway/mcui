@@ -26,16 +26,22 @@ type subscriptionGrant struct {
 	sha256   string
 }
 
-func (g subscriptionGrant) ports(user string) (ports, httpPorts []int) {
+func (g subscriptionGrant) ports(user string) (ports, httpPorts []int, protocols map[int]string) {
 	for _, inbound := range g.plan {
 		if slices.Contains(inbound.Users, user) {
 			ports = append(ports, inbound.Port)
 			if inbound.Protocol == xrayconfig.HTTP {
 				httpPorts = append(httpPorts, inbound.Port)
 			}
+			if inbound.Protocol != "" {
+				if protocols == nil {
+					protocols = make(map[int]string)
+				}
+				protocols[inbound.Port] = inbound.Protocol
+			}
 		}
 	}
-	return ports, httpPorts
+	return ports, httpPorts, protocols
 }
 
 func (g subscriptionGrant) matches(token store.XraySubscription, now time.Time) bool {
@@ -173,7 +179,7 @@ func (s *Server) changeXraySubscription(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				return err
 			}
-			if ports, _ := grant.ports(in.Username); len(ports) == 0 {
+			if ports, _, _ := grant.ports(in.Username); len(ports) == 0 {
 				return errSubscriptionUnavailable
 			}
 			auditAction = "xray.subscription.issue"
@@ -267,7 +273,7 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "subscription service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		ports, httpPorts := grant.ports(username)
+		ports, httpPorts, protocols := grant.ports(username)
 		if err != nil || !grant.matches(record, now) || len(ports) == 0 {
 			http.NotFound(w, r)
 			return
@@ -276,7 +282,10 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 			"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports,
 			"revision": grant.revision, "expires_at": record.ExpiresAt,
 		}
-		if len(httpPorts) > 0 {
+		if len(protocols) > len(httpPorts) {
+			result["schema_version"] = 3
+			result["port_protocols"] = protocols
+		} else if len(httpPorts) > 0 {
 			result["schema_version"] = 2
 			result["http_ports"] = httpPorts
 		}
