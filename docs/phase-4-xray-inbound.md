@@ -79,6 +79,21 @@ sudo unshare --net -- bash -eu -c '
 ' bash /path/to/Xray-linux-64.zip
 ```
 
+### 计数实测
+
+2026-11-23 在 `ro` 的 Debian 13 amd64 隔离检出运行探针，提交 `d27acf6`，内核 `6.12.107+deb13-cloud-amd64`，Python `3.13.5`。使用上文同一份经 SHA-256 校验的官方 Xray 制品。每个用户向独立测试端点发送 262,147 字节，实际收到 1,048,583 字节。以下数字是节点进程内的 TCP 用户计数。
+
+| 场景 | 上行字节 | 下行字节 |
+|---|---:|---:|
+| 默认 `splice`，已传完但连接仍开着 | 262,147 | 0 |
+| 默认 `splice`，关闭连接后 | 262,147 | 1,048,583 |
+| 禁用 `splice`，已传完但连接仍开着 | 262,147 | 1,048,583 |
+| 禁用 `splice`，关闭连接后 | 262,147 | 1,048,583 |
+
+两种模式下均验证了 Alice 与 Bob 的计数互不影响、拒绝认证不计量，以及重复查询不重置计数。重启后查询为空。禁用 `splice` 的结果仅证明这组样本的连接内读数，持久化上报和缺口恢复仍待验证。面板保持 `UNSUPPORTED`，未知用量留空。
+
+同一提交通过 `scripts/check-static.sh`、面板 Xray 竞态回归，以及 Master amd64/arm64 安装包构建和 SHA-256 校验。
+
 ## 隔离验收记录
 
 2026-11-21 在 `ro` 从 `/root/mcui` 建立临时检出验证提交 `1972662`。数据面使用无外网网卡的 Debian 13 amd64 QEMU 客户机，内核 `6.12.107+deb13-cloud-amd64`，systemd `257.13-1~deb13u1`。官方 Xray `v26.10.31` amd64 ZIP 的 SHA-256 为 `e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214`。[官方发布页](https://github.com/XTLS/Xray-core/releases/tag/v26.10.31)
