@@ -412,7 +412,7 @@ lightpanel/
 
 ## 10. 基础开发流程（分阶段）
 
-阶段依赖和发布条件见[分阶段开发流程](./phased-development-workflow.md)。当前批次及完成条件见[阶段 3 后续工作](./phase-3-progress.md#后续工作)。
+阶段依赖和发布条件见[分阶段开发流程](./phased-development-workflow.md)。当前批次的操作和验收见[阶段 4 入站授权](./phase-4-xray-inbound.md)。生产发布准备见[阶段 3 后续工作](./phase-3-progress.md#后续工作)。
 
 0. 设计基线：协议、威胁模型、权限、制品信任及支持目标。
 1. Master 与空 Agent：身份、会话、主控添加节点并生成安装命令、Token 鉴权与撤销、只读节点信息。
