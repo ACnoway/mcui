@@ -176,6 +176,8 @@ const managedAdmins = ref<ManagedAdmin[]>([])
 const error = ref('')
 const loading = ref(false)
 const nodesLoading = ref(false)
+const nodesError = ref('')
+let lastNodeRefresh = 0
 const loggedIn = ref(false)
 const newNodeName = ref('')
 const newNodeGroup = ref('default')
@@ -292,17 +294,18 @@ async function apiWithStepUp<T>(path: string, body: Record<string, unknown>): Pr
 async function refreshNodes() {
   if (nodesLoading.value) return
   nodesLoading.value = true
-  error.value = ''
+  lastNodeRefresh = Date.now()
   const account = admin.value
   try {
     const records = await api<NodeRecord[]>('/api/v1/admin/nodes')
     if (admin.value !== account) return
+    nodesError.value = ''
     nodes.value = records
     if (!selectedNode.value) selectNode('')
     coreSummaries.value = {}
     void loadVisibleCore()
   } catch (cause) {
-    if (admin.value === account) error.value = cause instanceof Error ? cause.message : '读取节点失败'
+    if (admin.value === account) nodesError.value = cause instanceof Error ? cause.message : '读取节点失败'
   } finally {
     nodesLoading.value = false
   }
@@ -1073,6 +1076,7 @@ async function logout() {
     coreDrawer.value = false
     addNodeOpen.value = false
     nodes.value = []
+    nodesError.value = ''
     coreSummaries.value = {}
     audits.value = []
     managedAdmins.value = []
@@ -1107,8 +1111,12 @@ watch([page, selectedNodeID, coreDrawer], ([next, id, drawer]) => {
 
 const refreshTimer = window.setInterval(() => {
   now.value = Date.now()
+  if (document.hidden || !loggedIn.value) return
+  if ((page.value === 'overview' || page.value === 'nodes') && now.value - lastNodeRefresh >= 30_000) {
+    void refreshNodes()
+  }
   const id = selectedNodeID.value
-  if (!id || document.hidden || panelXraySubmitting.value || xrayDraftSaving.value) return
+  if (!id || panelXraySubmitting.value || xrayDraftSaving.value) return
   const awaitingCore = coreDrawer.value && latestCoreTask.value?.active
   const awaitingConfig = page.value === 'config' && latestApplyTask.value &&
     (latestApplyTask.value.active || (latestApplyTask.value.status === 'SUCCEEDED' && !latestApplyVerified.value &&
@@ -1180,6 +1188,7 @@ onMounted(async () => {
         </label>
       </header>
       <p v-if="error" class="notice" role="alert">{{ error }}</p>
+      <p v-if="nodesError && (page === 'overview' || page === 'nodes')" class="notice" role="alert">{{ nodesError }}</p>
 
       <template v-if="page === 'overview'">
         <section class="metrics" aria-label="节点状态">
