@@ -181,7 +181,7 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 	assertStatus(request(http.MethodPost, base+"/"+in.TaskID+"/approve", "test-session-token", client.csrf, issueBody), http.StatusNotFound)
 	assertStatus(request(http.MethodPost, acceptSigned, "other-session", "other-csrf", issueBody), http.StatusNotFound)
 	tampered := requestProof
-	tampered.Proposal.ManifestVersion++
+	tampered.Proposal.Version = "v26.11.9"
 	assertStatus(request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, map[string]any{"request": tampered, "task": json.RawMessage(task)}), http.StatusConflict)
 	res = request(http.MethodPost, acceptSigned, "test-session-token", client.csrf, issueBody)
 	assertStatus(res, http.StatusOK)
