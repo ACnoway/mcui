@@ -22,38 +22,25 @@ type panelInboundChange struct {
 }
 
 type panelInbound struct {
-	Inbound     xrayconfig.Inbound
-	Credential  string
-	Destination xrayconfig.Destination
+	Inbound    xrayconfig.Inbound
+	Credential string
 }
 
 func panelInbounds(draft xrayconfig.Configuration) []panelInbound {
 	var entries []panelInbound
 	for index, inbound := range draft.Inbounds {
-		entry := panelInbound{Inbound: inbound, Credential: draft.Panel.Credentials[index]}
-		for _, route := range draft.Network.Routes {
-			if route.InboundPort != inbound.Port {
-				continue
-			}
-			for _, outbound := range draft.Network.Outbounds {
-				if outbound.Tag == route.OutboundTag {
-					entry.Destination = outbound.Destination
-				}
-			}
-		}
-		entries = append(entries, entry)
+		entries = append(entries, panelInbound{Inbound: inbound, Credential: draft.Panel.Credentials[index]})
 	}
 	return entries
 }
 
-func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS) xrayconfig.Configuration {
+func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS, network *xrayconfig.Network) xrayconfig.Configuration {
 	slices.SortFunc(entries, func(a, b panelInbound) int { return a.Inbound.Port - b.Inbound.Port })
 	draft := xrayconfig.Configuration{
 		Inbounds: xrayconfig.Plan{},
-		Network:  &xrayconfig.Network{Outbounds: []xrayconfig.Outbound{}, Routes: []xrayconfig.Route{}},
+		Network:  network,
 		Panel:    &xrayconfig.PanelConfiguration{Credentials: []string{}},
 	}
-	tags := make(map[xrayconfig.Destination]string)
 	for _, entry := range entries {
 		if entry.Inbound.Protocol == xrayconfig.Trojan && identity != nil {
 			draft.Panel.TLS = identity
@@ -61,18 +48,42 @@ func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS) 
 		}
 		draft.Inbounds = append(draft.Inbounds, entry.Inbound)
 		draft.Panel.Credentials = append(draft.Panel.Credentials, entry.Credential)
-		if entry.Destination == (xrayconfig.Destination{}) {
-			continue
-		}
-		tag := tags[entry.Destination]
-		if tag == "" {
-			tag = "target-" + strconv.Itoa(entry.Inbound.Port)
-			tags[entry.Destination] = tag
-			draft.Network.Outbounds = append(draft.Network.Outbounds, xrayconfig.Outbound{Tag: tag, Destination: entry.Destination})
-		}
-		draft.Network.Routes = append(draft.Network.Routes, xrayconfig.Route{InboundPort: entry.Inbound.Port, OutboundTag: tag})
 	}
 	return draft
+}
+
+func updatePanelInboundRoute(network *xrayconfig.Network, port int, destination xrayconfig.Destination) {
+	index := slices.IndexFunc(network.Routes, func(route xrayconfig.Route) bool { return route.InboundPort == port })
+	previous := ""
+	if index >= 0 {
+		previous = network.Routes[index].OutboundTag
+	}
+	outbound := slices.IndexFunc(network.Outbounds, func(entry xrayconfig.Outbound) bool { return entry.Destination == destination })
+	tag := ""
+	if outbound >= 0 {
+		tag = network.Outbounds[outbound].Tag
+	}
+	if tag == previous && (tag != "" || destination == (xrayconfig.Destination{})) {
+		return
+	}
+	if index >= 0 {
+		network.Routes = slices.Delete(network.Routes, index, index+1)
+	}
+	generatedTag := "target-" + strconv.Itoa(port)
+	if previous == generatedTag && !slices.ContainsFunc(network.Routes, func(route xrayconfig.Route) bool { return route.OutboundTag == previous }) {
+		network.Outbounds = slices.DeleteFunc(network.Outbounds, func(entry xrayconfig.Outbound) bool { return entry.Tag == previous })
+	}
+	if destination == (xrayconfig.Destination{}) {
+		return
+	}
+	if tag == "" {
+		tag = generatedTag
+		for suffix := 1; slices.ContainsFunc(network.Outbounds, func(entry xrayconfig.Outbound) bool { return entry.Tag == tag }); suffix++ {
+			tag = generatedTag + "-" + strconv.Itoa(suffix)
+		}
+		network.Outbounds = append(network.Outbounds, xrayconfig.Outbound{Tag: tag, Destination: destination})
+	}
+	network.Routes = append(network.Routes, xrayconfig.Route{InboundPort: port, OutboundTag: tag})
 }
 
 func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +130,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			var entries []panelInbound
 			var identity *xrayconfig.PanelTLS
+			network := &xrayconfig.Network{Outbounds: []xrayconfig.Outbound{}, Routes: []xrayconfig.Route{}}
 			if node.XrayDraft != "" {
 				draft, err := xrayconfig.ParseConfiguration(node.XrayDraft)
 				if err != nil || draft.Panel == nil {
@@ -126,6 +138,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				}
 				entries = panelInbounds(draft)
 				identity = draft.Panel.TLS
+				network = draft.Network
 			}
 			index := slices.IndexFunc(entries, func(entry panelInbound) bool { return entry.Inbound.Port == port })
 			if index >= 0 && (in.Remove || in.Protocol != entries[index].Inbound.Protocol || in.Username != entries[index].Inbound.Users[0] || in.Credential != "") {
@@ -141,7 +154,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				}
 				entries = slices.Delete(entries, index, index+1)
 			} else {
-				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, Users: []string{in.Username}, PublicEndpoint: in.Public}, Destination: in.Destination}
+				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, Users: []string{in.Username}, PublicEndpoint: in.Public}}
 				if in.Protocol == xrayconfig.Trojan {
 					if identity == nil || in.RotateTLS {
 						identity, err = xrayconfig.NewPanelTLS(inv.Xray.PanelKey, now)
@@ -165,7 +178,8 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 					entries[index] = entry
 				}
 			}
-			draft := encodePanelInbounds(entries, identity)
+			updatePanelInboundRoute(network, port, in.Destination)
+			draft := encodePanelInbounds(entries, identity, network)
 			encoded := draft.Encode()
 			if !draft.Valid() || len(encoded) > xrayconfig.MaxConfigurationSize {
 				return lifecycleauth.ErrDenied

@@ -8,12 +8,15 @@ const props = defineProps<{
   destinations: Destination[]
   inboundPorts: number[]
   disabled: boolean
+  panelInbounds: boolean
 }>()
 const emit = defineEmits<{ change: [network: Network | null] }>()
 const outboundIndex = ref<number | null>(null)
 const routeIndex = ref<number | null>(null)
 const tag = ref('')
 const destination = ref('')
+const address = ref('')
+const tcpPort = ref(443)
 const inboundPort = ref<number | ''>('')
 const outboundTag = ref('')
 
@@ -23,13 +26,21 @@ const destinationChoices = computed(() => props.destinations.filter(target =>
   !outbounds.value.some((outbound, index) =>
     index !== outboundIndex.value && destinationLabel(outbound.destination) === destinationLabel(target)),
 ))
+const target = computed<Destination | undefined>(() => {
+  if (!props.panelInbounds) return destinationChoices.value.find(item => destinationLabel(item) === destination.value)
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(address.value) || !Number.isInteger(tcpPort.value) || tcpPort.value < 1 || tcpPort.value > 65535) return
+  const octets = address.value.split('.')
+  if (octets.some(octet => Number(octet) > 255 || String(Number(octet)) !== octet)) return
+  const entry = { address: address.value, port: tcpPort.value }
+  if (!outbounds.value.some((outbound, index) => index !== outboundIndex.value && destinationLabel(outbound.destination) === destinationLabel(entry))) return entry
+})
 const tagAvailable = computed(() => /^[a-z][a-z0-9_-]{0,23}$/.test(tag.value) && tag.value !== 'deny' &&
   !outbounds.value.some((outbound, index) => index !== outboundIndex.value && outbound.tag === tag.value))
 const routeOutbounds = computed(() => outbounds.value.filter(outbound => !routes.value.some((route, index) =>
-  index !== routeIndex.value && route.inbound_port === inboundPort.value && route.outbound_tag === outbound.tag,
+  index !== routeIndex.value && route.inbound_port === inboundPort.value && (props.panelInbounds || route.outbound_tag === outbound.tag),
 )))
 const canAddRoute = computed(() => props.inboundPorts.some(port => outbounds.value.some(outbound =>
-  !routes.value.some(route => route.inbound_port === port && route.outbound_tag === outbound.tag),
+  !routes.value.some(route => route.inbound_port === port && (props.panelInbounds || route.outbound_tag === outbound.tag)),
 )))
 const withdrawnDestinations = computed(() => outbounds.value.filter(outbound =>
   !props.destinations.some(target => destinationLabel(target) === destinationLabel(outbound.destination)),
@@ -48,15 +59,16 @@ function editOutbound(index: number) {
   const outbound = outbounds.value[index]
   tag.value = outbound?.tag ?? ''
   destination.value = outbound ? destinationLabel(outbound.destination) : ''
+  address.value = outbound?.destination.address ?? ''
+  tcpPort.value = outbound?.destination.port ?? 443
 }
 
 function saveOutbound() {
   if (props.disabled || !props.network || outboundIndex.value === null || !tagAvailable.value) return
-  const target = destinationChoices.value.find(item => destinationLabel(item) === destination.value)
-  if (!target) return
+  if (!target.value) return
   const previous = outbounds.value[outboundIndex.value]
   const updated = [...outbounds.value]
-  updated[outboundIndex.value] = { tag: tag.value, destination: { ...target } }
+  updated[outboundIndex.value] = { tag: tag.value, destination: { ...target.value } }
   emit('change', {
     outbounds: updated,
     routes: routes.value.map(route => route.outbound_tag === previous?.tag ? { ...route, outbound_tag: tag.value } : route),
@@ -103,27 +115,32 @@ function moveRoute(index: number, direction: number) {
 </script>
 
 <template>
-  <div class="page-stack">
+  <p v-if="panelInbounds && !network" class="feedback">请先保存一个主控入站，再配置出站和路由。</p>
+  <div v-else class="page-stack">
     <div class="actions">
       <button v-if="!network && destinations.length" type="button" :disabled="disabled"
         @click="emit('change', { outbounds: [], routes: [] })">自定义出站与路由</button>
-      <button v-if="network" type="button" class="quiet" :disabled="disabled" @click="emit('change', null)">恢复节点默认路由</button>
-      <button v-if="network && tab === 'outbound'" type="button" :disabled="disabled || outbounds.length >= destinations.length || outboundIndex !== null"
+      <button v-if="network && !panelInbounds" type="button" class="quiet" :disabled="disabled" @click="emit('change', null)">恢复节点默认路由</button>
+      <button v-if="network && tab === 'outbound'" type="button" :disabled="disabled || outbounds.length >= (panelInbounds ? 4 : destinations.length) || outboundIndex !== null"
         @click="editOutbound(outbounds.length)">添加出站</button>
       <button v-if="network && tab === 'routing'" type="button" :disabled="disabled || !canAddRoute || routeIndex !== null"
         @click="editRoute(routes.length)">添加规则</button>
     </div>
     <p v-if="!network && !destinations.length" class="feedback">节点尚未批准自定义出站目标。</p>
-    <p v-if="withdrawnDestinations.length" class="notice" role="status">节点已收回这些出站目标的许可。请修改目标或清除引用后删除出站。{{ withdrawnDestinations.join('、') }}</p>
+    <p v-if="!panelInbounds && withdrawnDestinations.length" class="notice" role="status">节点已收回这些出站目标的许可。请修改目标或清除引用后删除出站。{{ withdrawnDestinations.join('、') }}</p>
     <p v-if="network && !routes.length" class="notice" role="status">草稿没有放行规则，应用后会拒绝所有业务流量。</p>
     <template v-if="tab === 'outbound'">
       <form v-if="outboundIndex !== null" class="filters" @submit.prevent="saveOutbound">
         <label>标签<input v-model.trim="tag" required maxlength="24" pattern="[a-z][a-z0-9_\-]{0,23}" :disabled="disabled" /></label>
-        <label>批准的 IPv4 TCP 目标<select v-model="destination" required :disabled="disabled">
+        <template v-if="panelInbounds">
+          <label>公网 IPv4 目标<input v-model.trim="address" inputmode="decimal" required :disabled="disabled" /></label>
+          <label>TCP 端口<input v-model.number="tcpPort" type="number" required min="1" max="65535" :disabled="disabled" /></label>
+        </template>
+        <label v-else>批准的 IPv4 TCP 目标<select v-model="destination" required :disabled="disabled">
           <option value="" disabled>选择目标</option>
           <option v-for="target in destinationChoices" :key="destinationLabel(target)">{{ destinationLabel(target) }}</option>
         </select></label>
-        <button type="submit" :disabled="disabled || !tagAvailable || !destinationChoices.some(target => destinationLabel(target) === destination)">更新草稿</button>
+        <button type="submit" :disabled="disabled || !tagAvailable || !target">更新草稿</button>
         <button type="button" class="quiet" @click="cancelEdit">取消</button>
       </form>
       <div class="table-wrap">

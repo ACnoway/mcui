@@ -908,9 +908,9 @@ function toggleDraftUser(port: number, user: string) {
 async function saveXrayDraft() {
   const node = selectedNode.value
   const options = panelXray.value
-  if (!node || !options?.current.catalog || xrayDraftSaving.value || panelXrayReadError.value || draftConflict.value) return
+  if (!node || !options || (!options.current.catalog && !options.panel_inbounds) || draftDisabled.value) return
   const { signal } = nodeReads
-  const { ports } = options.current.catalog
+  const ports = options.current.catalog?.ports ?? []
   const plan = xrayDraft.value.map(inbound => ports.includes(inbound.port) ? {
     port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port),
     reality_public_key: approvedRealityKey(inbound.port), public_endpoint: approvedPublicEndpoint(inbound.port), users: inbound.users,
@@ -920,7 +920,10 @@ async function saveXrayDraft() {
   panelXrayError.value = ''
   try {
     await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, ...savedPlan }) })
-    if (!signal.aborted && selectedNodeID.value === node.id) await loadPanelXray(node.id, { savedPlan })
+    if (!signal.aborted && selectedNodeID.value === node.id) {
+      if (options.panel_inbounds) previewOpen.value = true
+      await loadPanelXray(node.id, { savedPlan })
+    }
   } catch (e) {
     if (!signal.aborted && selectedNodeID.value === node.id) panelXrayError.value = e instanceof Error ? e.message : '保存代理配置草稿失败'
   } finally {
@@ -932,6 +935,7 @@ async function savePanelInbound(port: number, change: PanelInboundChange) {
   const node = selectedNode.value
   const options = panelXray.value
   if (!node || !options?.panel_inbounds || draftDisabled.value) throw new Error('节点入站状态已更新，请刷新后再保存。')
+  if (xrayDraftDirty.value) throw new Error('请先保存或放弃未保存的路由和出站修改。')
   const { signal } = nodeReads
   xrayDraftSaving.value = true
   try {
@@ -1367,16 +1371,15 @@ onMounted(async () => {
           </div>
           <div class="tabs" role="group" aria-label="代理配置类型">
             <button type="button" :aria-pressed="draftTab === 'inbound'" @click="draftTab = 'inbound'">入站</button>
-            <template v-if="!panelXray.panel_inbounds">
-              <button type="button" :aria-pressed="draftTab === 'client'" @click="draftTab = 'client'">客户端</button>
-              <button type="button" :aria-pressed="draftTab === 'routing'" @click="draftTab = 'routing'">路由</button>
-              <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
-            </template>
+            <button v-if="!panelXray.panel_inbounds" type="button" :aria-pressed="draftTab === 'client'" @click="draftTab = 'client'">客户端</button>
+            <button type="button" :aria-pressed="draftTab === 'routing'" @click="draftTab = 'routing'">路由</button>
+            <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
           </div>
           <p v-if="panelXrayError" class="notice" role="alert">{{ panelXrayError }}</p>
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
-          <XrayPanelInbounds v-if="panelXray.panel_inbounds" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
-            :network="panelXray.draft_network ?? null" :busy="draftDisabled" :save="savePanelInbound"
+          <p v-if="panelXray.panel_inbounds && draftTab === 'inbound' && xrayDraftDirty" class="feedback">编辑入站前，请保存或放弃未保存的路由和出站修改。</p>
+          <XrayPanelInbounds v-if="panelXray.panel_inbounds && draftTab === 'inbound'" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
+            :network="panelXray.draft_network ?? null" :busy="draftDisabled || xrayDraftDirty" :save="savePanelInbound"
             :managed-bindings="panelXray.managed_bindings ?? []"
             :trojan="!!panelXray.current.panel_trojan" :addresses="panelXray.current.panel_addresses ?? []"
             :trust="panelXray.panel_trust ?? undefined" :applied="panelXray.current.applied ?? []"
@@ -1450,7 +1453,8 @@ onMounted(async () => {
             </div>
             <p v-else class="empty">{{ clientSearch ? '没有匹配的客户端。' : '节点尚未登记客户端凭据。' }}</p>
           </template>
-          <XrayNetworkEditor v-else-if="panelXray.current.catalog" :tab="draftTab" :network="draftNetwork"
+          <XrayNetworkEditor v-else-if="panelXray.current.catalog || panelXray.panel_inbounds" :tab="draftTab" :network="draftNetwork"
+            :panel-inbounds="!!panelXray.panel_inbounds"
             :destinations="networkDestinations" :inbound-ports="xrayDraft.map(inbound => inbound.port)" :disabled="draftDisabled"
             @change="draftNetwork = $event" />
           <p v-else class="empty">节点尚未上报代理配置目录。</p>
@@ -1460,7 +1464,8 @@ onMounted(async () => {
             <template v-if="latestApplyTask.status === 'SUCCEEDED' && !latestApplyVerified">，等待节点上报对应修订</template>
           </p>
           <div class="actions">
-            <button v-if="!panelXray.panel_inbounds" type="button" class="outline" :disabled="!panelXray.current.catalog || !!panelXrayReadError || draftConflict || xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && !xrayDraftPolicyChanged && panelXray.draft !== null)"
+            <button v-if="!panelXray.panel_inbounds || draftTab !== 'inbound'" type="button" class="outline"
+              :disabled="(!panelXray.current.catalog && !panelXray.panel_inbounds) || draftDisabled || (!xrayDraftDirty && !xrayDraftPolicyChanged && (panelXray.draft !== null || panelXray.panel_inbounds))"
               @click="saveXrayDraft">{{ xrayDraftSaving ? '保存中…' : '保存草稿' }}</button>
             <button type="button" class="outline" :disabled="!panelXray || xrayDraftDirty || draftConflict" @click="openPreview">预览变更</button>
             <button type="button" :disabled="!canApplyXrayDraft" @click="openPreview">下发配置</button>

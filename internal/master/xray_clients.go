@@ -350,10 +350,14 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 		}
 		entries := panelInbounds(draft)
 		entries = slices.DeleteFunc(entries, func(entry panelInbound) bool {
-			return slices.Contains(removals, store.XrayBinding{NodeID: id, Port: entry.Inbound.Port, Credential: entry.Inbound.Users[0]})
+			if !slices.Contains(removals, store.XrayBinding{NodeID: id, Port: entry.Inbound.Port, Credential: entry.Inbound.Users[0]}) {
+				return false
+			}
+			updatePanelInboundRoute(draft.Network, entry.Inbound.Port, xrayconfig.Destination{})
+			return true
 		})
 		if len(entries) != len(draft.Inbounds) {
-			node.XrayDraft = encodePanelInbounds(entries, draft.Panel.TLS).Encode()
+			node.XrayDraft = encodePanelInbounds(entries, draft.Panel.TLS, draft.Network).Encode()
 			st.Nodes[id] = node
 		}
 		return nil

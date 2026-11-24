@@ -146,8 +146,7 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan := xrayconfig.Configuration{Inbounds: in.Plan, Network: in.Network}
-	draft := plan.Encode()
-	if !plan.Valid() || len(draft) > xrayconfig.MaxConfigurationSize {
+	if !plan.Valid() || len(plan.Encode()) > xrayconfig.MaxConfigurationSize {
 		http.Error(w, "invalid Xray configuration draft", http.StatusBadRequest)
 		return
 	}
@@ -172,8 +171,22 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 			}
 			node := st.Nodes[p.NodeID]
 			inventory, fingerprint, err := panelInventory(node, now)
-			if err != nil || inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.AllowsConfiguration(plan) {
+			if err != nil {
 				return errXrayInventory
+			}
+			if inventory.Xray.PanelKey != "" {
+				prior, err := xrayconfig.ParseConfiguration(node.XrayDraft)
+				if err != nil || prior.Panel == nil || inventory.Xray.Version != xrayconfig.Version ||
+					plan.Inbounds.Encode() != prior.Inbounds.Encode() {
+					return errXrayInventory
+				}
+				plan.Panel = prior.Panel
+			} else if inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.AllowsConfiguration(plan) {
+				return errXrayInventory
+			}
+			draft := plan.Encode()
+			if !plan.Valid() || len(draft) > xrayconfig.MaxConfigurationSize {
+				return lifecycleauth.ErrDenied
 			}
 			if draft == node.XrayDraft {
 				return nil

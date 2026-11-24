@@ -749,6 +749,31 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || config.Panel == nil || config.Panel.TLS == nil || !config.Panel.TLS.Trust.Valid() || config.Inbounds[0].PublicEndpoint != change.Public {
 			t.Fatalf("public endpoint or TLS identity missing from draft: %v", err)
 		}
+		saveNetwork := func(plan xrayconfig.Plan, network *xrayconfig.Network) *httptest.ResponseRecorder {
+			return subscriptionAdmin(http.MethodPut, "https://panel.example.test"+path+"/draft", client.csrf,
+				map[string]any{"state": options(), "plan": plan, "network": network})
+		}
+		network := &xrayconfig.Network{
+			Outbounds: []xrayconfig.Outbound{
+				{Tag: "primary", Destination: change.Destination},
+				{Tag: "spare", Destination: xrayconfig.Destination{Address: "93.184.216.37", Port: 443}},
+			},
+			Routes: []xrayconfig.Route{{InboundPort: 1080, OutboundTag: "primary"}},
+		}
+		expect(saveNetwork(xrayconfig.Plan{}, &xrayconfig.Network{Outbounds: network.Outbounds, Routes: []xrayconfig.Route{}}), http.StatusConflict)
+		duplicateRoute := *network
+		duplicateRoute.Routes = append(append([]xrayconfig.Route{}, network.Routes...), xrayconfig.Route{InboundPort: 1080, OutboundTag: "spare"})
+		expect(saveNetwork(config.Inbounds, &duplicateRoute), http.StatusBadRequest)
+		expect(saveNetwork(config.Inbounds, network), http.StatusOK)
+		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routed, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil || !reflect.DeepEqual(routed.Panel, config.Panel) || !reflect.DeepEqual(routed.Network, network) {
+			t.Fatalf("network save changed credentials or omitted an explicit outbound: %v", err)
+		}
+		config = routed
 		const clientsURL = "https://panel.example.test/api/v1/admin/xray/clients"
 		const aggregateURL = "https://panel.example.test/api/v1/client-subscription"
 		central := func(method, suffix string, body any) *httptest.ResponseRecorder {
@@ -945,7 +970,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatal(err)
 		}
 		revoked, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
-		if err != nil || revoked.Panel == nil || len(revoked.Inbounds) != 0 || revoked.Panel.TLS != nil {
+		if err != nil || revoked.Panel == nil || len(revoked.Inbounds) != 0 || revoked.Panel.TLS != nil ||
+			len(revoked.Network.Routes) != 0 || !reflect.DeepEqual(revoked.Network.Outbounds, network.Outbounds) {
 			t.Fatalf("unbind did not stage removal of the panel inbound and its unused TLS identity: %v", err)
 		}
 	})
