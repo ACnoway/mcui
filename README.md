@@ -25,6 +25,10 @@ Updated panel-defined nodes support multiple clients per inbound. An administrat
 
 Proxy Configuration shows sampled inbound, client, and outbound bytes for the node's applied revision. The client list combines available samples across nodes. [Xray traffic](docs/phase-4-xray-inbound.md#用户级统计与额度) · [3x-ui feature roadmap](docs/phased-development-workflow.md#阶段-4xray-完整业务闭环与最小演示)
 
+## Releases
+
+Push a tag such as `v0.1.0-alpha.1` to build the Linux amd64 and arm64 Master and Agent packages and publish a GitHub pre-release. Stable deployment releases are published after the offline-signed manifest is available. [Release tags and publishing](docs/phase-3-release.md#标签和预发布)
+
 ## Development checks
 
 For documentation changes, review the diff and check links. For feature changes, run the checks relevant to the change. Use `scripts/check-static.sh` for the full Linux checks.

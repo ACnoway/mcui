@@ -26,27 +26,28 @@ go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
 
 任务绑定节点、动作和清单中的精确制品。V1 面板由有效清单筛选可安装版本，默认选择当前节点可安装的最新稳定版，并在创建任务时锁定实际版本与摘要。Agent 与 Helper 分别核验清单签名和版本，再按相同长度和 SHA-256 校验官方源或主控缓存的字节。[节点启动恢复](./phase-3-operations.md#进程中断恢复验收) · [制品信任方案](./artifact-trust.md)
 
-### 准备部署发布草稿
+### 标签和预发布
 
-选定通过检查的 `master` 提交。Git 标签标识 MCUI 源码版本，`manifest_version` 是客户端独立核对的单调递增序号。对清单完成离线签名和复验后，运行以下命令。草稿完成后由[部署工作流](#发布-compose-和通用-agent)构建并发布安装器和镜像。成对更新制品及其授权见[成对更新手册](./phase-3-runtime-update.md)。
+- `vX.Y.Z-alpha.N` 用于早期验证。主要功能已经可以试用，部署流程、接口或数据结构仍可能调整。
+- `vX.Y.Z-beta.N` 用于功能基本齐全后的验收。重点验证从零部署、节点接入、升级和兼容性。
+- `vX.Y.Z` 用于通过验收的正式版。主、次和补丁版本号使用无前导零的非负整数。每个预发布阶段的序号从 `1` 开始。示例顺序为 `v0.1.0-alpha.1`、`v0.1.0-alpha.2`、`v0.1.0-beta.1`、`v0.1.0`。[语义化版本规范](https://semver.org/lang/zh-CN/)
 
-```bash
-set -euo pipefail
-# RELEASE_TAG 和 RELEASE_COMMIT 由维护者填入。
-git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "$RELEASE_TAG"
-git push origin "refs/tags/$RELEASE_TAG"
+**Publish MCUI release** 在推送新标签时运行项目检查，从该标签构建 amd64 和 arm64 制品，并上传到 GitHub Release。每个架构提供 `mcui-master-linux-<arch>.tar.gz`（主控和 Web 文件）和 `mcui-agent-linux-<arch>.zip`（Agent 和 Helper），另附 `SHA256SUMS-binaries`。
 
-gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes \
-  manifest.json manifest.json.sig
+Alpha 和 Beta 会自动公开为 Pre-release，生产部署继续从 Latest 获取签名清单。可从已包含工作流的提交推送测试标签。
+
+```sh
+git tag -a v0.1.0-alpha.1 -m v0.1.0-alpha.1
+git push origin refs/tags/v0.1.0-alpha.1
 ```
 
-标签只标识 Git 中的提交。推送标签后，通过 GitHub 页面或 CLI 创建 Release 草稿。[创建 Release](https://cli.github.com/manual/gh_release_create)
+本地可用 `bash scripts/build-binary-release.sh NEW_DIRECTORY` 构建同样的归档，并运行 `sha256sum --check SHA256SUMS-binaries` 核验。Agent/Helper 的远程成对更新还需单独的发布签名和节点授权。[版本工作流](../.github/workflows/release.yml) · [成对更新手册](./phase-3-runtime-update.md)
 
 ### 发布 Compose 和通用 Agent
 
 1. 维护者审核制品并离线签发清单。把项目发布公钥写入仓库 Actions 变量 `MCUI_RELEASE_PUBLIC_KEY`。部署者无需配置此变量。
-2. 推送 `vX.Y.Z` 标签，为其创建稳定 Release 草稿，并上传 `manifest.json` 和 `manifest.json.sig`。
-3. 在 `master` 上手动运行 **Publish MCUI deployment**，输入该标签。工作流从标签构建并核验清单，推送两架构的版本化主控镜像，上传安装器、Compose 配置和摘要，然后发布 GitHub Release 并更新镜像的 `latest` 标签。
+2. 推送 `vX.Y.Z` 标签。工作流在该版本的 Release 草稿上传二进制。将 `manifest.json` 和 `manifest.json.sig` 上传到草稿。Git 标签标识 MCUI 源码版本，`manifest_version` 是客户端核对的单调递增序号。
+3. 签名附件和发布公钥齐备时，工作流自动核验清单并继续发布。如果首次运行时材料还未齐备，从 `master` 手动运行 **Publish MCUI release**，输入已有标签。工作流构建两架构主控镜像，上传安装器、Compose 文件和摘要，然后发布 Release 并更新镜像的 `latest` 标签。
 4. 首次发布后，将 GHCR 的 `mcui-master` 包设为公开。检查镜像可匿名拉取，Release 安装器摘要与配套镜像中 `/opt/mcui/release/agent-release` 的摘要一致。
 
 可用 `bash scripts/build-compose-release.sh NEW_DIRECTORY vX.Y.Z release.pub manifest.json manifest.json.sig` 在隔离环境构建同样的制品。通用安装器内含项目发布公钥，面板在生成安装命令时传入部署的任务签发公钥。独立发布的清单更新可保留原版本 Agent 安装器，镜像中固定的下载版本继续可用。[发布工作流](../.github/workflows/release-deployment.yml)

@@ -1,10 +1,14 @@
 name: Publish MCUI deployment
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       tag:
         description: Stable draft Release tag with signed manifest attachments
+        required: true
+        type: string
+      commit:
+        description: Commit checked out by the binary release job
         required: true
         type: string
 
@@ -18,7 +22,7 @@ env:
 
 jobs:
   publish:
-    if: github.repository == 'ACnoway/mcui' && github.ref == 'refs/heads/master'
+    if: github.repository == 'ACnoway/mcui'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
@@ -31,7 +35,7 @@ jobs:
           RELEASE_PUBLIC_KEY: ${{ vars.MCUI_RELEASE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n $RELEASE_PUBLIC_KEY ]]
+          [[ -n $RELEASE_PUBLIC_KEY ]]
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName |
             jq -e --arg tag "$RELEASE_TAG" '.isDraft and (.isPrerelease | not) and .tagName == $tag'
           mkdir "$RUNNER_TEMP/mcui-signatures"
@@ -41,7 +45,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.commit }}
           persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -54,11 +58,10 @@ jobs:
           node-version-file: .nvmrc
           package-manager-cache: false
 
-      - name: Check and build deployment assets
+      - name: Build deployment assets
         run: |
           set -euo pipefail
           npm install --global pnpm@12.17.0
-          bash scripts/check-static.sh
           signed="$RUNNER_TEMP/mcui-signatures"
           bash scripts/build-compose-release.sh "$RUNNER_TEMP/mcui-release" "$RELEASE_TAG" \
             "$signed/release.pub" "$signed/manifest.json" "$signed/manifest.json.sig"
@@ -85,7 +88,7 @@ jobs:
           set -euo pipefail
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             install-mcui-agent.sh install-mcui-master.sh compose.yaml compose.https.yaml SHA256SUMS
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --latest
 
   promote-image:
     needs: publish

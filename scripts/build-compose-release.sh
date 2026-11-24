@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 022
 
-if [[ $# != 5 || ! $2 =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ $# != 5 || $(bash "$(dirname "$0")/release-channel.sh" "$2") != stable ]]; then
   printf 'Usage: %s NEW_OUTPUT_DIRECTORY vMAJOR.MINOR.PATCH RELEASE_PUBLIC_KEY MANIFEST SIGNATURE\n' "$0" >&2
   exit 2
 fi
