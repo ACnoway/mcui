@@ -7,8 +7,15 @@ install_xray_bootstrap() {
   local source_dir=/etc/chrony/sources.d
   local xray_config=/etc/mcui-xray
   local xray_state=/var/lib/mcui-xray
+  local helper_manifest=$xray_state/control/xray-manifest
+  local agent_manifest=$agent_state/xray-manifest
   local chrony_source=$source_dir/mcui-nts.sources
   local file
+  if file_exists "$config/xray-install.env" || file_exists "$xray_state/current"; then
+    for file in "$helper_manifest/accepted.json" "$agent_manifest/accepted.json"; do
+      [[ -f $file && ! -L $file ]] || die 'Restore accepted Xray manifest state before enrolling this node'
+    done
+  fi
   [[ -f /etc/debian_version ]] && command -v apt-get >/dev/null ||
     die 'Automatic Xray bootstrap requires Debian with APT'
   if [[ ! -x /usr/bin/chronyc || ! -x /usr/sbin/chronyd ]] || ! command -v cmp >/dev/null; then
@@ -41,12 +48,12 @@ install_xray_bootstrap() {
   fi
 
   "$stage/$arch/mcui-xray" initialize >/dev/null
-  if ! file_exists "$xray_state/control/xray-manifest/accepted.json"; then
-    "$manifest_tool" init-state -state "$xray_state/control/xray-manifest" -public-key "$profile/release.pub" \
+  if ! file_exists "$helper_manifest/accepted.json"; then
+    "$manifest_tool" init-state -state "$helper_manifest" -public-key "$profile/release.pub" \
       -manifest "$profile/manifest.json" -signature "$profile/manifest.json.sig"
   fi
-  if ! file_exists "$agent_state/xray-manifest/accepted.json"; then
-    runuser -u mcui-agent -- "$manifest_tool" init-state -state "$agent_state/xray-manifest" -public-key "$profile/release.pub" \
+  if ! file_exists "$agent_manifest/accepted.json"; then
+    runuser -u mcui-agent -- "$manifest_tool" init-state -state "$agent_manifest" -public-key "$profile/release.pub" \
       -manifest "$profile/manifest.json" -signature "$profile/manifest.json.sig"
   fi
 

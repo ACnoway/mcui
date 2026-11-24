@@ -45,7 +45,11 @@ bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --xray-bootstra
 
 这个安装包在 Debian/systemd 节点执行同一条接入命令时，安装 Xray 管理单元、初始化 Agent 与 Helper 的制品清单状态，并准备本地 chrony NTS 时钟。节点上的状态任务和制品授权经 systemd 创建的 Unix 套接字读取经验证的时间。节点仍经主控安装所选的 Xray 版本。上游 NTS 未同步时签名任务等待可信时间。
 
+已启用 Xray 生命周期的节点重新接入时，需要保留 Agent 和 Helper 已接受的清单状态。状态丢失时接入命令会在兑换安装码前停止，按[制品信任恢复](./phase-3-release.md)核对并恢复原有状态。
+
 沿用原命令构建的安装包只准备 Agent 和 Helper。Xray 入站目录、业务网络配置和远程运行时监督的准备步骤当前分别见[受控入站部署](./phase-4-xray-inbound.md#节点准备)和[成对更新](./phase-3-runtime-update.md#启用本地监督)。
+
+2026-11-24 在 `ro` 的 Debian 13 amd64 虚拟机验证 `75839cf`。虚拟机无外网网卡，使用隔离 HTTPS 注册端和 chrony 4.6.1 NTS 服务、独立测试 CA 与签名材料。执行一次安装命令后，Agent 和 Helper 启动，两份制品清单状态按预期属主写入，受限时钟套接字提供认证时间，Agent 回报 Xray 尚未安装的状态。重启后，已注册节点恢复心跳。该次演练的覆盖范围是 Agent 接入和 Xray 生命周期引导。
 
 生成、替换和撤销只操作所选节点。安装命令包含一次性安装码，应通过可信途径交付，避免写入共享终端历史、工单和日志。长期 Token 只由 Agent 从 HTTPS 响应取得。安装码兑换响应丢失或凭据保存失败时，为原节点生成新命令。
 
