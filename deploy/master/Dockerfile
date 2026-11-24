@@ -1,8 +1,10 @@
 FROM debian:13-slim
 ARG TARGETARCH
 LABEL org.opencontainers.image.source="https://github.com/ACnoway/mcui"
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chrony \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates chrony \
     && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 65532 mcui \
+    && useradd --uid 65532 --gid mcui --no-create-home --home-dir /var/lib/mcui-master --shell /usr/sbin/nologin mcui \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/mcui-master
 COPY ${TARGETARCH}/mcui-panel /usr/local/bin/mcui-panel
 COPY web/ /opt/mcui/web/

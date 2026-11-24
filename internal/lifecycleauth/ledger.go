@@ -25,8 +25,8 @@ const ledgerSchema = `CREATE TABLE issuances (
  UNIQUE(node_id, sequence)
 ) STRICT`
 
-// Ledger belongs to the signing authority. The panel must have no access
-// to its directory. Keep it outside the panel's backup and restore domain.
+// Ledger belongs to the signing authority. In isolated deployments, keep it
+// outside the panel's access and backup domain.
 type Ledger struct{ db *sql.DB }
 
 // InitLedger exclusively initializes a new issuance ledger.

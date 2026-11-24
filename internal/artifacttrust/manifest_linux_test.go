@@ -85,6 +85,54 @@ func TestManifestStrictSignatureAndMapping(t *testing.T) {
 	}
 }
 
+func TestPublishedManifestFirstUseAndReenrollment(t *testing.T) {
+	now := time.Now().UTC()
+	key, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := manifestFixture(now, []byte("reviewed release"))
+	stage := filepath.Join(t.TempDir(), "manifest")
+	if err := os.Mkdir(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	online := true
+	client := &manifestClient{
+		stateDir: stage, key: key, now: func() (time.Time, error) { return now, nil },
+		api: &http.Client{Transport: manifestTestTransport(func(req *http.Request) (*http.Response, error) {
+			if !online {
+				t.Fatal("existing bootstrap state caused a network request")
+			}
+			return manifestResponse(req, http.StatusOK, []byte(`{"tag_name":"v1.0.0"}`)), nil
+		})},
+		assets: &http.Client{Transport: manifestTestTransport(func(req *http.Request) (*http.Response, error) {
+			raw, err := json.Marshal(current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasSuffix(req.URL.Path, ".sig") {
+				raw = ed25519.Sign(private, raw)
+			}
+			return manifestResponse(req, http.StatusOK, raw), nil
+		})},
+	}
+	if _, err := client.refresh(t.Context()); !errors.Is(err, errManifestNotInitialized) {
+		t.Fatalf("ordinary refresh initialized missing trust: %v", err)
+	}
+	if _, err := client.refreshState(t.Context(), true, true); err != nil {
+		t.Fatal(err)
+	}
+	online = false
+	if _, err := client.refreshState(t.Context(), true, true); err != nil {
+		t.Fatal(err)
+	}
+	online = true
+	current.ManifestVersion--
+	if _, err := client.refreshState(t.Context(), true, false); !errors.Is(err, ErrUntrustedTarget) {
+		t.Fatalf("accepted a signed rollback after bootstrapping: %v", err)
+	}
+}
+
 func TestSignedRefreshPinsReleaseAndSurvivesReopen(t *testing.T) {
 	now := time.Now().UTC()
 	key, private, err := ed25519.GenerateKey(nil)

@@ -25,9 +25,9 @@ const taskControlLifetime = 5 * time.Minute
 
 var statusTokenPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
-// TaskRuntime is configured by the Master process before it starts serving.
-// The private key stays in a separate signer process; Master holds only its
-// public key and a narrow status-signing client.
+// TaskRuntime is configured before the Master starts serving. Isolated
+// deployments use a narrow client to a separate signer. Managed single-admin
+// deployments supply an in-process signer.
 type TaskRuntime struct {
 	Store  *taskdispatch.Store
 	Signer interface {

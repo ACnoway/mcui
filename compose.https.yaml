@@ -13,6 +13,7 @@ services:
     network_mode: service:master
     depends_on:
       master:
+        condition: service_started
         restart: true
     command:
       - caddy

@@ -19,7 +19,7 @@ docker buildx build --load -f deploy/master/Dockerfile \
 在运行 systemd 的 Linux amd64 或 arm64 主机上，使用带有效系统 CA 的环境。将已核对的 `SHA256SUMS` 和安装程序放在同一目录。
 
 ```sh
-sha256sum --check SHA256SUMS && sudo bash ./install-mcui-master.sh
+sha256sum --check --ignore-missing SHA256SUMS && sudo bash ./install-mcui-master.sh
 ```
 
 安装程序启用 `mcui-master.service`。默认访问地址为 `http://127.0.0.1:8080`，配置在 `/etc/mcui-master/panel.env`，数据库和缓存位于 `/var/lib/mcui-master`。首次安装在终端输出初始用户名和密码。安装前保留管理终端的访问控制，首次登录设置至少 12 字符的新密码并绑定 TOTP MFA。服务重启使用已有管理员和数据库。
@@ -48,7 +48,7 @@ docker compose logs master
 
 `master-data` 卷保存面板数据库、任务和签发账本、发布清单验收状态以及两套签发私钥。升级保留该卷。备份时停止主控并备份整个卷，恢复时保留一致的数据库与密钥。Compose 默认由同一进程使用两套密钥，独立签发进程的部署方式见[高级签发配置](./phase-3-approval.md)。
 
-容器内的 chrony 通过 Cloudflare NTS 检查宿主机时间，需要出站 TCP 4460 和 UDP 123。宿主机应保持时钟同步。通过认证和时钟误差检查后，主控才签发任务。
+容器内的 chrony 通过 Cloudflare NTS 检查宿主机时间，需要出站 TCP 4460 和 UDP 123。宿主机应保持时钟同步。容器启动后，主控等到 chrony 积累足够的认证样本，并确认时钟误差在允许范围内，才签发任务。
 
 若初始密码丢失且尚未绑定 MFA，使用当前镜像对同一个卷运行恢复命令。
 
@@ -96,7 +96,7 @@ Master 核对连接 IP、Host 和协议头，按配置的外部 HTTPS 地址校�
 
 将完整证书链和服务账号可读的私钥路径分别配置为 `MCUI_TLS_CERT` 和 `MCUI_TLS_KEY`，并用 `MCUI_LISTEN` 显式选择监听地址。私钥仅授予服务账号读权限。原生部署重启服务后生效。Compose 直连 TLS 通过部署覆盖文件将证书只读挂载进容器，设置这两个变量，并按需要显式配置宿主机监听地址。直连与反代各选一个。
 
-使用私有 PKI 时，通过 `MCUI_AGENT_INSTALLER_MASTER_CA` 指定供 Agent 使用的 CA PEM 路径。Compose 使用只读文件挂载。已有独立签发服务的部署可继续沿用原有启动参数和密钥，迁移前先核对节点信任配置。[Agent 安装与迁移](./phase-1-operations.md)
+使用私有 PKI 时，通过 `MCUI_AGENT_INSTALLER_MASTER_CA` 指定供 Agent 使用的 CA PEM 路径。Compose 使用只读文件挂载。已有独立签发服务的部署可通过覆盖文件使用原启动参数和密钥，省去新镜像默认的 `-managed` 参数，并保留原任务数据库。将旧节点迁入自动签发部署前，需要完成节点信任轮换。[Agent 安装与迁移](./phase-1-operations.md)
 
 ## 验证记录
 
@@ -108,3 +108,5 @@ Master 核对连接 IP、Host 和协议头，按配置的外部 HTTPS 地址校�
 | `624a5b5` | 完整静态检查、节点与检查点定向竞态测试、安装包构建及摘要校验通过。验证旧库索引迁移、摘要查询命中索引、心跳仅更新目标节点、拒绝轮换或禁用后的凭据。 |
 
 使用 Docker Compose 5.5.1 在隔离项目中从 `fb5fa11` 镜像升级到 `624a5b5`。验证默认回环端口、非 root 和只读容器运行、首次启动凭据输出、首次换密与 MFA。升级后沿用原 SQLite 卷和管理员。用 TLS 1.3 测试反代验证外部 Origin、Secure Cookie，以及绕过反代的直接请求被拒绝。
+
+2026-11-24，在 `ro` 使用隔离 Compose 项目、临时发布签名和 Caddy 测试 CA，构建并核验 amd64 和 arm64 安装制品。验证主控启动与密钥持久化、HTTPS 换密与 MFA、面板生成固定 GitHub 版本地址和摘要、节点注册 API，以及经 Cloudflare NTS 校时后的状态任务签发和投递。公开下载和正式 Core 安装验收随首个生产 Release 完成。

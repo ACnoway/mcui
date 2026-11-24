@@ -26,12 +26,9 @@ go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
 
 任务绑定节点、动作和清单中的精确制品。V1 面板由有效清单筛选可安装版本，默认选择当前节点可安装的最新稳定版，并在创建任务时锁定实际版本与摘要。Agent 与 Helper 分别核验清单签名和版本，再按相同长度和 SHA-256 校验官方源或主控缓存的字节。[节点启动恢复](./phase-3-operations.md#进程中断恢复验收) · [制品信任方案](./artifact-trust.md)
 
-### 手工发布
+### 准备部署发布草稿
 
-1. 选定通过检查的 `master` 提交和发布标签 `vX.Y.Z`，创建并推送该标签。从同一标签的干净检出构建全部制品。
-2. 运行下列构建命令，将两个安装程序和两个运行时 ZIP 汇总到上传目录，生成并复核统一的 `SHA256SUMS`。如随版交付 Compose，将同一份 Master 构建结果打成版本化镜像，并在发布说明中列出镜像摘要。
-3. 由发布密钥保管者核对审核记录，按本节签发并复验 `manifest.json` 与 `manifest.json.sig`。Git 标签标识 MCUI 源码版本，`manifest_version` 是客户端独立核对的单调递增序号。成对更新使用独立发布签名和节点授权。
-4. 在 GitHub 创建该标签的草稿，上传安装程序、ZIP、`SHA256SUMS` 及两份清单附件。核对草稿附件、版本和摘要后发布。供客户端取件的稳定 Release 必须包含两份有效清单附件，再设为 Latest。发布后核对 `releases/latest` 指向该标签，并用节点预置的公钥复验下载的清单。
+选定通过检查的 `master` 提交。Git 标签标识 MCUI 源码版本，`manifest_version` 是客户端独立核对的单调递增序号。对清单完成离线签名和复验后，运行以下命令。草稿完成后由[部署工作流](#发布-compose-和通用-agent)构建并发布安装器和镜像。成对更新制品及其授权见[成对更新手册](./phase-3-runtime-update.md)。
 
 ```bash
 set -euo pipefail
@@ -39,33 +36,8 @@ set -euo pipefail
 git tag -a "$RELEASE_TAG" "$RELEASE_COMMIT" -m "$RELEASE_TAG"
 git push origin "refs/tags/$RELEASE_TAG"
 
-# 以下命令在与该标签对应的干净 Linux 检出中执行。
-test "$(git rev-parse HEAD)" = "$(git rev-parse "$RELEASE_TAG^{commit}")"
-bash scripts/check-static.sh
-out=$(mktemp -d)
-mkdir "$out/assets"
-bash scripts/build-master-release.sh "$out/master"
-bash scripts/build-agent-installer.sh "$out/assets/install-mcui-agent.sh"
-bash scripts/build-runtime-release.sh "$out/runtime"
-cp "$out/master/install-mcui-master.sh" "$out/assets/"
-cp "$out/runtime"/mcui-runtime-linux-*.zip "$out/assets/"
-(
-  cd "$out/assets"
-  sha256sum install-mcui-master.sh install-mcui-agent.sh \
-    mcui-runtime-linux-amd64.zip mcui-runtime-linux-arm64.zip > SHA256SUMS
-  sha256sum -c SHA256SUMS
-)
-```
-
-把经过离线签名并复验的两份清单附件放入 `"$out/assets"`。下面的第一条命令只创建草稿，最后一条发布草稿。
-
-```bash
 gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes \
-  "$out/assets/install-mcui-master.sh" "$out/assets/install-mcui-agent.sh" \
-  "$out/assets/mcui-runtime-linux-amd64.zip" "$out/assets/mcui-runtime-linux-arm64.zip" \
-  "$out/assets/SHA256SUMS" "$out/assets/manifest.json" "$out/assets/manifest.json.sig"
-# 审核草稿后发布。
-gh release edit "$RELEASE_TAG" --draft=false --latest
+  manifest.json manifest.json.sig
 ```
 
 标签只标识 Git 中的提交。推送标签后，通过 GitHub 页面或 CLI 创建 Release 草稿。[创建 Release](https://cli.github.com/manual/gh_release_create)

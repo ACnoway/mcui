@@ -40,3 +40,8 @@ jobs:
 
       - name: Run static checks
         run: bash scripts/check-static.sh
+
+      - name: Validate Compose deployment
+        run: |
+          docker compose -f compose.yaml config --quiet
+          MCUI_DOMAIN=panel.example.net docker compose -f compose.yaml -f compose.https.yaml config --quiet
