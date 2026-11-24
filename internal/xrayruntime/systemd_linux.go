@@ -29,7 +29,7 @@ type publishedInbound struct {
 	endpoint xrayconfig.PublicEndpoint
 }
 
-func (systemdService) checkConfigUnits(ctx context.Context, destination string, published []publishedInbound, checkSockets bool) error {
+func (systemdService) checkConfigUnits(ctx context.Context, destinations []string, published []publishedInbound, checkSockets bool) error {
 	ns, err := os.Lstat(networkNamespace)
 	if err != nil {
 		return errors.New("Xray requires a dedicated network namespace")
@@ -40,10 +40,10 @@ func (systemdService) checkConfigUnits(ctx context.Context, destination string, 
 		unix.Statfs(networkNamespace, &fs) != nil || fs.Type != unix.NSFS_MAGIC {
 		return errors.New("invalid dedicated Xray network namespace")
 	}
-	if err := checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", "", false); err != nil {
+	if err := checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", nil, false); err != nil {
 		return err
 	}
-	if err := checkConfigUnit(ctx, serviceUnit, "current", "runtime-config.json", "", networkNamespace, destination, len(published) > 0); err != nil {
+	if err := checkConfigUnit(ctx, serviceUnit, "current", "runtime-config.json", "", networkNamespace, destinations, len(published) > 0); err != nil {
 		return err
 	}
 	if checkSockets {
@@ -56,7 +56,7 @@ func (systemdService) checkConfigUnits(ctx context.Context, destination string, 
 	return nil
 }
 
-func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace, destination string, published bool) error {
+func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace string, destinations []string, published bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	cmd := systemctlCommand(ctx, "show", "--property=ExecStart,StandardInput,NeedDaemonReload,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow", unit)
@@ -75,17 +75,19 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace,
 	}
 	if namespace != "" {
 		allow := strings.Fields(values["IPAddressAllow"])
-		var loopback, endpoint bool
 		for _, entry := range allow {
 			prefix, err := netip.ParsePrefix(entry)
 			if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
 				return errors.New("Xray service IP allowances must be individual IPv4 addresses")
 			}
-			loopback = loopback || entry == "127.0.0.1/32"
-			endpoint = endpoint || entry == destination
 		}
-		if !loopback || (destination != "" && !endpoint) {
+		if !slices.Contains(allow, "127.0.0.1/32") {
 			return errors.New("Xray service lacks IP allowances for the approved route")
+		}
+		for _, destination := range destinations {
+			if !slices.Contains(allow, destination) {
+				return errors.New("Xray service lacks IP allowances for the approved route")
+			}
 		}
 		if published && !slices.Contains(allow, xrayconfig.PublicListenAddress+"/32") {
 			return errors.New("Xray service lacks the public ingress loopback allowance")

@@ -221,7 +221,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	}
 	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1&xray_routing=v1", sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -501,20 +501,33 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		heartbeat(&node)
 
 		reduced := xrayconfig.Plan{{Port: 1080, Protocol: xrayconfig.HTTP, Users: []string{"bob"}}}
+		target := xrayconfig.Destination{Address: "93.184.216.34", Port: 443}
+		network := &xrayconfig.Network{
+			Outbounds: []xrayconfig.Outbound{{Tag: "web", Destination: target}},
+			Routes:    []xrayconfig.Route{{InboundPort: 1080, OutboundTag: "web"}},
+		}
+		body["network"] = network
 		body["state"], body["plan"] = options(), reduced
+		expect(save(draftPath, client.csrf), http.StatusConflict)
+		node.Catalog.RoutingDestinations = []xrayconfig.Destination{target}
+		heartbeat(&node)
+		body["state"] = options()
 		expect(save(draftPath, client.csrf), http.StatusOK)
 		expect(fetch(publicURL, bob, ""), http.StatusOK) // A draft does not change active grants.
 		node.Candidate = xrayconfig.Reference{Port: 1080, SHA256: strings.Repeat("f", 64), Size: 360}
-		node.Preview = xrayconfig.PlanDigest(reduced.Encode())
+		approvedDraft := xrayconfig.Configuration{Inbounds: reduced, Network: network}
+		node.Preview = xrayconfig.PlanDigest(approvedDraft.Encode())
 		heartbeat(&node)
 		removeAlice := managed
 		removeAlice.TaskID = "reduced-config-fixture-0123456789"
 		removeAlice.State, removeAlice.MFACode = options(), fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 		expect(admin(http.MethodPost, removeAlice, client.csrf), http.StatusCreated)
+		expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=6&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1", nil, true), http.StatusNoContent)
 		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
 		complete(removeAlice.TaskID, 6, newer)
 		expect(fetch(publicURL, bob, ""), http.StatusNotFound) // ACK arrived before the new heartbeat.
 		node.Applied, node.Config, node.ConfigRevision = &reduced, node.Candidate, 6
+		node.AppliedNetwork = network
 		heartbeat(&node)
 		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
 		expect(fetch(publicURL, bob, ""), http.StatusNotFound)
@@ -530,7 +543,6 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		expect(fetch(publicURL, invalid, "192.0.2.200:1234"), http.StatusTooManyRequests)
 	}
-
 	for i, operation := range []string{"core.start", "core.stop", "core.uninstall"} {
 		heartbeat(&node)
 		id := fmt.Sprintf("control-fixture-%010d", i)

@@ -127,17 +127,24 @@ func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 	if i.Catalog == nil {
 		return true
 	}
-	plan, err := xrayconfig.ParsePlan(draft)
-	return err == nil && i.Catalog.Allows(plan) && xrayDraftPreviewed(i, draft)
+	plan, err := xrayconfig.ParseConfiguration(draft)
+	return err == nil && i.Catalog.AllowsConfiguration(plan) && xrayDraftPreviewed(i, draft)
 }
 
 func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		State string          `json:"state"`
-		Plan  xrayconfig.Plan `json:"plan"`
+		State   string              `json:"state"`
+		Plan    xrayconfig.Plan     `json:"plan"`
+		Network *xrayconfig.Network `json:"network,omitempty"`
 	}
-	if readJSON(r, &in) != nil || len(in.State) != 64 || !in.Plan.Valid() {
-		http.Error(w, "invalid Xray inbound draft", http.StatusBadRequest)
+	if readJSON(r, &in) != nil || len(in.State) != 64 {
+		http.Error(w, "invalid Xray configuration draft", http.StatusBadRequest)
+		return
+	}
+	plan := xrayconfig.Configuration{Inbounds: in.Plan, Network: in.Network}
+	draft := plan.Encode()
+	if !plan.Valid() || len(draft) > xrayconfig.MaxConfigurationSize {
+		http.Error(w, "invalid Xray configuration draft", http.StatusBadRequest)
 		return
 	}
 	s.withTaskHTTP(w, r, func(w http.ResponseWriter) {
@@ -161,10 +168,9 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 			}
 			node := st.Nodes[p.NodeID]
 			inventory, fingerprint, err := panelInventory(node, now)
-			if err != nil || inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.Allows(in.Plan) {
+			if err != nil || inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.AllowsConfiguration(plan) {
 				return errXrayInventory
 			}
-			draft := in.Plan.Encode()
 			if draft == node.XrayDraft {
 				return nil
 			}
@@ -242,7 +248,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
 	}
-	plan, _ := xrayconfig.ParsePlan(draft)
+	plan, _ := xrayconfig.ParseConfiguration(draft)
 	usageReason := "capability_unverified"
 	if inventory.Architecture == xrayconfig.Architecture && inventory.Xray.Version == xrayconfig.Version &&
 		inventory.Xray.ConfigRevision > 0 {
@@ -252,7 +258,8 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
 		"versions": versions, "catalog_version": manifest.ManifestVersion,
 		"config_ready":    configReady,
-		"draft":           plan,
+		"draft":           plan.Inbounds,
+		"draft_network":   plan.Network,
 		"draft_previewed": xrayDraftPreviewed(inventory.Xray, draft),
 		"usage": map[string]string{
 			"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,

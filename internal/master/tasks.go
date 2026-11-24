@@ -805,6 +805,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		TrojanTLS:   query.Get("xray_trojan_tls") == "v1",
 		Reality:     query.Get("xray_reality") == "v1",
 		Public:      query.Get("xray_public") == "v1",
+		Routing:     query.Get("xray_routing") == "v1",
 	}
 	delivery, err := runtime.Store.LeaseWithXray(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
 		unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)

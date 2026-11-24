@@ -1,0 +1,183 @@
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { destinationLabel, type Destination, type Network, type Route } from './xrayManagement'
+
+const props = defineProps<{
+  tab: 'outbound' | 'routing'
+  network: Network | null
+  destinations: Destination[]
+  inboundPorts: number[]
+  disabled: boolean
+}>()
+const emit = defineEmits<{ change: [network: Network | null] }>()
+const outboundIndex = ref<number | null>(null)
+const routeIndex = ref<number | null>(null)
+const tag = ref('')
+const destination = ref('')
+const inboundPort = ref<number | ''>('')
+const outboundTag = ref('')
+
+const outbounds = computed(() => props.network?.outbounds ?? [])
+const routes = computed(() => props.network?.routes ?? [])
+const destinationChoices = computed(() => props.destinations.filter(target =>
+  !outbounds.value.some((outbound, index) =>
+    index !== outboundIndex.value && destinationLabel(outbound.destination) === destinationLabel(target)),
+))
+const tagAvailable = computed(() => /^[a-z][a-z0-9_-]{0,23}$/.test(tag.value) && tag.value !== 'deny' &&
+  !outbounds.value.some((outbound, index) => index !== outboundIndex.value && outbound.tag === tag.value))
+const routeOutbounds = computed(() => outbounds.value.filter(outbound => !routes.value.some((route, index) =>
+  index !== routeIndex.value && route.inbound_port === inboundPort.value && route.outbound_tag === outbound.tag,
+)))
+const canAddRoute = computed(() => props.inboundPorts.some(port => outbounds.value.some(outbound =>
+  !routes.value.some(route => route.inbound_port === port && route.outbound_tag === outbound.tag),
+)))
+const withdrawnDestinations = computed(() => outbounds.value.filter(outbound =>
+  !props.destinations.some(target => destinationLabel(target) === destinationLabel(outbound.destination)),
+).map(outbound => outbound.tag))
+
+watch(() => props.tab, cancelEdit)
+watch(() => props.network, cancelEdit)
+
+function cancelEdit() {
+  outboundIndex.value = null
+  routeIndex.value = null
+}
+
+function editOutbound(index: number) {
+  outboundIndex.value = index
+  const outbound = outbounds.value[index]
+  tag.value = outbound?.tag ?? ''
+  destination.value = outbound ? destinationLabel(outbound.destination) : ''
+}
+
+function saveOutbound() {
+  if (props.disabled || !props.network || outboundIndex.value === null || !tagAvailable.value) return
+  const target = destinationChoices.value.find(item => destinationLabel(item) === destination.value)
+  if (!target) return
+  const previous = outbounds.value[outboundIndex.value]
+  const updated = [...outbounds.value]
+  updated[outboundIndex.value] = { tag: tag.value, destination: { ...target } }
+  emit('change', {
+    outbounds: updated,
+    routes: routes.value.map(route => route.outbound_tag === previous?.tag ? { ...route, outbound_tag: tag.value } : route),
+  })
+}
+
+function references(tag: string) {
+  return routes.value.filter(route => route.outbound_tag === tag).length
+}
+
+function removeOutbound(index: number) {
+  const outbound = outbounds.value[index]
+  if (props.disabled || !outbound || references(outbound.tag)) return
+  emit('change', { outbounds: outbounds.value.filter((_, position) => position !== index), routes: routes.value })
+}
+
+function editRoute(index: number) {
+  routeIndex.value = index
+  const route = routes.value[index]
+  inboundPort.value = route?.inbound_port ?? ''
+  outboundTag.value = route?.outbound_tag ?? ''
+}
+
+function saveRoute() {
+  if (props.disabled || routeIndex.value === null || inboundPort.value === '' ||
+    !props.inboundPorts.includes(inboundPort.value) || !routeOutbounds.value.some(outbound => outbound.tag === outboundTag.value)) return
+  const updated = [...routes.value]
+  updated[routeIndex.value] = { inbound_port: inboundPort.value, outbound_tag: outboundTag.value }
+  updateRoutes(updated)
+}
+
+function updateRoutes(updated: Route[]) {
+  if (!props.disabled) emit('change', { outbounds: outbounds.value, routes: updated })
+}
+
+function moveRoute(index: number, direction: number) {
+  const next = index + direction
+  if (next < 0 || next >= routes.value.length) return
+  const updated = [...routes.value]
+  const [route] = updated.splice(index, 1)
+  updated.splice(next, 0, route)
+  updateRoutes(updated)
+}
+</script>
+
+<template>
+  <div class="page-stack">
+    <div class="actions">
+      <button v-if="!network && destinations.length" type="button" :disabled="disabled"
+        @click="emit('change', { outbounds: [], routes: [] })">自定义出站与路由</button>
+      <button v-if="network" type="button" class="quiet" :disabled="disabled" @click="emit('change', null)">恢复节点默认路由</button>
+      <button v-if="network && tab === 'outbound'" type="button" :disabled="disabled || outbounds.length >= destinations.length || outboundIndex !== null"
+        @click="editOutbound(outbounds.length)">添加出站</button>
+      <button v-if="network && tab === 'routing'" type="button" :disabled="disabled || !canAddRoute || routeIndex !== null"
+        @click="editRoute(routes.length)">添加规则</button>
+    </div>
+    <p v-if="!network && !destinations.length" class="feedback">节点尚未批准自定义出站目标。</p>
+    <p v-if="withdrawnDestinations.length" class="notice" role="status">节点已收回这些出站目标的许可。请修改目标或清除引用后删除出站。{{ withdrawnDestinations.join('、') }}</p>
+    <p v-if="network && !routes.length" class="notice" role="status">草稿没有放行规则，应用后会拒绝所有业务流量。</p>
+    <template v-if="tab === 'outbound'">
+      <form v-if="outboundIndex !== null" class="filters" @submit.prevent="saveOutbound">
+        <label>标签<input v-model.trim="tag" required maxlength="24" pattern="[a-z][a-z0-9_\-]{0,23}" :disabled="disabled" /></label>
+        <label>批准的 IPv4 TCP 目标<select v-model="destination" required :disabled="disabled">
+          <option value="" disabled>选择目标</option>
+          <option v-for="target in destinationChoices" :key="destinationLabel(target)">{{ destinationLabel(target) }}</option>
+        </select></label>
+        <button type="submit" :disabled="disabled || !tagAvailable || !destinationChoices.some(target => destinationLabel(target) === destination)">更新草稿</button>
+        <button type="button" class="quiet" @click="cancelEdit">取消</button>
+      </form>
+      <div class="table-wrap">
+        <table class="data-table" aria-label="出站">
+          <thead><tr><th scope="col">标签</th><th scope="col">协议</th><th scope="col">目标</th><th scope="col">路由引用</th><th scope="col">操作</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">deny</th><td>Blackhole</td><td>拒绝</td><td>默认出站</td><td>—</td></tr>
+            <tr v-if="!network"><th scope="row">allowed</th><td>Freedom</td><td>节点默认 IPv4 TCP 目标</td><td>节点默认规则</td><td>—</td></tr>
+            <tr v-for="(outbound, index) in outbounds" :key="outbound.tag">
+              <th scope="row">{{ outbound.tag }}</th><td>Freedom</td><td>{{ destinationLabel(outbound.destination) }}</td>
+              <td>{{ references(outbound.tag) }}</td>
+              <td><div class="actions">
+                <button type="button" class="outline" :disabled="disabled || outboundIndex !== null" @click="editOutbound(index)">编辑</button>
+                <button type="button" class="danger" :disabled="disabled || outboundIndex !== null || !!references(outbound.tag)" @click="removeOutbound(index)">删除</button>
+              </div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+    <template v-else>
+      <form v-if="routeIndex !== null" class="filters" @submit.prevent="saveRoute">
+        <label>入站<select v-model="inboundPort" required :disabled="disabled" @change="outboundTag = ''">
+          <option value="" disabled>选择入站</option>
+          <option v-for="port in inboundPorts" :key="port" :value="port">入站 {{ port }}</option>
+        </select></label>
+        <label>目标出站<select v-model="outboundTag" required :disabled="disabled || inboundPort === ''">
+          <option value="" disabled>选择出站</option>
+          <option v-for="outbound in routeOutbounds" :key="outbound.tag" :value="outbound.tag">{{ outbound.tag }} · {{ destinationLabel(outbound.destination) }}</option>
+        </select></label>
+        <button type="submit" :disabled="disabled || inboundPort === '' || !outboundTag">更新草稿</button>
+        <button type="button" class="quiet" @click="cancelEdit">取消</button>
+      </form>
+      <div v-if="!network || routes.length" class="table-wrap">
+        <table class="data-table" aria-label="路由规则">
+          <thead><tr><th scope="col">顺序</th><th scope="col">匹配入站</th><th scope="col">TCP 目标</th><th scope="col">出站</th><th scope="col">操作</th></tr></thead>
+          <tbody>
+            <tr v-if="!network && inboundPorts.length"><td>1</td><td>{{ inboundPorts.join('、') }}</td><td>节点默认 IPv4 TCP 目标</td><td>allowed</td><td>—</td></tr>
+            <tr v-else-if="!network"><td colspan="5">草稿没有已授权入站，默认拒绝所有业务流量。</td></tr>
+            <tr v-for="(route, index) in routes" :key="`${route.inbound_port}-${route.outbound_tag}`">
+              <td>{{ index + 1 }}</td><td>{{ route.inbound_port }}</td>
+              <td>{{ destinationLabel(outbounds.find(outbound => outbound.tag === route.outbound_tag)!.destination) }}</td><td>{{ route.outbound_tag }}</td>
+              <td><div class="actions">
+                <button type="button" class="outline" :disabled="disabled || routeIndex !== null" @click="editRoute(index)">编辑</button>
+                <button type="button" class="quiet" :disabled="disabled || routeIndex !== null || index === 0" @click="moveRoute(index, -1)">上移</button>
+                <button type="button" class="quiet" :disabled="disabled || routeIndex !== null || index === routes.length - 1" @click="moveRoute(index, 1)">下移</button>
+                <button type="button" class="danger" :disabled="disabled || routeIndex !== null" @click="updateRoutes(routes.filter((_, position) => position !== index))">删除</button>
+              </div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-if="network && !inboundPorts.length" class="feedback">请先在入站或客户端页为入站分配客户端。</p>
+      <p v-if="network && !outbounds.length" class="feedback">请先在出站页添加目标出站。</p>
+    </template>
+  </div>
+</template>

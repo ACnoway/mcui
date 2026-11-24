@@ -172,6 +172,21 @@ function buildVectors() {
         plan: '[{"port":1080,"users":["alice","bob"]}]',
       },
     })),
+    vector('task-xray-managed-routing', 'task', makeObject('task', {
+      schema_version: 1, task_id: 'task-xray-routing-01', node_id: 'node-001', sequence: 4,
+      operation: 'config.apply', approval_id: '4'.repeat(64), ...timestamp,
+      payload: {
+        core: 'xray', version: 'v26.10.31', architecture: 'amd64', sha256: 'a'.repeat(64),
+        manifest_version: 3, port: 1080, config: parseStrict(managedConfig.input_json),
+        plan: JSON.stringify({
+          inbounds: [{ port: 1080, users: ['alice'] }],
+          network: {
+            outbounds: [{ tag: 'web', destination: { address: '93.184.216.34', port: 443 } }],
+            routes: [{ inbound_port: 1080, outbound_tag: 'web' }],
+          },
+        }),
+      },
+    })),
   ]
   const task = parseStrict(vectors[0].input_json)
   const negativeCases = [

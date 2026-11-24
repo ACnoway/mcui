@@ -22,6 +22,7 @@ type XrayInventory struct {
 	Catalog        *xrayconfig.Catalog  `json:"catalog,omitempty"`
 	Preview        string               `json:"preview,omitempty"`
 	Applied        *xrayconfig.Plan     `json:"applied,omitempty"`
+	AppliedNetwork *xrayconfig.Network  `json:"applied_network,omitempty"`
 	PlanSupported  bool                 `json:"plan_supported,omitempty"`
 }
 
@@ -49,7 +50,10 @@ func (x XrayInventory) Valid() bool {
 	if x.Preview != "" && (x.Catalog == nil || !xrayconfig.ValidPlanDigest(x.Preview)) {
 		return false
 	}
-	if x.Applied != nil && (x.ConfigRevision == 0 || !x.Applied.Valid()) {
+	if x.AppliedNetwork != nil && x.Applied == nil {
+		return false
+	}
+	if x.Applied != nil && (x.ConfigRevision == 0 || !x.AppliedConfiguration().Valid()) {
 		return false
 	}
 	if x.Candidate != (xrayconfig.Reference{}) && (x.Version != xrayconfig.Version || !x.Candidate.Valid()) {
@@ -61,4 +65,11 @@ func (x XrayInventory) Valid() bool {
 		}
 	}
 	return (x.Version == "" && x.SHA256 == "" && !x.Running) || corecatalog.ValidXrayRelease(x.Version, x.SHA256)
+}
+
+func (x XrayInventory) AppliedConfiguration() xrayconfig.Configuration {
+	if x.Applied == nil {
+		return xrayconfig.Configuration{}
+	}
+	return xrayconfig.Configuration{Inbounds: *x.Applied, Network: x.AppliedNetwork}
 }

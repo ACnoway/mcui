@@ -3,6 +3,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AdminSidebar, { type AdminPage } from './AdminSidebar.vue'
 import LinkActions from './LinkActions.vue'
 import PanelDialog from './PanelDialog.vue'
+import XrayNetworkEditor from './XrayNetworkEditor.vue'
+import { copyNetwork, destinationLabel, type Destination, type Network } from './xrayManagement'
 import { xrayProtocolName, type XrayProtocol, type XrayPublicEndpoint } from './xraySubscription'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; pending: boolean }
@@ -31,16 +33,19 @@ type XrayCatalog = {
   trojan_trust?: { sha256: string }
   reality_public_key?: string
   public_endpoints?: Record<number, XrayPublicEndpoint>
+  routing_destinations?: Destination[]
 }
+type XrayDraft = { plan: XrayInbound[]; network: Network | null }
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
 type PanelXrayOptions = {
   architecture: string
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
-    catalog?: XrayCatalog; applied?: XrayInbound[]
+    catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
+  draft_network?: Network | null
   usage?: { user_statistics: string; exact_quota: string; reason: string }
 }
 type XrayInstall = {
@@ -89,7 +94,7 @@ const xrayInstallInput = ref({
 const xrayOperationLabel: Record<XrayOperation, string> = {
   'core.install': '安装', 'core.start': '启动', 'core.stop': '停止',
   'core.upgrade': '升级', 'core.downgrade': '降级', 'core.uninstall': '卸载',
-  'config.apply': '下发受控入站',
+  'config.apply': '下发代理配置',
 }
 const legacyXrayOperations: CoreXrayOperation[] = ['core.install', 'core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
 const xrayVersionChange = computed(() => xrayInstallInput.value.operation === 'core.upgrade' || xrayInstallInput.value.operation === 'core.downgrade')
@@ -105,6 +110,7 @@ const panelXrayError = ref('')
 const panelXrayReadError = ref('')
 const panelXraySubmitting = ref(false)
 const xrayDraft = ref<XrayInbound[]>([])
+const draftNetwork = ref<Network | null>(null)
 const xrayDraftSaving = ref(false)
 const draftConflict = ref(false)
 const xraySubscriptions = ref<XraySubscriptionRow[]>([])
@@ -121,7 +127,8 @@ const sharePort = ref<number | ''>('')
 const shareQrFirst = ref(false)
 const shareTab = ref<'subscription' | 'node'>('subscription')
 const selectedConfigCore = ref<'' | 'xray'>('')
-const draftTab = ref<'inbound' | 'outbound' | 'routing'>('inbound')
+const draftTab = ref<'inbound' | 'client' | 'outbound' | 'routing'>('inbound')
+const clientSearch = ref('')
 const previewOpen = ref(false)
 const coreDrawer = ref(false)
 const addNodeOpen = ref(false)
@@ -131,7 +138,8 @@ const pageTitle: Record<AdminPage, string> = {
   audit: '审计日志', versions: 'Core 版本', tasks: '任务', admins: '管理员',
 }
 const now = ref(Date.now())
-const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.stringify(panelXray.value?.draft ?? []))
+const xrayDraftDirty = computed(() => !matchesDraft(panelXray.value, { plan: xrayDraft.value, network: draftNetwork.value }))
+const draftDisabled = computed(() => xrayDraftSaving.value || panelXraySubmitting.value || !!panelXrayReadError.value || draftConflict.value)
 const xrayDraftPolicyChanged = computed(() => xrayDraft.value.some(inbound =>
   panelXray.value?.current.catalog?.ports.includes(inbound.port) &&
   (inbound.protocol !== approvedProtocol(inbound.port) || inbound.tls_cert_sha256 !== approvedTLSCert(inbound.port) ||
@@ -142,6 +150,12 @@ const draftPorts = computed(() => [...new Set([
   ...(panelXray.value?.current.catalog?.ports ?? []),
   ...xrayDraft.value.map(inbound => inbound.port),
 ])].sort((left, right) => left - right))
+const draftGrantCount = computed(() => xrayDraft.value.reduce((count, inbound) => count + inbound.users.length, 0))
+const clients = computed(() => [...new Set([
+  ...draftPorts.value.flatMap(port => draftUsers(port)),
+  ...(panelXray.value?.current.applied ?? []).flatMap(inbound => inbound.users),
+])].sort().filter(user => user.includes(clientSearch.value.trim().toLowerCase())))
+const networkDestinations = computed(() => panelXray.value?.current.catalog?.routing_destinations ?? [])
 let panelXrayRetry: { intent: string; id: string } | undefined
 const panelXrayOperations = computed<CoreXrayOperation[]>(() => {
   if (!panelXray.value?.current.version) return ['core.install']
@@ -254,6 +268,8 @@ const inboundChanges = computed(() => {
     port, before: applied.find(inbound => inbound.port === port), after: draft.find(inbound => inbound.port === port),
   })).filter(change => JSON.stringify(change.before) !== JSON.stringify(change.after))
 })
+const networkChanged = computed(() => JSON.stringify(panelXray.value?.current.applied_network ?? null) !==
+  JSON.stringify(panelXray.value?.draft_network ?? null))
 const draftStatus = computed(() => {
   const options = panelXray.value
   if (!options) return '状态不可用'
@@ -456,6 +472,7 @@ function selectNode(id: string) {
   selectedNodeID.value = id
   selectedConfigCore.value = ''
   draftTab.value = 'inbound'
+  clientSearch.value = ''
   tasks.value = []
   taskError.value = ''
   xrayInstalls.value = []
@@ -466,6 +483,7 @@ function selectNode(id: string) {
   panelXrayError.value = ''
   panelXrayReadError.value = ''
   xrayDraft.value = []
+  draftNetwork.value = null
   draftConflict.value = false
   previewOpen.value = false
   xraySubscriptions.value = []
@@ -478,7 +496,7 @@ function selectNode(id: string) {
 }
 
 function switchNode(id: string) {
-  if (selectedNodeID.value !== id && xrayDraftDirty.value && !confirm('放弃未保存的入站修改并切换节点？')) return false
+  if (selectedNodeID.value !== id && xrayDraftDirty.value && !confirm('放弃未保存的代理配置修改并切换节点？')) return false
   selectNode(id)
   return true
 }
@@ -572,7 +590,7 @@ function operationLabel(operation: string) {
 }
 
 function discardDraft() {
-  xrayDraft.value = copyXrayDraft(panelXray.value?.draft ?? null)
+  loadDraft(panelXray.value)
   draftConflict.value = false
   panelXrayError.value = ''
 }
@@ -757,7 +775,7 @@ async function changeXraySubscription(row: XraySubscriptionRow, action: 'issue' 
 }
 
 async function loadPanelXray(nodeID: string, { background = false, savedPlan }: {
-  background?: boolean; savedPlan?: XrayInbound[]
+  background?: boolean; savedPlan?: XrayDraft
 } = {}) {
   if (!admin.value?.can_manage_xray) return
   const { signal } = nodeReads
@@ -770,10 +788,12 @@ async function loadPanelXray(nodeID: string, { background = false, savedPlan }: 
   try {
     const options = await api<PanelXrayOptions>(panelXrayPath(nodeID), { signal })
     if (!signal.aborted && request === inventoryRequest && selectedNodeID.value === nodeID) {
-      const savedDraftChanged = !panelXray.value || JSON.stringify(options.draft) !== JSON.stringify(panelXray.value.draft)
-      const savedByThisPage = savedPlan && JSON.stringify(options.draft) === JSON.stringify(savedPlan)
+      const previous = panelXray.value
+      const savedDraftChanged = !previous || (options.draft === null) !== (previous.draft === null) ||
+        !matchesDraft(options, { plan: previous.draft ?? [], network: previous.draft_network ?? null })
+      const savedByThisPage = savedPlan && matchesDraft(options, savedPlan)
       if (savedDraftChanged && (!xrayDraftDirty.value || savedByThisPage)) {
-        xrayDraft.value = copyXrayDraft(options.draft)
+        loadDraft(options)
       } else if (savedDraftChanged) {
         draftConflict.value = true
       }
@@ -792,8 +812,14 @@ async function loadPanelXray(nodeID: string, { background = false, savedPlan }: 
   }
 }
 
-function copyXrayDraft(draft: XrayInbound[] | null) {
-  return draft?.map(inbound => ({ ...inbound, users: [...inbound.users] })) ?? []
+function matchesDraft(options: PanelXrayOptions | null, draft: XrayDraft) {
+  return JSON.stringify(options?.draft ?? []) === JSON.stringify(draft.plan) &&
+    JSON.stringify(options?.draft_network ?? null) === JSON.stringify(draft.network)
+}
+
+function loadDraft(options: PanelXrayOptions | null) {
+  xrayDraft.value = options?.draft?.map(inbound => ({ ...inbound, users: [...inbound.users] })) ?? []
+  draftNetwork.value = copyNetwork(options?.draft_network)
 }
 
 function approvedProtocol(port: number): XrayPortProtocol | undefined {
@@ -842,7 +868,12 @@ function draftUsers(port: number) {
   ])].sort()
 }
 
+function canToggleDraftUser(port: number, user: string) {
+  return draftHasUser(port, user) || (draftGrantCount.value < 16 && approvedUsers(port).includes(user))
+}
+
 function toggleDraftUser(port: number, user: string) {
+  if (draftDisabled.value || !canToggleDraftUser(port, user)) return
   const existing = xrayDraft.value.find(inbound => inbound.port === port)
   const users = existing?.users ?? []
   const next = users.includes(user) ? users.filter(name => name !== user) : [...users, user].sort()
@@ -855,6 +886,8 @@ function toggleDraftUser(port: number, user: string) {
       public_endpoint: existing ? existing.public_endpoint : approvedPublicEndpoint(port), users: next,
     })
     xrayDraft.value.sort((left, right) => left.port - right.port)
+  } else if (draftNetwork.value) {
+    draftNetwork.value = { ...draftNetwork.value, routes: draftNetwork.value.routes.filter(route => route.inbound_port !== port) }
   }
 }
 
@@ -868,13 +901,14 @@ async function saveXrayDraft() {
     port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port),
     reality_public_key: approvedRealityKey(inbound.port), public_endpoint: approvedPublicEndpoint(inbound.port), users: inbound.users,
   } : inbound)
+  const savedPlan = { plan, network: draftNetwork.value }
   xrayDraftSaving.value = true
   panelXrayError.value = ''
   try {
-    await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, plan }) })
-    if (!signal.aborted && selectedNodeID.value === node.id) await loadPanelXray(node.id, { savedPlan: plan })
+    await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, ...savedPlan }) })
+    if (!signal.aborted && selectedNodeID.value === node.id) await loadPanelXray(node.id, { savedPlan })
   } catch (e) {
-    if (!signal.aborted && selectedNodeID.value === node.id) panelXrayError.value = e instanceof Error ? e.message : '保存入站草稿失败'
+    if (!signal.aborted && selectedNodeID.value === node.id) panelXrayError.value = e instanceof Error ? e.message : '保存代理配置草稿失败'
   } finally {
     xrayDraftSaving.value = false
   }
@@ -1295,8 +1329,9 @@ onMounted(async () => {
           </div>
           <div class="tabs" role="group" aria-label="代理配置类型">
             <button type="button" :aria-pressed="draftTab === 'inbound'" @click="draftTab = 'inbound'">入站</button>
-            <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
+            <button type="button" :aria-pressed="draftTab === 'client'" @click="draftTab = 'client'">客户端</button>
             <button type="button" :aria-pressed="draftTab === 'routing'" @click="draftTab = 'routing'">路由</button>
+            <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
           </div>
           <p v-if="panelXrayError" class="notice" role="alert">{{ panelXrayError }}</p>
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
@@ -1312,13 +1347,13 @@ onMounted(async () => {
                     <td>
                       <details>
                         <summary>{{ xrayDraft.find(inbound => inbound.port === port)?.users.join('、') || '未授权' }} · 查看与编辑</summary>
-                        <fieldset class="inbound-users" :disabled="xrayDraftSaving || panelXraySubmitting || !!panelXrayReadError || draftConflict">
+                        <fieldset class="inbound-users" :disabled="draftDisabled">
                           <legend class="sr-only">入站 {{ port }} 用户授权</legend>
                           <p v-if="approvedTLSCert(port)">TLS 证书 SHA-256 <code>{{ approvedTLSCert(port) }}</code></p>
                           <p v-if="approvedRealityKey(port)">REALITY 公钥 <code>{{ approvedRealityKey(port) }}</code></p>
                           <label v-for="user in draftUsers(port)" :key="user">
                             <input type="checkbox" :checked="draftHasUser(port, user)"
-                              :disabled="!draftHasUser(port, user) && !approvedUsers(port).includes(user)"
+                              :disabled="!canToggleDraftUser(port, user)"
                               @change="toggleDraftUser(port, user)" />{{ user }}
                           </label>
                           <p v-if="!draftUsers(port).length">节点尚未登记此协议的凭据。</p>
@@ -1341,10 +1376,37 @@ onMounted(async () => {
               <span v-else>{{ panelXray.current.applied ? '无已授权入站' : endpointLabel(undefined, panelXray.current.config.port) }}</span>
             </div>
           </template>
-          <div v-else class="empty">
-            <strong>{{ draftTab === 'outbound' ? '出站管理待接入' : '路由管理待接入' }}</strong>
-            <p>{{ draftTab === 'outbound' ? '待节点策略和接口支持后，可编辑出站、查看默认出站及路由引用。' : '待节点策略和接口支持后，可编辑匹配条件、目标出站和规则顺序。' }}</p>
-          </div>
+          <template v-else-if="draftTab === 'client'">
+            <div class="filters">
+              <label>客户端<input v-model="clientSearch" type="search" placeholder="搜索用户名" /></label>
+              <button type="button" class="outline" @click="openPage('subscriptions')">管理订阅</button>
+            </div>
+            <div v-if="clients.length" class="table-wrap">
+              <table class="data-table" aria-label="客户端授权">
+                <thead><tr><th scope="col">客户端</th><th scope="col">生效入站</th><th scope="col">入站授权草稿</th></tr></thead>
+                <tbody>
+                  <tr v-for="user in clients" :key="user">
+                    <th scope="row">{{ user }}</th>
+                    <td>{{ subscriptionInbounds.filter(inbound => inbound.users.includes(user)).map(inbound => inbound.port).join('、') || '—' }}</td>
+                    <td><fieldset class="inbound-users" :disabled="draftDisabled">
+                      <legend class="sr-only">{{ user }} 的入站授权</legend>
+                      <label v-for="port in draftPorts.filter(port => draftUsers(port).includes(user))" :key="port">
+                        <input type="checkbox" :checked="draftHasUser(port, user)" :disabled="!canToggleDraftUser(port, user)"
+                          @change="toggleDraftUser(port, user)" />{{ port }} · {{ inboundProtocolLabel(approvedProtocol(port)) }}
+                      </label>
+                      <p v-if="!draftPorts.some(port => draftUsers(port).includes(user))">节点已移除此客户端的凭据。</p>
+                    </fieldset></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-else class="empty">{{ clientSearch ? '没有匹配的客户端。' : '节点尚未登记客户端凭据。' }}</p>
+          </template>
+          <XrayNetworkEditor v-else-if="panelXray.current.catalog" :tab="draftTab" :network="draftNetwork"
+            :destinations="networkDestinations" :inbound-ports="xrayDraft.map(inbound => inbound.port)" :disabled="draftDisabled"
+            @change="draftNetwork = $event" />
+          <p v-else class="empty">节点尚未上报代理配置目录。</p>
+          <p v-if="draftGrantCount >= 16 && (draftTab === 'inbound' || draftTab === 'client')" class="feedback">已达到每个节点 16 条入站授权的上限。</p>
           <p v-if="xrayDraftPolicyChanged">节点批准的端口、接入地址或服务端身份有变化。核对后重新保存草稿。</p>
           <p v-if="latestApplyTask" role="status">最近下发 #{{ latestApplyTask.sequence }} · {{ taskStatus(latestApplyTask) }}
             <template v-if="latestApplyTask.status === 'SUCCEEDED' && !latestApplyVerified">，等待节点上报对应修订</template>
@@ -1611,6 +1673,26 @@ onMounted(async () => {
         候选入站 {{ endpointLabel(undefined, panelXray.current.candidate.port) }}
       </p>
       <p v-else>暂无用户授权差异。</p>
+      <div v-if="networkChanged" class="table-wrap">
+        <table class="data-table" aria-label="出站和路由变更">
+          <thead><tr><th scope="col">版本</th><th scope="col">出站</th><th scope="col">TCP 放行规则</th></tr></thead>
+          <tbody>
+            <tr v-for="entry in [{ label: '当前', value: panelXray.current.applied_network }, { label: '草稿', value: panelXray.draft_network }]" :key="entry.label">
+              <th scope="row">{{ entry.label }}</th>
+              <td v-if="!entry.value">节点默认出站</td>
+              <td v-else>
+                <div v-for="outbound in entry.value.outbounds" :key="outbound.tag">{{ outbound.tag }} · {{ destinationLabel(outbound.destination) }}</div>
+                <span v-if="!entry.value.outbounds.length">仅拒绝出站</span>
+              </td>
+              <td v-if="!entry.value">节点默认路由</td>
+              <td v-else>
+                <div v-for="(route, index) in entry.value.routes" :key="`${route.inbound_port}-${route.outbound_tag}`">{{ index + 1 }}. 入站 {{ route.inbound_port }} → {{ route.outbound_tag }}</div>
+                <span v-if="!entry.value.routes.length">拒绝全部流量</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
       <div class="actions">
         <button class="outline" type="button" @click="refreshNodeTasks(selectedNode.id)">刷新预览</button>
         <button type="button" :disabled="!canApplyXrayDraft" @click="submitPanelXray('config.apply')">确认下发</button>

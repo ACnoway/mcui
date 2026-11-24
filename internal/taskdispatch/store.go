@@ -72,6 +72,7 @@ type XrayDeliveryCapabilities struct {
 	TrojanTLS   bool
 	Reality     bool
 	Public      bool
+	Routing     bool
 }
 
 func (c XrayDeliveryCapabilities) supports(operation string) bool {
@@ -96,14 +97,14 @@ func (c XrayDeliveryCapabilities) supportsTask(task lifecycleauth.InstallTask) b
 	if !c.supports(task.Operation) || (task.Plan != "" && !c.Plan) {
 		return false
 	}
-	if task.Plan == "" || (c.HTTP && c.Protocols && c.TrojanTLS && c.Reality && c.Public) {
+	if task.Plan == "" {
 		return true
 	}
-	plan, err := xrayconfig.ParsePlan(task.Plan)
-	if err != nil {
+	plan, err := xrayconfig.ParseConfiguration(task.Plan)
+	if err != nil || (plan.Network != nil && !c.Routing) {
 		return false
 	}
-	for _, inbound := range plan {
+	for _, inbound := range plan.Inbounds {
 		if inbound.PublicEndpoint != (xrayconfig.PublicEndpoint{}) && !c.Public {
 			return false
 		}

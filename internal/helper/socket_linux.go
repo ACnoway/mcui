@@ -139,7 +139,7 @@ func (h *Helper) handleSocket(conn *net.UnixConn) error {
 	if decoder.Decode(&trailing) != io.EOF {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
-	if request.XrayPlan != nil && (!request.XrayInventory || len(*request.XrayPlan) > xrayconfig.MaxPlanSize) {
+	if request.XrayPlan != nil && (!request.XrayInventory || len(*request.XrayPlan) > xrayconfig.MaxConfigurationSize) {
 		return h.writeSocketResponse(conn, socketResponse{ErrorCode: "status_unavailable"})
 	}
 	if request.Probe || request.XrayInventory {

@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -587,6 +588,26 @@ func TestManagedConfigRevokesAndRejectsPolicyDrift(t *testing.T) {
 	if state.Current.Config != disabled || state.Current.Revision != 3 || view.Applied == nil || len(*view.Applied) != 0 {
 		t.Fatalf("empty plan did not commit as an explicit revocation: %+v", view)
 	}
+	first := xrayconfig.Destination{Address: "93.184.216.34", Port: 8080}
+	second := xrayconfig.Destination{Address: "93.184.216.36", Port: 8443}
+	catalog.RoutingDestinations = []xrayconfig.Destination{first, second}
+	save()
+	draft := xrayconfig.Configuration{Inbounds: plan, Network: &xrayconfig.Network{
+		Outbounds: []xrayconfig.Outbound{{Tag: "first", Destination: first}, {Tag: "second", Destination: second}},
+		Routes:    []xrayconfig.Route{{InboundPort: 1080, OutboundTag: "first"}, {InboundPort: 1081, OutboundTag: "second"}},
+	}}
+	_, routed, err := readCandidate(path, release, draft.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.configure(ctx, path, release, routed, draft.Encode(), 4, strings.Repeat("c", 64), approve); err != nil {
+		t.Fatal(err)
+	}
+	view = r.Inventory(readState(t, r), "", true)
+	if view.AppliedConfiguration().Encode() != draft.Encode() ||
+		!slices.Equal(svc.destinations, []string{first.Address + "/32", second.Address + "/32"}) {
+		t.Fatal("committed routing did not preserve the signed draft and verify each routed destination")
+	}
 }
 
 type fakeService struct {
@@ -596,10 +617,12 @@ type fakeService struct {
 	running       bool
 	starts        int
 	failedConfig  string
+	destinations  []string
 }
 
 func (s *fakeService) preflight(context.Context) error { return nil }
-func (s *fakeService) checkConfigUnits(context.Context, string, []publishedInbound, bool) error {
+func (s *fakeService) checkConfigUnits(_ context.Context, destinations []string, _ []publishedInbound, _ bool) error {
+	s.destinations = slices.Clone(destinations)
 	return nil
 }
 

@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
@@ -40,8 +42,8 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 	case err == nil && managed:
 		public, _ := catalog.Public(current.Release.SHA256)
 		view.Catalog = &public
-		if plan, err := xrayconfig.ParsePlan(encoded); err == nil {
-			_, view.Candidate, _ = catalog.Render(current.Release.SHA256, plan)
+		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil {
+			_, view.Candidate, _ = catalog.RenderConfiguration(current.Release.SHA256, plan)
 			view.Preview = xrayconfig.PlanDigest(encoded)
 		}
 	}
@@ -76,13 +78,15 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 		}
 		if json.Unmarshal(data, &config) == nil {
 			plan := make(xrayconfig.Plan, 0, len(config.Inbounds))
+			ports := make(map[string]int, len(config.Inbounds))
 			for _, in := range config.Inbounds {
+				ports[in.Tag] = in.Port
 				entry := xrayconfig.Inbound{Port: in.Port, Protocol: in.Protocol}
-				if in.Protocol == "socks" {
-					entry.Protocol = ""
-				}
 				if in.Protocol == "" {
 					return view
+				}
+				if in.Protocol == "socks" {
+					entry.Protocol = ""
 				}
 				if in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "reality" {
 					key, err := xrayconfig.RealityPublicKey(in.StreamSettings.Reality.PrivateKey)
@@ -118,8 +122,10 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				}
 				plan = append(plan, entry)
 			}
-			if plan.Valid() {
+			network, err := xrayconfig.AppliedNetwork(data, ports)
+			if err == nil && (xrayconfig.Configuration{Inbounds: plan, Network: network}).Valid() {
 				view.Applied = &plan
+				view.AppliedNetwork = network
 			}
 		}
 	}
@@ -161,11 +167,11 @@ func readCandidate(path string, release Release, encoded string) ([]byte, xrayco
 	if encoded == "" && errors.Is(err, os.ErrNotExist) {
 		return readInbound(path, release)
 	}
-	plan, planErr := xrayconfig.ParsePlan(encoded)
+	plan, planErr := xrayconfig.ParseConfiguration(encoded)
 	if err != nil || planErr != nil {
 		return nil, xrayconfig.Reference{}, errors.New("node-local Xray catalog or plan is unavailable")
 	}
-	return catalog.Render(release.SHA256, plan)
+	return catalog.RenderConfiguration(release.SHA256, plan)
 }
 
 func (r *Runtime) ConfigureAuthorized(ctx context.Context, release Release, ref xrayconfig.Reference, encoded string, revision int64, hash string, authorize func(context.Context) error) (string, error) {
@@ -216,7 +222,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 
 func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSockets bool) error {
 	svc, ok := r.service.(interface {
-		checkConfigUnits(context.Context, string, []publishedInbound, bool) error
+		checkConfigUnits(context.Context, []string, []publishedInbound, bool) error
 	})
 	if !ok {
 		return errors.New("Xray service does not support isolated configuration")
@@ -233,18 +239,29 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSocket
 		} `json:"inbounds"`
 		Routing struct {
 			Rules []struct {
-				IP []string `json:"ip"`
+				IP      []string `json:"ip"`
+				Network string   `json:"network"`
 			} `json:"rules"`
 		} `json:"routing"`
 	}
 	if json.Unmarshal(data, &config) != nil {
 		return errors.New("invalid saved Xray configuration")
 	}
-	if config.Inbounds != nil && len(config.Inbounds) == 0 && len(config.Routing.Rules) == 0 {
-		return svc.checkConfigUnits(ctx, "", nil, checkSockets)
-	}
-	if len(config.Inbounds) == 0 || len(config.Routing.Rules) != 1 || len(config.Routing.Rules[0].IP) != 1 {
+	if config.Inbounds == nil || (len(config.Inbounds) == 0 && len(config.Routing.Rules) != 0) {
 		return errors.New("invalid saved Xray route")
+	}
+	var destinations []string
+	for _, rule := range config.Routing.Rules {
+		if len(rule.IP) != 1 || rule.Network != "tcp" {
+			return errors.New("invalid saved Xray route")
+		}
+		prefix, err := netip.ParsePrefix(rule.IP[0])
+		if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
+			return errors.New("invalid saved Xray route destination")
+		}
+		if !slices.Contains(destinations, rule.IP[0]) {
+			destinations = append(destinations, rule.IP[0])
+		}
 	}
 	var published []publishedInbound
 	for _, inbound := range config.Inbounds {
@@ -259,7 +276,7 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSocket
 		}
 		published = append(published, publishedInbound{port: inbound.Port, endpoint: endpoint})
 	}
-	return svc.checkConfigUnits(ctx, config.Routing.Rules[0].IP[0], published, checkSockets)
+	return svc.checkConfigUnits(ctx, destinations, published, checkSockets)
 }
 
 func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) error {

@@ -408,8 +408,8 @@ func validateTaskPayload(operation string, value any) error {
 		if localConfig {
 			if value, present := payload["plan"]; present {
 				text, ok := value.(string)
-				if _, err := xrayconfig.ParsePlan(text); !ok || err != nil {
-					return errors.New("invalid Xray inbound plan")
+				if _, err := xrayconfig.ParseConfiguration(text); !ok || err != nil {
+					return errors.New("invalid Xray configuration draft")
 				}
 			}
 			if payload["core"] != "xray" || (payload["architecture"] != "amd64" && payload["architecture"] != "arm64") {

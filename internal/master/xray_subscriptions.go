@@ -68,7 +68,7 @@ func (g subscriptionGrant) matches(token store.XraySubscription, now time.Time) 
 func (s *Server) xraySubscriptionGrant(ctx context.Context, node store.Node, now time.Time) (subscriptionGrant, error) {
 	i, _, err := panelInventory(node, now)
 	if err != nil || node.Disabled || !node.Enrolled || node.TokenHash == "" || i.Architecture != xrayconfig.Architecture ||
-		!i.Xray.Running || i.Xray.Catalog == nil || i.Xray.Applied == nil || !i.Xray.Catalog.Allows(*i.Xray.Applied) {
+		!i.Xray.Running || i.Xray.Catalog == nil || !i.Xray.Catalog.AllowsConfiguration(i.Xray.AppliedConfiguration()) {
 		return subscriptionGrant{}, errSubscriptionUnavailable
 	}
 	raw, err := s.taskRuntime.Store.XrayConfigForSubscription(ctx, node.ID)
@@ -81,7 +81,7 @@ func (s *Server) xraySubscriptionGrant(ctx context.Context, node store.Node, now
 	task, err := s.taskRuntime.XrayInstallPolicy.InstallKey().Verify(raw)
 	if err != nil || task.NodeID != node.ID || task.Operation != xrayconfig.Operation ||
 		task.Architecture != i.Architecture || task.Version != i.Xray.Version || task.SHA256 != i.Xray.SHA256 ||
-		task.Sequence != i.Xray.ConfigRevision || task.Config != i.Xray.Config || task.Plan != i.Xray.Applied.Encode() {
+		task.Sequence != i.Xray.ConfigRevision || task.Config != i.Xray.Config || task.Plan != i.Xray.AppliedConfiguration().Encode() {
 		return subscriptionGrant{}, errSubscriptionUnavailable
 	}
 	return subscriptionGrant{

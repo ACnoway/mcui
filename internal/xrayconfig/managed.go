@@ -102,20 +102,31 @@ func ParsePlan(encoded string) (Plan, error) {
 }
 
 type Catalog struct {
-	Ports            []int                  `json:"ports"`
-	Users            []string               `json:"users"`
-	HTTPPorts        []int                  `json:"http_ports,omitempty"`
-	PortProtocols    map[int]string         `json:"port_protocols,omitempty"`
-	ProtocolUsers    map[string][]string    `json:"protocol_users,omitempty"`
-	TrojanTrust      *TrojanTrust           `json:"trojan_trust,omitempty"`
-	RealityPublicKey string                 `json:"reality_public_key,omitempty"`
-	PublicEndpoints  map[int]PublicEndpoint `json:"public_endpoints,omitempty"`
+	Ports               []int                  `json:"ports"`
+	Users               []string               `json:"users"`
+	HTTPPorts           []int                  `json:"http_ports,omitempty"`
+	PortProtocols       map[int]string         `json:"port_protocols,omitempty"`
+	ProtocolUsers       map[string][]string    `json:"protocol_users,omitempty"`
+	TrojanTrust         *TrojanTrust           `json:"trojan_trust,omitempty"`
+	RealityPublicKey    string                 `json:"reality_public_key,omitempty"`
+	PublicEndpoints     map[int]PublicEndpoint `json:"public_endpoints,omitempty"`
+	RoutingDestinations []Destination          `json:"routing_destinations,omitempty"`
 }
 
 func (c Catalog) Valid() bool {
 	if len(c.Ports) == 0 || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) ||
 		(len(c.Users) > 0 && !validUsers(c.Users)) {
 		return false
+	}
+	if len(c.RoutingDestinations) > maxOutbounds {
+		return false
+	}
+	destinations := make(map[Destination]bool, len(c.RoutingDestinations))
+	for _, destination := range c.RoutingDestinations {
+		if !destination.valid() || destinations[destination] {
+			return false
+		}
+		destinations[destination] = true
 	}
 	last := 1023
 	for _, port := range c.Ports {
@@ -218,6 +229,7 @@ type LocalCatalog struct {
 	TrojanTLS            *TrojanTLS                   `json:"trojan_tls,omitempty"`
 	RealityPrivateKey    string                       `json:"reality_private_key,omitempty"`
 	PublicEndpoints      map[int]PublicEndpoint       `json:"public_endpoints,omitempty"`
+	RoutingDestinations  []Destination                `json:"routing_destinations,omitempty"`
 }
 
 func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
@@ -235,6 +247,7 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	view := Catalog{
 		Ports: slices.Clone(c.Ports), HTTPPorts: slices.Clone(c.HTTPPorts),
 		PortProtocols: maps.Clone(c.PortProtocols), PublicEndpoints: maps.Clone(c.PublicEndpoints),
+		RoutingDestinations: slices.Clone(c.RoutingDestinations),
 	}
 	slices.Sort(view.Ports)
 	slices.Sort(view.HTTPPorts)
@@ -316,12 +329,18 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 }
 
 func (c LocalCatalog) Render(releaseSHA256 string, plan Plan) ([]byte, Reference, error) {
+	return c.RenderConfiguration(releaseSHA256, Configuration{Inbounds: plan})
+}
+
+func (c LocalCatalog) RenderConfiguration(releaseSHA256 string, draft Configuration) ([]byte, Reference, error) {
 	view, err := c.Public(releaseSHA256)
-	if err != nil || !view.Allows(plan) {
-		return nil, Reference{}, errors.New("Xray inbound plan violates the node-local catalog")
+	if err != nil || !view.AllowsConfiguration(draft) {
+		return nil, Reference{}, errors.New("Xray configuration draft violates the node-local catalog")
 	}
+	plan := draft.Inbounds
 	inbounds := make([]any, 0, len(plan))
 	tags := make([]string, 0, len(plan))
+	inboundTags := make(map[int]string, len(plan))
 	port := view.Ports[0] // The signed reference requires a port even for a disabled configuration.
 	for _, entry := range plan {
 		protocol := entry.Protocol
@@ -345,9 +364,13 @@ func (c LocalCatalog) Render(releaseSHA256 string, plan Plan) ([]byte, Reference
 		}
 		inbounds = append(inbounds, inbound)
 		tags = append(tags, tag)
+		inboundTags[entry.Port] = tag
 	}
 	if len(plan) != 0 {
 		port = plan[0].Port
+	}
+	if draft.Network != nil {
+		return draft.Network.render(inbounds, inboundTags, port)
 	}
 	return render(inbounds, tags, port, c.DestinationIP, c.DestinationPort)
 }
@@ -370,6 +393,10 @@ func render(inbounds []any, tags []string, port int, destinationIP string, desti
 			}},
 		}
 	}
+	return encodeConfiguration(config, port)
+}
+
+func encodeConfiguration(config map[string]any, port int) ([]byte, Reference, error) {
 	data, err := json.Marshal(config)
 	if err != nil || len(data) > MaxSize {
 		return nil, Reference{}, errors.New("invalid or oversized Xray configuration")

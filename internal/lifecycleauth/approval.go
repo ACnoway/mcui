@@ -211,7 +211,7 @@ func (p Proposal) validOperation() bool {
 		return p.SchemaVersion == ChangeProposalVersion && noCurrent && p.ManifestVersion == 0
 	case xrayconfig.Operation:
 		if p.Plan != "" {
-			if _, err := xrayconfig.ParsePlan(p.Plan); err != nil {
+			if _, err := xrayconfig.ParseConfiguration(p.Plan); err != nil {
 				return false
 			}
 		}
