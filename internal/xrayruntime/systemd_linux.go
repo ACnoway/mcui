@@ -30,7 +30,46 @@ type publishedInbound struct {
 	endpoint xrayconfig.PublicEndpoint
 }
 
-func (systemdService) setPanelDestinations(ctx context.Context, destinations []string) error {
+type panelNetworkService interface {
+	panelAddresses() ([]string, error)
+	setPanelDestinations(context.Context, []string, bool) error
+	startPanelIngress(context.Context, []publishedInbound) error
+}
+
+func (systemdService) panelAddresses() ([]string, error) {
+	local, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	var addresses []string
+	for _, addr := range local {
+		ip, _, _ := strings.Cut(addr.String(), "/")
+		if (xrayconfig.PublicEndpoint{Address: ip, Port: 1}).Valid() {
+			addresses = append(addresses, ip)
+		}
+	}
+	slices.Sort(addresses)
+	addresses = slices.Compact(addresses)
+	return addresses[:min(16, len(addresses))], nil
+}
+
+func validatePanelAddresses(service panelNetworkService, published []publishedInbound) error {
+	if len(published) == 0 {
+		return nil
+	}
+	addresses, err := service.panelAddresses()
+	if err != nil {
+		return err
+	}
+	for _, inbound := range published {
+		if !slices.Contains(addresses, inbound.endpoint.Address) {
+			return errors.New("Xray public listener address is not bound to this node")
+		}
+	}
+	return nil
+}
+
+func (systemdService) setPanelDestinations(ctx context.Context, destinations []string, published bool) error {
 	local, err := net.InterfaceAddrs()
 	if err != nil {
 		return err
@@ -47,6 +86,9 @@ func (systemdService) setPanelDestinations(ctx context.Context, destinations []s
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	allow := append([]string{"127.0.0.1/32"}, destinations...)
+	if published {
+		allow = append(allow, xrayconfig.PublicListenAddress+"/32")
+	}
 	cmd := systemctlCommand(ctx, "set-property", "--runtime", serviceUnit, "IPAddressAllow=", "IPAddressAllow="+strings.Join(allow, " "))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("apply Xray service address policy: %w", err)
@@ -59,6 +101,46 @@ func (systemdService) setPanelDestinations(ctx context.Context, destinations []s
 		return errors.New("Xray panel service address policy differs")
 	}
 	return nil
+}
+
+func (systemdService) startPanelIngress(ctx context.Context, published []publishedInbound) error {
+	for _, inbound := range published {
+		if err := startPanelSocket(ctx, inbound); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func startPanelSocket(ctx context.Context, inbound publishedInbound) error {
+	name := fmt.Sprintf("mcui-xray-panel-publish-%d-%s-%d", inbound.port, inbound.endpoint.Address, inbound.endpoint.Port)
+	socket := name + ".socket"
+	if err := checkPublishUnits(ctx, inbound, name, true); err != nil {
+		ctx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "/usr/bin/systemd-run", "--quiet", "--no-ask-password", "--collect", "--unit="+name,
+			"--socket-property=ListenStream="+inbound.endpoint.String(), "--socket-property=Accept=no",
+			"--socket-property=BindsTo="+serviceUnit, "--socket-property=After="+serviceUnit,
+			"--socket-property=CollectMode=inactive-or-failed",
+			"--property=BindsTo="+socket, "--property=After="+socket+" "+serviceUnit,
+			"--property=DynamicUser=yes", "--property=NoNewPrivileges=yes", "--property=CapabilityBoundingSet=",
+			"--property=PrivateNetwork=yes", "--property=NetworkNamespacePath="+networkNamespace,
+			"--property=RestrictAddressFamilies=AF_INET", "--property=IPAddressDeny=any",
+			"--property=IPAddressAllow=127.0.0.1/32 "+xrayconfig.PublicListenAddress+"/32",
+			"--property=ProtectSystem=strict", "--property=ProtectHome=yes", "--property=PrivateTmp=yes",
+			"--property=PrivateDevices=yes", "--property=ProtectControlGroups=yes", "--property=ProtectKernelTunables=yes",
+			"--property=InaccessiblePaths=-/etc/mcui -/etc/mcui-agent -/etc/mcui-xray -/var/lib/mcui -/var/lib/mcui-agent -/var/lib/mcui-xray -/run/mcui",
+			"--", "/usr/lib/systemd/systemd-socket-proxyd", "--connections-max=128",
+			xrayconfig.PublicListenAddress+":"+strconv.Itoa(inbound.port))
+		cmd.Env = systemdCommandEnv
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("open Xray public TCP listener %s: %w", inbound.endpoint, err)
+		}
+	}
+	if err := checkPublishUnits(ctx, inbound, name, true); err != nil {
+		return err
+	}
+	return systemctl(ctx, 7*time.Second, "start", socket)
 }
 
 func (systemdService) checkConfigUnits(ctx context.Context, destinations []string, published []publishedInbound, checkSockets bool) error {
@@ -140,26 +222,31 @@ func deniesAllIP(values map[string]string) bool {
 }
 
 func checkPublishUnit(ctx context.Context, inbound publishedInbound) error {
+	return checkPublishUnits(ctx, inbound, "mcui-xray-publish@"+strconv.Itoa(inbound.port), false)
+}
+
+func checkPublishUnits(ctx context.Context, inbound publishedInbound, name string, managed bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	port := strconv.Itoa(inbound.port)
-	name := "mcui-xray-publish@" + port
 	socket, service := name+".socket", name+".service"
-	raw, err := systemctlCommand(ctx, "show", "--property=LoadState,NeedDaemonReload,Listen,Accept,Triggers,NetworkNamespacePath,PrivateNetwork", socket).Output()
+	raw, err := systemctlCommand(ctx, "show", "--property=LoadState,NeedDaemonReload,Listen,Accept,Triggers,NetworkNamespacePath,PrivateNetwork,Transient,BindsTo", socket).Output()
 	values := systemdProperties(raw)
 	if err != nil || values["LoadState"] != "loaded" || values["NeedDaemonReload"] != "no" || values["Accept"] != "no" ||
 		values["Listen"] != inbound.endpoint.String()+" (Stream)" || values["Triggers"] != service ||
-		values["PrivateNetwork"] == "yes" || values["NetworkNamespacePath"] != "" {
+		values["PrivateNetwork"] == "yes" || values["NetworkNamespacePath"] != "" ||
+		(managed && (values["Transient"] != "yes" || values["BindsTo"] != serviceUnit)) {
 		return fmt.Errorf("Xray public socket %s does not match the approved endpoint", socket)
 	}
-	raw, err = systemctlCommand(ctx, "show", "--property=LoadState,NeedDaemonReload,ExecStart,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow,BindsTo", service).Output()
+	raw, err = systemctlCommand(ctx, "show", "--property=LoadState,NeedDaemonReload,ExecStart,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow,BindsTo,Transient", service).Output()
 	values = systemdProperties(raw)
 	argv := "argv[]=/usr/lib/systemd/systemd-socket-proxyd --connections-max=128 " + xrayconfig.PublicListenAddress + ":" + port + " ;"
 	allow := strings.Fields(values["IPAddressAllow"])
 	if err != nil || values["LoadState"] != "loaded" || values["NeedDaemonReload"] != "no" || values["BindsTo"] != socket ||
 		values["PrivateNetwork"] != "yes" || values["NetworkNamespacePath"] != networkNamespace || values["DynamicUser"] != "yes" ||
 		values["NoNewPrivileges"] != "yes" || !strings.Contains(values["ExecStart"], argv) || !deniesAllIP(values) ||
-		len(allow) != 2 || !slices.Contains(allow, "127.0.0.1/32") || !slices.Contains(allow, xrayconfig.PublicListenAddress+"/32") {
+		len(allow) != 2 || !slices.Contains(allow, "127.0.0.1/32") || !slices.Contains(allow, xrayconfig.PublicListenAddress+"/32") ||
+		(managed && values["Transient"] != "yes") {
 		return fmt.Errorf("Xray public ingress service %s does not use the required isolated relay", service)
 	}
 	return nil
@@ -293,6 +380,8 @@ func systemctl(ctx context.Context, timeout time.Duration, action string, unit s
 
 func systemctlCommand(ctx context.Context, args ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, "/usr/bin/systemctl", append([]string{"--no-pager", "--no-ask-password"}, args...)...)
-	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}
+	command.Env = systemdCommandEnv
 	return command
 }
+
+var systemdCommandEnv = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "SYSTEMD_COLORS=0"}

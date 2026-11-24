@@ -224,6 +224,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	var fingerprint string
 	var draft string
 	var bindings []store.XrayBinding
+	var panelTrust *xrayconfig.TrojanTrust
 	if !s.withTaskHTTP(w, r, func(w http.ResponseWriter) {
 		ctx, ok := s.panelXrayAuth(w, r, nil)
 		if !ok {
@@ -234,13 +235,14 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "trusted task clock unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		var node store.Node
 		err = s.store.View(func(st store.State) error {
 			p := lifecycleauth.Proposal{NodeID: r.PathValue("node"), RequesterID: ctx.Admin.ID}
 			if !s.panelXrayScope(&st, p) {
 				return errXrayInstallScope
 			}
 			var err error
-			node := st.Nodes[p.NodeID]
+			node = st.Nodes[p.NodeID]
 			draft = node.XrayDraft
 			bindings = clientBindingsForNode(&st, p.NodeID)
 			inventory, fingerprint, err = panelInventory(node, now)
@@ -248,6 +250,12 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			writePanelXrayError(w, r, err)
+			return
+		}
+		if inventory.Xray.PanelTLS != nil {
+			if grant, err := s.xraySubscriptionGrant(r.Context(), node, now); err == nil {
+				panelTrust = grant.trojan
+			}
 		}
 	}) || fingerprint == "" {
 		return
@@ -281,6 +289,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		"managed_bindings": bindings,
 		"draft_previewed":  xrayDraftPreviewed(inventory.Xray, draft),
 		"panel_inbounds":   inventory.Xray.PanelKey != "" && inventory.Xray.Version == xrayconfig.Version,
+		"panel_trust":      panelTrust,
 		"usage": map[string]string{
 			"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,
 		},

@@ -691,7 +691,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			node.Running = false
 		}
 	}
-	t.Run("panel defined inbound signs the encrypted draft", func(t *testing.T) {
+	t.Run("panel Trojan binds the public socket and encrypted identity", func(t *testing.T) {
 		private, err := ecdh.X25519().GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -707,20 +707,38 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatal(err)
 		}
 		direct := lifecycleauth.XrayInventory{
-			Version: newer.Version, SHA256: newer.SHA256, Running: true, PlanSupported: true,
-			PanelKey: base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()),
+			PlanSupported: true,
+			PanelKey:      base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()), PanelTrojan: true,
+			PanelAddresses: []string{"93.184.216.36"},
 		}
 		heartbeat(&direct)
-		const credential = "00000000-0000-4000-8000-000000000001"
+		installDirect := panelXrayRequest{TaskID: "panel-inbound-reinstall-12345", Operation: "core.install",
+			Version: newer.Version, CatalogVersion: 2, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
+		expect(admin(http.MethodPost, installDirect, client.csrf), http.StatusCreated)
+		installed, err := runtime.Store.GetRecord(installDirect.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		installTask, err := policy.InstallKey().Verify(installed.Raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		complete(installDirect.TaskID, installTask.Sequence, newer)
+		direct.Version, direct.SHA256, direct.Running = newer.Version, newer.SHA256, true
+		heartbeat(&direct)
+		credential := strings.Repeat("A", 43)
 		change := panelInboundChange{
-			State: options(), Protocol: xrayconfig.VLESS, Username: "alice", Credential: credential,
+			State: options(), Protocol: xrayconfig.Trojan, Username: "alice", Credential: credential,
 			Destination: xrayconfig.Destination{Address: "93.184.216.34", Port: 443},
+			Public:      xrayconfig.PublicEndpoint{Address: "93.184.216.35", Port: 443},
 		}
 		write := func(csrf string) *httptest.ResponseRecorder {
 			return requestAsAdmin(t, s.Handler(), http.MethodPut, "https://panel.example.test"+path+"/inbounds/1080", change,
 				"test-session-token", csrf)
 		}
 		expect(write("incorrect-csrf"), http.StatusForbidden)
+		expect(write(client.csrf), http.StatusBadRequest)
+		change.Public.Address = direct.PanelAddresses[0]
 		expect(write(client.csrf), http.StatusOK)
 		expect(write(client.csrf), http.StatusConflict)
 		registered, err := s.store.NodeByID(t.Context(), client.nodeID)
@@ -728,8 +746,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatalf("credential persisted or node key not pinned: %v", err)
 		}
 		config, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || config.Panel == nil || config.Panel.TLS == nil || !config.Panel.TLS.Trust.Valid() || config.Inbounds[0].PublicEndpoint != change.Public {
+			t.Fatalf("public endpoint or TLS identity missing from draft: %v", err)
 		}
 		applyDirect := panelXrayRequest{TaskID: "panel-inbound-fixture-12345", Operation: xrayconfig.Operation, Confirm: xrayconfig.Operation,
 			Version: newer.Version, CatalogVersion: 2, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
@@ -750,9 +768,46 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || issued.Plan != registered.XrayDraft || issued.Config != direct.Candidate {
 			t.Fatalf("signed task does not bind the preview and sealed draft: %v", err)
 		}
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1", issued.Sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1&xray_public=v1&xray_trojan_tls=v1&xray_panel_inbounds=v1", issued.Sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
-		expect(client.request(http.MethodGet, next+"&xray_panel_inbounds=v1", nil, true), http.StatusOK)
+		expect(client.request(http.MethodGet, next+"&xray_panel_trojan=v1", nil, true), http.StatusOK)
+		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: newer.Version, SHA256: newer.SHA256})
+		if err != nil {
+			t.Fatal(err)
+		}
+		expect(client.request(http.MethodPost, "/api/v1/agent/tasks/ack", taskAckRequest{TaskID: applyDirect.TaskID, Sequence: issued.Sequence,
+			StatusVersion: 1, Status: "SUCCEEDED", Result: result}, true), http.StatusNoContent)
+		direct.Applied, direct.AppliedNetwork, direct.Config, direct.ConfigRevision = &config.Inbounds, config.Network, direct.Candidate, issued.Sequence
+		direct.PanelTLS = &config.Panel.TLS.Trust
+		heartbeat(&direct)
+		reportedTrust := func() *xrayconfig.TrojanTrust {
+			r := admin(http.MethodGet, nil, "")
+			expect(r, http.StatusOK)
+			var response struct {
+				Trust *xrayconfig.TrojanTrust `json:"panel_trust"`
+			}
+			if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			return response.Trust
+		}
+		if trust := reportedTrust(); trust == nil || *trust != config.Panel.TLS.Trust {
+			t.Fatal("panel withheld the signed, applied TLS certificate")
+		}
+		subscriptionURL := "https://panel.example.test" + path + "/subscriptions"
+		response := requestAsAdmin(t, s.Handler(), http.MethodGet, subscriptionURL, nil, "test-session-token", "")
+		expect(response, http.StatusOK)
+		if !strings.Contains(response.Body.String(), `"username":"alice","eligible":true`) {
+			t.Fatal("panel-managed inbound was unavailable for single-node subscription")
+		}
+		alternative := testTrojanTrust(t)
+		applied := append(xrayconfig.Plan{}, *direct.Applied...)
+		applied[0].TLSCertSHA256 = alternative.SHA256
+		direct.PanelTLS, direct.Applied = alternative, &applied
+		heartbeat(&direct)
+		if reportedTrust() != nil {
+			t.Fatal("accepted certificate supplied by inventory in place of signed trust")
+		}
 	})
 	if err := s.ReconcileTaskRuntime(); err != nil {
 		t.Fatal(err)

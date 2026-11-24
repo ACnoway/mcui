@@ -44,10 +44,12 @@ type PanelXrayOptions = {
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
     catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
+    panel_trojan?: boolean; panel_addresses?: string[]
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
   panel_inbounds?: boolean
+  panel_trust?: { certificate: string; sha256: string } | null
   draft_network?: Network | null
   managed_bindings?: { port: number; credential: string }[] | null
   usage?: { user_statistics: string; exact_quota: string; reason: string }
@@ -1374,7 +1376,10 @@ onMounted(async () => {
           <p v-if="panelXrayError" class="notice" role="alert">{{ panelXrayError }}</p>
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
           <XrayPanelInbounds v-if="panelXray.panel_inbounds" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
-            :network="panelXray.draft_network ?? null" :busy="draftDisabled" :save="savePanelInbound" />
+            :network="panelXray.draft_network ?? null" :busy="draftDisabled" :save="savePanelInbound"
+            :trojan="!!panelXray.current.panel_trojan" :addresses="panelXray.current.panel_addresses ?? []"
+            :trust="panelXray.panel_trust ?? undefined" :applied="panelXray.current.applied ?? []"
+            :revision="panelXray.current.config_revision ?? 0" />
           <template v-else-if="draftTab === 'inbound'">
             <div v-if="panelXray?.current.catalog && draftPorts.length" class="table-wrap">
               <table class="data-table inbound-table" aria-label="入站授权草稿">

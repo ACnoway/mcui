@@ -1,6 +1,8 @@
 package lifecycleauth
 
 import (
+	"slices"
+
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
@@ -14,18 +16,21 @@ type NodeInventory struct {
 }
 
 type XrayInventory struct {
-	Version        string               `json:"version"`
-	SHA256         string               `json:"sha256"`
-	Running        bool                 `json:"running"`
-	Candidate      xrayconfig.Reference `json:"candidate,omitzero"`
-	Config         xrayconfig.Reference `json:"config,omitzero"`
-	ConfigRevision int64                `json:"config_revision,omitempty"`
-	Catalog        *xrayconfig.Catalog  `json:"catalog,omitempty"`
-	Preview        string               `json:"preview,omitempty"`
-	Applied        *xrayconfig.Plan     `json:"applied,omitempty"`
-	AppliedNetwork *xrayconfig.Network  `json:"applied_network,omitempty"`
-	PlanSupported  bool                 `json:"plan_supported,omitempty"`
-	PanelKey       string               `json:"panel_key,omitempty"`
+	Version        string                  `json:"version"`
+	SHA256         string                  `json:"sha256"`
+	Running        bool                    `json:"running"`
+	Candidate      xrayconfig.Reference    `json:"candidate,omitzero"`
+	Config         xrayconfig.Reference    `json:"config,omitzero"`
+	ConfigRevision int64                   `json:"config_revision,omitempty"`
+	Catalog        *xrayconfig.Catalog     `json:"catalog,omitempty"`
+	Preview        string                  `json:"preview,omitempty"`
+	Applied        *xrayconfig.Plan        `json:"applied,omitempty"`
+	AppliedNetwork *xrayconfig.Network     `json:"applied_network,omitempty"`
+	PlanSupported  bool                    `json:"plan_supported,omitempty"`
+	PanelKey       string                  `json:"panel_key,omitempty"`
+	PanelTrojan    bool                    `json:"panel_trojan,omitempty"`
+	PanelAddresses []string                `json:"panel_addresses,omitempty"`
+	PanelTLS       *xrayconfig.TrojanTrust `json:"panel_tls,omitempty"`
 }
 
 func (i NodeInventory) Valid() bool {
@@ -43,6 +48,32 @@ func (x XrayInventory) Valid() bool {
 	if x.PanelKey != "" && (!x.PlanSupported || x.Catalog != nil || !security.ValidNodeSecret(x.PanelKey) ||
 		(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview))) {
 		return false
+	}
+	if x.PanelTrojan && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
+		len(x.PanelAddresses) > 16 || !slices.IsSorted(x.PanelAddresses) {
+		return false
+	}
+	for i, address := range x.PanelAddresses {
+		if !(xrayconfig.PublicEndpoint{Address: address, Port: 1}).Valid() || (i > 0 && x.PanelAddresses[i-1] == address) {
+			return false
+		}
+	}
+	if x.PanelTLS != nil && (!x.PanelTLS.Valid() || x.Applied == nil) {
+		return false
+	}
+	if x.PanelKey != "" && x.Applied != nil {
+		usesTLS := false
+		for _, in := range *x.Applied {
+			if in.Protocol == xrayconfig.Trojan {
+				usesTLS = true
+				if x.PanelTLS == nil || in.TLSCertSHA256 != x.PanelTLS.SHA256 {
+					return false
+				}
+			}
+		}
+		if usesTLS != (x.PanelTLS != nil) {
+			return false
+		}
 	}
 	if !x.PlanSupported && (x.Catalog != nil || x.Preview != "" || x.Applied != nil) {
 		return false

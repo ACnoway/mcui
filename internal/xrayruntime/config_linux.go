@@ -39,6 +39,10 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 	key, keyErr := r.panelKey()
 	if keyErr == nil && managed && runtime.GOARCH == xrayconfig.Architecture {
 		view.PanelKey = base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
+		if network, ok := r.service.(panelNetworkService); ok {
+			view.PanelTrojan = true
+			view.PanelAddresses, _ = network.panelAddresses()
+		}
 		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil && plan.Panel != nil && checkPolicyDirectory(inboundPolicyPath, current.Release) == nil {
 			_, view.Candidate, _ = plan.RenderPanel(key)
 			view.Preview = xrayconfig.PlanDigest(encoded)
@@ -89,6 +93,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 		if json.Unmarshal(data, &config) == nil {
 			plan := make(xrayconfig.Plan, 0, len(config.Inbounds))
 			ports := make(map[string]int, len(config.Inbounds))
+			var panelTLS *xrayconfig.TrojanTrust
 			for _, in := range config.Inbounds {
 				ports[in.Tag] = in.Port
 				entry := xrayconfig.Inbound{Port: in.Port, Protocol: in.Protocol}
@@ -110,11 +115,15 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 					if in.StreamSettings.Security != "tls" || len(certs) != 1 {
 						return view
 					}
-					digest, err := xrayconfig.TrojanCertificateDigest(strings.Join(certs[0].Certificate, "\n"))
+					certificate := strings.Join(certs[0].Certificate, "\n")
+					digest, err := xrayconfig.TrojanCertificateDigest(certificate)
 					if err != nil {
 						return view
 					}
 					entry.TLSCertSHA256 = digest
+					if view.PanelTrojan {
+						panelTLS = &xrayconfig.TrojanTrust{Certificate: certificate, SHA256: digest}
+					}
 				}
 				if in.Listen == xrayconfig.PublicListenAddress {
 					endpoint, ok := xrayconfig.PublishedEndpoint(in.Tag)
@@ -136,6 +145,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 			if err == nil && (xrayconfig.Configuration{Inbounds: plan, Network: network}).Valid() {
 				view.Applied = &plan
 				view.AppliedNetwork = network
+				view.PanelTLS = panelTLS
 			}
 		}
 	}
@@ -206,7 +216,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	if err := r.verifyBundle(release); err != nil {
 		return err
 	}
-	if err := r.checkConfigUnits(ctx, data, true, panel, false); err != nil {
+	if err := r.checkConfigUnits(ctx, data, panel); err != nil {
 		return err
 	}
 	if err := authorize(ctx); err != nil {
@@ -230,13 +240,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	return r.change(ctx, state, intent{Action: Configure, Next: next, ConfigHash: hash})
 }
 
-func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSockets, panel, activate bool) error {
-	svc, ok := r.service.(interface {
-		checkConfigUnits(context.Context, []string, []publishedInbound, bool) error
-	})
-	if !ok {
-		return errors.New("Xray service does not support isolated configuration")
-	}
+func configurationNetwork(data []byte) ([]string, []publishedInbound, error) {
 	var config struct {
 		Inbounds []struct {
 			Listen   string `json:"listen"`
@@ -255,19 +259,19 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSocket
 		} `json:"routing"`
 	}
 	if json.Unmarshal(data, &config) != nil {
-		return errors.New("invalid saved Xray configuration")
+		return nil, nil, errors.New("invalid saved Xray configuration")
 	}
 	if config.Inbounds == nil || (len(config.Inbounds) == 0 && len(config.Routing.Rules) != 0) {
-		return errors.New("invalid saved Xray route")
+		return nil, nil, errors.New("invalid saved Xray route")
 	}
 	var destinations []string
 	for _, rule := range config.Routing.Rules {
 		if len(rule.IP) != 1 || rule.Network != "tcp" {
-			return errors.New("invalid saved Xray route")
+			return nil, nil, errors.New("invalid saved Xray route")
 		}
 		prefix, err := netip.ParsePrefix(rule.IP[0])
 		if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
-			return errors.New("invalid saved Xray route destination")
+			return nil, nil, errors.New("invalid saved Xray route destination")
 		}
 		if !slices.Contains(destinations, rule.IP[0]) {
 			destinations = append(destinations, rule.IP[0])
@@ -282,66 +286,93 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSocket
 		encrypted := (inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
 			(inbound.Protocol == xrayconfig.VLESS && inbound.Stream.Security == "reality")
 		if inbound.Listen != xrayconfig.PublicListenAddress || !ok || !encrypted || inbound.Port < 1024 || inbound.Port > 65535 {
-			return errors.New("invalid saved Xray public listener")
+			return nil, nil, errors.New("invalid saved Xray public listener")
 		}
 		published = append(published, publishedInbound{port: inbound.Port, endpoint: endpoint})
 	}
+	return destinations, published, nil
+}
+
+func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool) error {
+	destinations, published, err := configurationNetwork(data)
+	if err != nil {
+		return err
+	}
 	if panel {
-		if len(published) != 0 {
-			return errors.New("panel Xray configuration cannot publish host sockets")
-		}
-		if !activate {
-			return svc.checkConfigUnits(ctx, nil, nil, false)
-		}
-		controller, ok := r.service.(interface {
-			setPanelDestinations(context.Context, []string) error
-		})
+		service, ok := r.service.(panelNetworkService)
 		if !ok {
 			return errors.New("Xray service cannot apply panel network policy")
 		}
-		if err := controller.setPanelDestinations(ctx, destinations); err != nil {
+		if err := validatePanelAddresses(service, published); err != nil {
 			return err
 		}
+		// Check the sandbox without altering the running revision's policy.
+		return r.checkServiceUnits(ctx, nil, nil, false)
 	}
-	return svc.checkConfigUnits(ctx, destinations, published, checkSockets)
+	return r.checkServiceUnits(ctx, destinations, published, true)
 }
 
-func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) error {
+func (r *Runtime) checkServiceUnits(ctx context.Context, destinations []string, published []publishedInbound, sockets bool) error {
+	service, ok := r.service.(interface {
+		checkConfigUnits(context.Context, []string, []publishedInbound, bool) error
+	})
+	if !ok {
+		return errors.New("Xray service does not support isolated configuration")
+	}
+	return service.checkConfigUnits(ctx, destinations, published, sockets)
+}
+
+func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]publishedInbound, error) {
 	if next.Release == (Release{}) {
-		return r.removeControl("runtime-config.json")
+		return nil, r.removeControl("runtime-config.json")
 	}
 	data := []byte(bootstrapConfig)
+	var destinations []string
+	var published []publishedInbound
 	if next.Revision != 0 {
-		raw, err := r.savedConfig(next.Config)
+		var err error
+		data, err = r.savedConfig(next.Config)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if next.Running {
-			_, keyErr := r.panelKey()
-			if keyErr != nil && !errors.Is(keyErr, os.ErrNotExist) {
-				return keyErr
+			destinations, published, err = configurationNetwork(data)
+			if err != nil {
+				return nil, err
 			}
-			if err := r.checkConfigUnits(ctx, raw, false, keyErr == nil, true); err != nil {
-				return err
-			}
-		}
-		data = raw
-	} else if next.Running {
-		if _, err := r.panelKey(); err == nil {
-			controller, ok := r.service.(interface {
-				setPanelDestinations(context.Context, []string) error
-			})
-			if !ok {
-				return errors.New("Xray service cannot apply panel network policy")
-			}
-			if err := controller.setPanelDestinations(ctx, nil); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
 		}
 	}
-	return r.writeControl("runtime-config.json", data)
+	panel := false
+	if next.Running {
+		_, err := r.panelKey()
+		if err == nil {
+			panel = true
+			controller, ok := r.service.(panelNetworkService)
+			if !ok {
+				return nil, errors.New("Xray service cannot apply panel network policy")
+			}
+			if err := validatePanelAddresses(controller, published); err != nil {
+				return nil, err
+			}
+			if err := controller.setPanelDestinations(ctx, destinations, len(published) > 0); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		if next.Revision != 0 {
+			if err := r.checkServiceUnits(ctx, destinations, published, false); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := r.writeControl("runtime-config.json", data); err != nil {
+		return nil, err
+	}
+	if panel {
+		return published, nil
+	}
+	return nil, nil
 }
 
 func (r *Runtime) savedConfig(ref xrayconfig.Reference) ([]byte, error) {

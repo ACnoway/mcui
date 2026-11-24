@@ -468,15 +468,23 @@ func (r *Runtime) reconcile(ctx context.Context, next selection) error {
 		}
 	}
 	if next.Running {
-		if err := r.prepareRuntimeConfig(ctx, next); err != nil {
+		published, err := r.prepareRuntimeConfig(ctx, next)
+		if err != nil {
 			return err
 		}
-		return r.service.start(ctx)
+		if err := r.service.start(ctx); err != nil {
+			return err
+		}
+		if len(published) != 0 {
+			return r.service.(panelNetworkService).startPanelIngress(ctx, published)
+		}
+		return nil
 	}
 	if err := r.service.stop(ctx); err != nil {
 		return err
 	}
-	return r.prepareRuntimeConfig(ctx, next)
+	_, err = r.prepareRuntimeConfig(ctx, next)
+	return err
 }
 
 func (r *Runtime) runPreflight(ctx context.Context, release Release) error {

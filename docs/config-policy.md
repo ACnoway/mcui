@@ -33,6 +33,8 @@ Xray `config.apply` 绑定节点、精确版本与制品 SHA-256、清单版本�
 
 受控公网 TCP 入口仅允许 Trojan/TLS 和 VLESS/REALITY。节点 root 批准单一宿主地址与 TCP 端口，并配置 systemd 套接字和固定中继。应用时 Helper 核对签名映射及已加载单元。中继只能连接隔离命名空间的 `127.0.0.2`，常规本地入站使用 `127.0.0.1`。回滚沿用已提交的 Xray 配置，外部套接字由节点 root 管理。[公网接入](./phase-4-xray-inbound.md#受控公网-tcp-接入)
 
+主控定义模式的公网 Trojan 通过签名草稿绑定证书与精确宿主地址。Helper 在预检和启动时核对地址属于节点，启动隔离 Xray 后由 systemd 创建临时监听和固定转发服务。监听绑定 Xray 服务并随它停止。配置应用失败时，上一版修订重建地址许可和监听。中继仍固定连接 `127.0.0.2`，使用动态低权限账号和受限地址，客户端须验证从已应用签名草稿取得的证书。 [主控公网接入](./phase-4-xray-inbound.md#从主控开通-trojantls-公网入口)
+
 ## 3. Helper 操作清单
 
 Helper 仅限受控 UDS、Socket 权限及 `SO_PEERCRED`，并独立验证任务签名、节点、时间、序号及 root 私有防重放账本；凭据检查不能替代签名。未知操作或多余字段直接拒绝，所有固定目录、unit、权限、命令参数均由 Helper 内部映射，不接受调用者提供路径、URL、unit、shell 或 argv。
