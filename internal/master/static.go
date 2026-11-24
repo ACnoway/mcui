@@ -9,7 +9,7 @@ import (
 func (s *Server) staticHandler(webDir string) http.Handler {
 	fs := http.FileServer(http.Dir(webDir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/subscription" {
+		if r.URL.Path == "/subscription" || r.URL.Path == "/subscription/client" {
 			r = r.Clone(r.Context())
 			r.URL.Path, r.URL.RawPath = "/", ""
 		}

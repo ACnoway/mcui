@@ -52,6 +52,7 @@ func testTrojanTrust(t *testing.T) *xrayconfig.TrojanTrust {
 
 func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*testing.T, taskTestClient)) {
 	client := newTaskTestClient(t)
+	const secondNodeID = "second-fixture-node"
 	s := client.server
 	s.EnableSingleAdmin()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -76,7 +77,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	policyRaw, err := json.Marshal(map[string]any{
 		"schema_version": 1, "signing_key_id": "xray-key",
 		"signing_public_key": base64.StdEncoding.EncodeToString(pub),
-		"panel":              map[string]any{"node_ids": []string{client.nodeID}},
+		"panel":              map[string]any{"node_ids": []string{client.nodeID, secondNodeID}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,16 +220,20 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	if _, err := s.verifyStoredXrayTask(record.Raw, true); err != nil {
 		t.Fatal(err)
 	}
-	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
+	completeNode := func(agent taskTestClient, id string, sequence int64, release artifacttrust.Artifact) {
 		t.Helper()
 		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1&xray_routing=v1", sequence)
-		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
+		expect(agent.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
 			t.Fatal(err)
 		}
-		expect(client.request(http.MethodPost, "/api/v1/agent/tasks/ack", taskAckRequest{TaskID: id, Sequence: sequence, StatusVersion: 1,
+		expect(agent.request(http.MethodPost, "/api/v1/agent/tasks/ack", taskAckRequest{TaskID: id, Sequence: sequence, StatusVersion: 1,
 			Status: "SUCCEEDED", Result: result}, true), http.StatusNoContent)
+	}
+	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
+		t.Helper()
+		completeNode(client, id, sequence, release)
 	}
 	complete(in.TaskID, 1, newer)
 	heartbeat(&lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256, Running: true})
@@ -543,6 +548,134 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		expect(fetch(publicURL, invalid, "192.0.2.200:1234"), http.StatusTooManyRequests)
 	}
+	t.Run("client bindings and links across nodes", func(t *testing.T) {
+		expect := func(r *httptest.ResponseRecorder, status int) {
+			t.Helper()
+			if r.Code != status {
+				t.Fatalf("HTTP %d, want %d: %s", r.Code, status, r.Body)
+			}
+		}
+		second := client
+		second.nodeID = secondNodeID
+		second.token, err = randomToken(32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.runWithTaskState(t.Context(), func() error {
+			return client.store.Update(func(st *store.State) error {
+				st.Nodes[secondNodeID] = store.Node{ID: secondNodeID, Name: "second node", Enrolled: true, TokenHash: hash(second.token)}
+				return nil
+			})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		secondInventory := lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256, Running: true, PlanSupported: true,
+			Catalog: &xrayconfig.Catalog{Ports: []int{1080}, Users: []string{"native"}}}
+		secondHeartbeat := func() {
+			t.Helper()
+			expect(second.request(http.MethodPost, "/api/v1/agent/heartbeat",
+				map[string]any{"node_id": secondNodeID, "inventory": lifecycleauth.NodeInventory{Architecture: "amd64", Xray: &secondInventory}}, true), http.StatusOK)
+		}
+		secondHeartbeat()
+		const clientsURL = "https://panel.example.test/api/v1/admin/xray/clients"
+		central := func(method, suffix string, body any) *httptest.ResponseRecorder {
+			return subscriptionAdmin(method, clientsURL+suffix, client.csrf, body)
+		}
+		create := map[string]string{"username": "customer"}
+		expect(subscriptionAdmin(http.MethodPost, clientsURL, "", create), http.StatusForbidden)
+		expect(central(http.MethodPost, "", create), http.StatusCreated)
+		expect(central(http.MethodPost, "", create), http.StatusConflict)
+		first := store.XrayBinding{NodeID: client.nodeID, Port: 1080, Credential: "bob"}
+		other := store.XrayBinding{NodeID: secondNodeID, Port: 1080, Credential: "native"}
+		bind := func(revision int, bindings ...store.XrayBinding) *httptest.ResponseRecorder {
+			return central(http.MethodPut, "/customer/bindings", map[string]any{"revision": revision, "bindings": bindings})
+		}
+		unapproved := other
+		unapproved.Credential = "not-registered"
+		expect(bind(1, first, unapproved), http.StatusConflict)
+		expect(bind(1, first, other), http.StatusOK)
+		expect(bind(1, first, other), http.StatusOK) // A retried save keeps the prior revision and shares.
+		expect(bind(1, other), http.StatusConflict)
+		expect(central(http.MethodPost, "", map[string]string{"username": "another"}), http.StatusCreated)
+		expect(central(http.MethodPut, "/another/bindings", map[string]any{"revision": 1, "bindings": []store.XrayBinding{other}}), http.StatusConflict)
+		expect(subscriptionAdmin(http.MethodPut, "https://panel.example.test"+path+"/draft", client.csrf,
+			map[string]any{"state": options(), "plan": xrayconfig.Plan{}}), http.StatusConflict)
+		issue := func(body map[string]any) clientShareResult {
+			t.Helper()
+			r := central(http.MethodPost, "/customer/share", body)
+			expect(r, http.StatusOK)
+			var issued clientShareResult
+			if err := json.Unmarshal(r.Body.Bytes(), &issued); err != nil {
+				t.Fatal(err)
+			}
+			return issued
+		}
+		issued := issue(map[string]any{"action": "issue"})
+		if issued.Subscription == nil || len(issued.Inbounds) != 1 || issued.Inbounds[0].XrayBinding != first {
+			t.Fatal("pending binding received a share")
+		}
+		const aggregateURL = "https://panel.example.test/api/v1/client-subscription"
+		getEntries := func(token string) []clientSubscriptionEntry {
+			t.Helper()
+			r := fetch(aggregateURL, token, "")
+			expect(r, http.StatusOK)
+			var payload struct {
+				Username string                    `json:"username"`
+				Entries  []clientSubscriptionEntry `json:"entries"`
+			}
+			if err := json.Unmarshal(r.Body.Bytes(), &payload); err != nil || payload.Username != "customer" {
+				t.Fatalf("invalid client subscription: %v", err)
+			}
+			return payload.Entries
+		}
+		aggregate := issued.Subscription.Token
+		firstLink := issued.Inbounds[0].Token
+		if entries := getEntries(aggregate); len(entries) != 1 || entries[0].NodeID != client.nodeID || entries[0].Config["username"] != "bob" {
+			t.Fatal("aggregate did not filter pending bindings or retain the local credential name")
+		}
+		secondPlan := xrayconfig.Plan{{Port: 1080, Users: []string{"native"}}}
+		secondInventory.Candidate = xrayconfig.Reference{Port: 1080, SHA256: strings.Repeat("a", 64), Size: 500}
+		secondInventory.Preview = xrayconfig.PlanDigest(secondPlan.Encode())
+		secondHeartbeat()
+		secondURL := strings.Replace("https://panel.example.test"+path, client.nodeID, secondNodeID, 1)
+		secondOptions := subscriptionAdmin(http.MethodGet, secondURL, "", nil)
+		expect(secondOptions, http.StatusOK)
+		var secondState struct{ State string }
+		if err := json.Unmarshal(secondOptions.Body.Bytes(), &secondState); err != nil {
+			t.Fatal(err)
+		}
+		newTask := apply
+		newTask.TaskID, newTask.State = "second-node-config-0123456789", secondState.State
+		newTask.MFACode = fmtCode(totpAt(totpKey, time.Now().Unix()/30))
+		expect(subscriptionAdmin(http.MethodPost, secondURL, client.csrf, newTask), http.StatusCreated)
+		completeNode(second, newTask.TaskID, 1, newer)
+		secondInventory.Applied, secondInventory.Config, secondInventory.ConfigRevision = &secondPlan, secondInventory.Candidate, 1
+		secondHeartbeat()
+		if entries := getEntries(aggregate); len(entries) != 2 || entries[0].NodeID == entries[1].NodeID {
+			t.Fatal("existing aggregate did not pick up the second node with the same port")
+		}
+		if entries := getEntries(firstLink); len(entries) != 1 || entries[0].NodeID != client.nodeID {
+			t.Fatal("single-inbound link escaped its node")
+		}
+		secondLink := issue(map[string]any{"action": "issue", "node_id": secondNodeID, "port": 1080})
+		if secondLink.Subscription != nil || len(secondLink.Inbounds) != 1 || secondLink.Inbounds[0].XrayBinding != other {
+			t.Fatal("issuing one inbound affected the aggregate token")
+		}
+		expect(bind(2, other), http.StatusOK)
+		expect(fetch(aggregateURL, firstLink, ""), http.StatusNotFound)
+		if entries := getEntries(aggregate); len(entries) != 1 || entries[0].NodeID != secondNodeID {
+			t.Fatal("removed binding remained in the aggregate before node apply")
+		}
+		listed := central(http.MethodGet, "", nil)
+		expect(listed, http.StatusOK)
+		if strings.Contains(listed.Body.String(), aggregate) || !strings.Contains(listed.Body.String(), `"applied":true`) {
+			t.Fatal("admin list did not report applied status safely")
+		}
+		expect(central(http.MethodPost, "/customer/share", map[string]any{"action": "revoke"}), http.StatusOK)
+		expect(fetch(aggregateURL, aggregate, ""), http.StatusNotFound)
+		expect(fetch(aggregateURL, secondLink.Inbounds[0].Token, ""), http.StatusNotFound)
+	})
+
 	for i, operation := range []string{"core.start", "core.stop", "core.uninstall"} {
 		heartbeat(&node)
 		id := fmt.Sprintf("control-fixture-%010d", i)

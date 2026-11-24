@@ -1,5 +1,5 @@
 <script lang="ts">
-export type AdminPage = 'overview' | 'nodes' | 'config' | 'subscriptions' | 'audit' | 'versions' | 'tasks' | 'admins'
+export type AdminPage = 'overview' | 'nodes' | 'config' | 'clients' | 'subscriptions' | 'audit' | 'versions' | 'tasks' | 'admins'
 </script>
 
 <script setup lang="ts">
@@ -10,7 +10,7 @@ const emit = defineEmits<{ navigate: [page: AdminPage]; logout: [] }>()
 const mainItems = [
   { page: 'nodes', label: '节点列表', icon: '▤' },
   { page: 'config', label: '代理配置', icon: '⇄' },
-  { page: 'subscriptions', label: '客户端订阅', icon: '↗' },
+  { page: 'clients', label: '客户端', icon: '↗' },
 ] as const
 const settingsItems = [
   { page: 'audit', label: '审计日志', icon: '◷' },
@@ -70,7 +70,7 @@ function navigate(page: AdminPage) {
       </button>
       <p class="nav-label">节点管理</p>
       <button v-for="item in mainItems" :key="item.page" type="button"
-        :aria-current="page === item.page ? 'page' : undefined" @click="navigate(item.page)">
+        :aria-current="page === item.page || (page === 'subscriptions' && item.page === 'clients') ? 'page' : undefined" @click="navigate(item.page)">
         <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span>{{ item.label }}
       </button>
       <div class="settings-nav">

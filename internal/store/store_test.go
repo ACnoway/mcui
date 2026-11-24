@@ -153,7 +153,7 @@ func TestVersionThreeMigrationPreservesCheckpointState(t *testing.T) {
 		return raw
 	}
 	before := stateJSON(s)
-	if _, err := s.db.Exec(`DROP INDEX nodes_active_token_idx; DROP TABLE runtime_updates; UPDATE schema_migrations SET version = 3`); err != nil {
+	if _, err := s.db.Exec(`DROP TABLE xray_clients; DROP INDEX nodes_active_token_idx; DROP TABLE runtime_updates; UPDATE schema_migrations SET version = 3`); err != nil {
 		t.Fatal(err)
 	}
 	if version, err := VerifyDatabase(path); err != nil || version != 3 {
@@ -164,8 +164,8 @@ func TestVersionThreeMigrationPreservesCheckpointState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if after := stateJSON(upgraded); !bytes.Equal(before, after) || bytes.Contains(after, []byte(`"runtime_updates"`)) {
-		t.Fatalf("empty remote queue changed checkpoint payload: %s", after)
+	if after := stateJSON(upgraded); !bytes.Equal(before, after) || bytes.Contains(after, []byte(`"runtime_updates"`)) || bytes.Contains(after, []byte(`"xray_clients"`)) {
+		t.Fatalf("empty new tables changed checkpoint payload: %s", after)
 	}
 }
 

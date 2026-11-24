@@ -177,17 +177,13 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 			if fingerprint != in.State {
 				return errXrayInventory
 			}
-			for _, record := range st.XrayInstalls {
-				if !record.Panel || record.Dispatched {
-					continue
+			for _, binding := range clientBindingsForNode(st, p.NodeID) {
+				if !hasClientBinding(plan.Inbounds, binding) {
+					return errManagedClientBinding
 				}
-				prior, err := lifecycleauth.ParseProposal(record.Proposal)
-				if err != nil {
-					return err
-				}
-				if prior.NodeID == p.NodeID && prior.Operation == xrayconfig.Operation && prior.ExpiresAt > now.Unix() {
-					return errXrayInstallReserved
-				}
+			}
+			if err := checkXrayDraftReservation(st, p.NodeID, now); err != nil {
+				return err
 			}
 			node.XrayDraft = draft
 			st.Nodes[p.NodeID] = node
@@ -203,10 +199,27 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func checkXrayDraftReservation(st *store.State, nodeID string, now time.Time) error {
+	for _, record := range st.XrayInstalls {
+		if !record.Panel || record.Dispatched {
+			continue
+		}
+		prior, err := lifecycleauth.ParseProposal(record.Proposal)
+		if err != nil {
+			return err
+		}
+		if prior.NodeID == nodeID && prior.Operation == xrayconfig.Operation && prior.ExpiresAt > now.Unix() {
+			return errXrayInstallReserved
+		}
+	}
+	return nil
+}
+
 func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	var inventory lifecycleauth.NodeInventory
 	var fingerprint string
 	var draft string
+	var bindings []store.XrayBinding
 	if !s.withTaskHTTP(w, r, func(w http.ResponseWriter) {
 		ctx, ok := s.panelXrayAuth(w, r, nil)
 		if !ok {
@@ -225,6 +238,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 			var err error
 			node := st.Nodes[p.NodeID]
 			draft = node.XrayDraft
+			bindings = clientBindingsForNode(&st, p.NodeID)
 			inventory, fingerprint, err = panelInventory(node, now)
 			return err
 		})
@@ -257,10 +271,11 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
 		"versions": versions, "catalog_version": manifest.ManifestVersion,
-		"config_ready":    configReady,
-		"draft":           plan.Inbounds,
-		"draft_network":   plan.Network,
-		"draft_previewed": xrayDraftPreviewed(inventory.Xray, draft),
+		"config_ready":     configReady,
+		"draft":            plan.Inbounds,
+		"draft_network":    plan.Network,
+		"managed_bindings": bindings,
+		"draft_previewed":  xrayDraftPreviewed(inventory.Xray, draft),
 		"usage": map[string]string{
 			"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,
 		},
@@ -544,8 +559,8 @@ func (s *Server) markPanelXrayDispatched(p lifecycleauth.Proposal, now time.Time
 }
 
 func writePanelXrayError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, errXrayInventory) {
-		http.Error(w, errXrayInventory.Error(), http.StatusConflict)
+	if errors.Is(err, errXrayInventory) || errors.Is(err, errManagedClientBinding) {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	writeXrayInstallError(w, r, err)

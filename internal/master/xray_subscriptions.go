@@ -36,9 +36,13 @@ type subscriptionPorts struct {
 }
 
 func (g subscriptionGrant) ports(user string) subscriptionPorts {
+	return g.allowedPorts(user, 0)
+}
+
+func (g subscriptionGrant) allowedPorts(user string, port int) subscriptionPorts {
 	var result subscriptionPorts
 	for _, inbound := range g.plan {
-		if slices.Contains(inbound.Users, user) {
+		if (port == 0 || inbound.Port == port) && slices.Contains(inbound.Users, user) {
 			result.ports = append(result.ports, inbound.Port)
 			if inbound.Protocol == xrayconfig.HTTP {
 				result.httpPorts = append(result.httpPorts, inbound.Port)
@@ -297,29 +301,33 @@ func (s *Server) fetchXraySubscription(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		result := map[string]any{
-			"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports.ports,
-			"revision": grant.revision, "expires_at": record.ExpiresAt,
-		}
-		if len(ports.protocols) > len(ports.httpPorts) {
-			result["schema_version"] = 3
-			result["port_protocols"] = ports.protocols
-			for _, protocol := range ports.protocols {
-				switch protocol {
-				case xrayconfig.Trojan:
-					result["trojan_trust"] = grant.trojan
-				case xrayconfig.VLESSReality:
-					result["reality_public_key"] = grant.realityPublicKey
-				}
-			}
-			if len(ports.published) > 0 {
-				result["schema_version"] = 4
-				result["public_endpoints"] = ports.published
-			}
-		} else if len(ports.httpPorts) > 0 {
-			result["schema_version"] = 2
-			result["http_ports"] = ports.httpPorts
-		}
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, grant.payload(username, ports, record.ExpiresAt))
 	})
+}
+
+func (g subscriptionGrant) payload(username string, ports subscriptionPorts, expiresAt int64) map[string]any {
+	result := map[string]any{
+		"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports.ports,
+		"revision": g.revision, "expires_at": expiresAt,
+	}
+	if len(ports.protocols) > len(ports.httpPorts) {
+		result["schema_version"] = 3
+		result["port_protocols"] = ports.protocols
+		for _, protocol := range ports.protocols {
+			switch protocol {
+			case xrayconfig.Trojan:
+				result["trojan_trust"] = g.trojan
+			case xrayconfig.VLESSReality:
+				result["reality_public_key"] = g.realityPublicKey
+			}
+		}
+		if len(ports.published) > 0 {
+			result["schema_version"] = 4
+			result["public_endpoints"] = ports.published
+		}
+	} else if len(ports.httpPorts) > 0 {
+		result["schema_version"] = 2
+		result["http_ports"] = ports.httpPorts
+	}
+	return result
 }

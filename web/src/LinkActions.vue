@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 
-const props = defineProps<{ url: string; showQr?: boolean }>()
+const props = defineProps<{ url: string; showQr?: boolean; label?: string }>()
 const linkInput = ref<HTMLInputElement | null>(null)
 const canvas = ref<HTMLCanvasElement | null>(null)
 const qrVisible = ref(!!props.showQr)
@@ -43,7 +43,7 @@ async function copyLink() {
   const url = props.url
   try {
     await navigator.clipboard.writeText(url)
-    if (props.url === url) copyStatus.value = '已复制订阅链接。'
+    if (props.url === url) copyStatus.value = '已复制链接。'
   } catch {
     linkInput.value?.select()
     copyStatus.value = '无法访问剪贴板，已选中链接，可手动复制。'
@@ -53,11 +53,11 @@ async function copyLink() {
 
 <template>
   <div class="link-actions">
-    <label>订阅链接
+    <label>{{ label ?? '订阅链接' }}
       <input ref="linkInput" type="text" :value="url" readonly autocomplete="off" spellcheck="false" />
     </label>
     <div class="actions">
-      <button type="button" @click="copyLink">复制订阅</button>
+      <button type="button" @click="copyLink">{{ label ? '复制链接' : '复制订阅' }}</button>
       <button type="button" class="outline" :aria-expanded="qrVisible" @click="qrVisible = !qrVisible">
         {{ qrVisible ? '隐藏二维码' : '显示二维码' }}
       </button>

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AdminSidebar, { type AdminPage } from './AdminSidebar.vue'
 import LinkActions from './LinkActions.vue'
 import PanelDialog from './PanelDialog.vue'
+import XrayClients from './XrayClients.vue'
 import XrayNetworkEditor from './XrayNetworkEditor.vue'
 import { copyNetwork, destinationLabel, type Destination, type Network } from './xrayManagement'
 import { xrayProtocolName, type XrayProtocol, type XrayPublicEndpoint } from './xraySubscription'
@@ -46,6 +47,7 @@ type PanelXrayOptions = {
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
   draft_network?: Network | null
+  managed_bindings?: { port: number; credential: string }[] | null
   usage?: { user_statistics: string; exact_quota: string; reason: string }
 }
 type XrayInstall = {
@@ -123,18 +125,17 @@ const subscriptionSearch = ref('')
 const subscriptionFilter = ref('')
 const shareOpen = ref(false)
 const shareUser = ref('')
-const sharePort = ref<number | ''>('')
 const shareQrFirst = ref(false)
-const shareTab = ref<'subscription' | 'node'>('subscription')
 const selectedConfigCore = ref<'' | 'xray'>('')
 const draftTab = ref<'inbound' | 'client' | 'outbound' | 'routing'>('inbound')
 const clientSearch = ref('')
+const clientNodeFilter = ref('')
 const previewOpen = ref(false)
 const coreDrawer = ref(false)
 const addNodeOpen = ref(false)
 const page = ref<AdminPage>('overview')
 const pageTitle: Record<AdminPage, string> = {
-  overview: '总览', nodes: '节点列表', config: '代理配置', subscriptions: '客户端订阅',
+  overview: '总览', nodes: '节点列表', config: '代理配置', clients: '客户端', subscriptions: '旧单节点订阅',
   audit: '审计日志', versions: 'Core 版本', tasks: '任务', admins: '管理员',
 }
 const now = ref(Date.now())
@@ -240,7 +241,6 @@ const subscriptionRows = computed(() => xraySubscriptions.value.filter(row =>
 ))
 const activeShareRow = computed(() => xraySubscriptions.value.find(row => row.username === shareUser.value))
 const subscriptionInbounds = computed(() => panelXray.value?.current.applied ?? [])
-const shareInbounds = computed(() => subscriptionInbounds.value.filter(inbound => inbound.users.includes(shareUser.value)))
 const shareLink = computed(() => {
   const link = xraySubscriptionLink.value
   return activeShareRow.value && link?.username === activeShareRow.value.username && hasShareLink(activeShareRow.value) ? link : null
@@ -300,13 +300,13 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new ApiError(response.status, (await response.text()).trim() || `HTTP ${response.status}`)
   return response.json() as Promise<T>
 }
-async function apiWithStepUp<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  try { return await api<T>(path, { method: 'POST', body: JSON.stringify(body) }) }
+async function apiWithStepUp<T>(path: string, body: Record<string, unknown>, method: 'POST' | 'PUT' = 'POST'): Promise<T> {
+  try { return await api<T>(path, { method, body: JSON.stringify(body) }) }
   catch (e) {
     if (!(e instanceof ApiError) || e.status !== 428) throw e
     const code = prompt('请重新输入 Authenticator 验证码')?.trim()
     if (!code) throw new Error('已取消 MFA 复验')
-    return api<T>(path, { method: 'POST', body: JSON.stringify({ ...body, mfa_code: code }) })
+    return api<T>(path, { method, body: JSON.stringify({ ...body, mfa_code: code }) })
   }
 }
 async function refreshNodes() {
@@ -452,6 +452,7 @@ function nodeStatus(node: NodeRecord) {
 
 function openPage(next: AdminPage, node?: NodeRecord) {
   if (node && !switchNode(node.id)) return
+  if (next === 'clients') clientNodeFilter.value = node?.id ?? ''
   error.value = ''
   page.value = next
   if (next !== 'nodes') installCommand.value = null
@@ -516,9 +517,15 @@ function openCoreInstallation(node: NodeRecord) {
 }
 
 function shareNode(node: NodeRecord) {
-  if (!switchNode(node.id)) return
-  openPage('subscriptions')
-  openShare()
+  clientNodeFilter.value = node.id
+  page.value = 'clients'
+}
+
+function configureClientNode(id: string) {
+  const node = nodes.value.find(node => node.id === id)
+  if (!node) return
+  openPage('config', node)
+  if (page.value === 'config' && selectedNodeID.value === id) selectedConfigCore.value = 'xray'
 }
 
 function coreSummary(node: NodeRecord) {
@@ -560,7 +567,6 @@ function hasShareLink(row: XraySubscriptionRow) {
 
 function openShare(user = '', showQr = false) {
   shareUser.value = user || (xraySubscriptionLink.value?.username ?? xraySubscriptions.value[0]?.username ?? '')
-  shareTab.value = 'subscription'
   shareQrFirst.value = showQr
   shareOpen.value = true
 }
@@ -869,7 +875,11 @@ function draftUsers(port: number) {
 }
 
 function canToggleDraftUser(port: number, user: string) {
-  return draftHasUser(port, user) || (draftGrantCount.value < 16 && approvedUsers(port).includes(user))
+  return !managedClientBinding(port, user) && (draftHasUser(port, user) || (draftGrantCount.value < 16 && approvedUsers(port).includes(user)))
+}
+
+function managedClientBinding(port: number, user: string) {
+  return panelXray.value?.managed_bindings?.some(binding => binding.port === port && binding.credential === user) ?? false
 }
 
 function toggleDraftUser(port: number, user: string) {
@@ -1135,7 +1145,6 @@ async function logout() {
 }
 
 watch([nodeGroup, nodeStatusFilter], () => { nodePage.value = 1 })
-watch(shareUser, () => { sharePort.value = '' })
 watch(nodePageCount, count => { nodePage.value = Math.min(nodePage.value, count) })
 watch([page, loggedIn, () => visibleNodes.value.map(node => node.id + ':' + node.last_seen).join(',')], loadVisibleCore)
 
@@ -1250,6 +1259,10 @@ onMounted(async () => {
       </header>
       <p v-if="error" class="notice" role="alert">{{ error }}</p>
       <p v-if="nodesError && (page === 'overview' || page === 'nodes')" class="notice" role="alert">{{ nodesError }}</p>
+      <KeepAlive :max="1">
+        <XrayClients v-if="page === 'clients' && admin?.can_manage_xray" :key="clientNodeFilter" :request="api" :mutate="apiWithStepUp"
+          :initial-node="clientNodeFilter" @configure="configureClientNode" />
+      </KeepAlive>
 
       <template v-if="page === 'overview'">
         <section class="metrics" aria-label="节点状态">
@@ -1354,7 +1367,7 @@ onMounted(async () => {
                           <label v-for="user in draftUsers(port)" :key="user">
                             <input type="checkbox" :checked="draftHasUser(port, user)"
                               :disabled="!canToggleDraftUser(port, user)"
-                              @change="toggleDraftUser(port, user)" />{{ user }}
+                              @change="toggleDraftUser(port, user)" />{{ user }}<small v-if="managedClientBinding(port, user)">主控绑定</small>
                           </label>
                           <p v-if="!draftUsers(port).length">节点尚未登记此协议的凭据。</p>
                         </fieldset>
@@ -1379,7 +1392,8 @@ onMounted(async () => {
           <template v-else-if="draftTab === 'client'">
             <div class="filters">
               <label>客户端<input v-model="clientSearch" type="search" placeholder="搜索用户名" /></label>
-              <button type="button" class="outline" @click="openPage('subscriptions')">管理订阅</button>
+              <button type="button" class="outline" @click="openPage('clients')">管理主控客户端</button>
+              <button type="button" class="quiet" @click="openPage('subscriptions')">旧订阅</button>
             </div>
             <div v-if="clients.length" class="table-wrap">
               <table class="data-table" aria-label="客户端授权">
@@ -1393,6 +1407,7 @@ onMounted(async () => {
                       <label v-for="port in draftPorts.filter(port => draftUsers(port).includes(user))" :key="port">
                         <input type="checkbox" :checked="draftHasUser(port, user)" :disabled="!canToggleDraftUser(port, user)"
                           @change="toggleDraftUser(port, user)" />{{ port }} · {{ inboundProtocolLabel(approvedProtocol(port)) }}
+                        <small v-if="managedClientBinding(port, user)">主控绑定</small>
                       </label>
                       <p v-if="!draftPorts.some(port => draftUsers(port).includes(user))">节点已移除此客户端的凭据。</p>
                     </fieldset></td>
@@ -1421,6 +1436,10 @@ onMounted(async () => {
           </div>
         </template>
       </section>
+
+      <template v-else-if="page === 'clients'">
+        <p v-if="!admin?.can_manage_xray" class="card empty">当前账号没有客户端管理权限。</p>
+      </template>
 
       <section v-else-if="page === 'subscriptions'" class="card">
         <p v-if="!admin?.can_manage_xray" class="empty">当前账号没有客户端订阅管理权限。</p>
@@ -1705,21 +1724,8 @@ onMounted(async () => {
           <option value="" disabled>选择客户端</option>
           <option v-for="row in xraySubscriptions" :key="row.username" :value="row.username">{{ row.username }}</option>
         </select></label>
-        <div class="tabs" role="group" aria-label="分享类型">
-          <button type="button" :aria-pressed="shareTab === 'subscription'" @click="shareTab = 'subscription'">订阅链接</button>
-          <button type="button" :aria-pressed="shareTab === 'node'" @click="shareTab = 'node'">节点分享</button>
-        </div>
         <p v-if="xraySubscriptionError" class="notice" role="alert">{{ xraySubscriptionError }}</p>
-        <div v-if="shareTab === 'node'" class="revision-summary">
-          <label>已授权入站<select v-model.number="sharePort" :disabled="!shareInbounds.length">
-            <option value="">{{ shareInbounds.length ? '选择入站' : '暂无可选入站' }}</option>
-            <option v-for="inbound in shareInbounds" :key="inbound.port" :value="inbound.port">
-              {{ endpointLabel(inbound.public_endpoint, inbound.port) }} · {{ inboundProtocolLabel(inbound.protocol) }}
-            </option>
-          </select></label>
-          <p>指定节点、入站和用户的领取链接待后端接入。</p>
-        </div>
-        <template v-else-if="shareLink">
+        <template v-if="shareLink">
           <p>有效至 {{ new Date(shareLink.expiresAt * 1000).toLocaleString() }}。请妥善保存刚签发的链接，刷新或重新登录后需要轮换才能生成新链接。</p>
           <LinkActions :key="shareLink.url" :url="shareLink.url" :show-qr="shareQrFirst" />
         </template>

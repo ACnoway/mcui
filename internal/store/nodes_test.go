@@ -22,7 +22,7 @@ func TestVersionFourMigrationIndexesActiveNodeTokens(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`DROP INDEX nodes_active_token_idx; UPDATE schema_migrations SET version = 4`); err != nil {
+	if _, err := s.db.Exec(`DROP TABLE xray_clients; DROP INDEX nodes_active_token_idx; UPDATE schema_migrations SET version = 4`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

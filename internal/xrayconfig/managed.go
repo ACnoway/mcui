@@ -190,22 +190,10 @@ func (c Catalog) Allows(p Plan) bool {
 		return false
 	}
 	for _, in := range p {
-		protocol := c.PortProtocols[in.Port]
-		if slices.Contains(c.HTTPPorts, in.Port) {
-			protocol = HTTP
-		}
-		if !slices.Contains(c.Ports, in.Port) || in.Protocol != protocol || in.PublicEndpoint != c.PublicEndpoints[in.Port] {
+		approved, users, ok := c.Inbound(in.Port)
+		if !ok || in.Protocol != approved.Protocol || in.PublicEndpoint != approved.PublicEndpoint ||
+			in.TLSCertSHA256 != approved.TLSCertSHA256 || in.RealityPublicKey != approved.RealityPublicKey {
 			return false
-		}
-		if protocol == Trojan && (c.TrojanTrust == nil || c.TrojanTrust.SHA256 != in.TLSCertSHA256) {
-			return false
-		}
-		if protocol == VLESSReality && c.RealityPublicKey != in.RealityPublicKey {
-			return false
-		}
-		users := c.Users
-		if UsesProtocolCredentials(protocol) {
-			users = c.ProtocolUsers[protocol]
 		}
 		for _, user := range in.Users {
 			if !slices.Contains(users, user) {
@@ -214,6 +202,28 @@ func (c Catalog) Allows(p Plan) bool {
 		}
 	}
 	return true
+}
+
+// Inbound returns a node-approved template and the local credential names for it.
+func (c Catalog) Inbound(port int) (Inbound, []string, bool) {
+	if !slices.Contains(c.Ports, port) {
+		return Inbound{}, nil, false
+	}
+	in := Inbound{Port: port, Protocol: c.PortProtocols[port], PublicEndpoint: c.PublicEndpoints[port]}
+	if slices.Contains(c.HTTPPorts, port) {
+		in.Protocol = HTTP
+	}
+	if in.Protocol == Trojan && c.TrojanTrust != nil {
+		in.TLSCertSHA256 = c.TrojanTrust.SHA256
+	}
+	if in.Protocol == VLESSReality {
+		in.RealityPublicKey = c.RealityPublicKey
+	}
+	users := c.Users
+	if UsesProtocolCredentials(in.Protocol) {
+		users = c.ProtocolUsers[in.Protocol]
+	}
+	return in, users, true
 }
 
 type LocalCatalog struct {

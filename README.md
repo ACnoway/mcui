@@ -19,7 +19,7 @@ Phase 3 adds the official Core release catalog, a backup cache, signed Xray life
 
 The panel opens on the node overview. Use the node list for Agent enrollment and Core lifecycle operations, and open Proxy Configuration to edit and deploy approved Xray inbound grants. Settings contains the audit log, Core releases, task history, and administrator management. [Frontend design](docs/frontend-design.md)
 
-Administrators can issue, rotate, and revoke subscriptions for an applied Xray revision. The panel provides copy and QR actions for freshly issued links. The subscription page downloads an Xray client configuration from the user's approved endpoints and node-issued credentials. General outbound and routing editing, persistent access to issued links, and per-inbound share links are pending backend support. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
+Administrators can create an Xray client on the Master and bind it to inbounds on multiple nodes. After the node revisions are applied, the panel can issue one subscription for the client and a separate HTTPS share link for each inbound. The recipient uses the link to generate an Xray client configuration with the credential issued by that node. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
 
 ## Development checks
 

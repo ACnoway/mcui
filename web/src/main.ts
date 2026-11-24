@@ -3,4 +3,5 @@ import App from './App.vue'
 import SubscriptionView from './SubscriptionView.vue'
 import './style.css'
 
-createApp(window.location.pathname === '/subscription' ? SubscriptionView : App).mount('#app')
+const subscriptionPage = ['/subscription', '/subscription/client'].includes(window.location.pathname)
+createApp(subscriptionPage ? SubscriptionView : App).mount('#app')

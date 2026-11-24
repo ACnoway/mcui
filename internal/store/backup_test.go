@@ -19,6 +19,9 @@ func TestBackupVerifyAndRestoreCandidate(t *testing.T) {
 	if err := st.Update(func(state *State) error {
 		state.Admins["admin-1"] = Admin{ID: "admin-1", Username: "owner", Role: "security_admin", AllNodes: true}
 		state.Nodes["node-1"] = Node{ID: "node-1", Name: "edge-1", Group: "west"}
+		state.XrayClients["alice"] = XrayClient{Revision: 2, Bindings: []XrayClientBinding{
+			{XrayBinding: XrayBinding{NodeID: "node-1", Port: 1080, Credential: "alice"}},
+		}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -71,6 +74,9 @@ func TestBackupVerifyAndRestoreCandidate(t *testing.T) {
 	if err := restored.View(func(state State) error {
 		if state.Nodes["node-1"].Name != "edge-1" || state.Admins["admin-1"].Username != "owner" {
 			t.Fatalf("restore candidate omitted database records: %+v", state)
+		}
+		if client := state.XrayClients["alice"]; client.Revision != 2 || len(client.Bindings) != 1 || client.Bindings[0].NodeID != "node-1" {
+			t.Fatal("restore candidate omitted Xray client bindings")
 		}
 		return nil
 	}); err != nil {

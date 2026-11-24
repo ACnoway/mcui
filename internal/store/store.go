@@ -22,7 +22,7 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const driverName = "mcui-master-sqlite"
 
@@ -53,6 +53,7 @@ type State struct {
 	Audits         []Audit                  `json:"audits"`
 	XrayInstalls   map[string]XrayInstall   `json:"xray_installs,omitempty"`
 	RuntimeUpdates map[string]RuntimeUpdate `json:"runtime_updates,omitempty"`
+	XrayClients    map[string]XrayClient    `json:"xray_clients,omitempty"`
 }
 
 type RuntimeUpdate struct {
@@ -113,6 +114,28 @@ type XraySubscription struct {
 	TokenHash string `json:"token_hash"`
 	Revision  int64  `json:"revision"`
 	SHA256    string `json:"sha256"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+type XrayClient struct {
+	Revision     int64               `json:"revision"`
+	Bindings     []XrayClientBinding `json:"bindings"`
+	Subscription ClientShare         `json:"subscription,omitzero"`
+}
+
+type XrayBinding struct {
+	NodeID     string `json:"node_id"`
+	Port       int    `json:"port"`
+	Credential string `json:"credential"`
+}
+
+type XrayClientBinding struct {
+	XrayBinding
+	Share ClientShare `json:"share,omitzero"`
+}
+
+type ClientShare struct {
+	TokenHash string `json:"token_hash"`
 	ExpiresAt int64  `json:"expires_at"`
 }
 
@@ -204,6 +227,11 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	if current < 6 {
+		if _, err := tx.Exec(`CREATE TABLE xray_clients (id TEXT PRIMARY KEY, payload BLOB NOT NULL)`); err != nil {
+			return err
+		}
+	}
 	if current == 0 {
 		for _, query := range schemaV2 {
 			if _, err := tx.Exec(query); err != nil {
@@ -287,7 +315,7 @@ var schemaV2 = []string{
 
 func emptyState() State {
 	return State{Admins: map[string]Admin{}, Nodes: map[string]Node{}, Sessions: map[string]Session{},
-		Audits: []Audit{}, XrayInstalls: map[string]XrayInstall{}, RuntimeUpdates: map[string]RuntimeUpdate{}}
+		Audits: []Audit{}, XrayInstalls: map[string]XrayInstall{}, RuntimeUpdates: map[string]RuntimeUpdate{}, XrayClients: map[string]XrayClient{}}
 }
 
 func decode(payload []byte) (State, error) {
@@ -335,6 +363,9 @@ func loadState(q executor) (State, error) {
 	if err := loadMap(q, `SELECT id, payload FROM runtime_updates ORDER BY id`, state.RuntimeUpdates); err != nil {
 		return State{}, err
 	}
+	if err := loadMap(q, `SELECT id, payload FROM xray_clients ORDER BY id`, state.XrayClients); err != nil {
+		return State{}, err
+	}
 	rows, err := q.Query(`SELECT payload FROM audit_logs ORDER BY event_seq`)
 	if err != nil {
 		return State{}, err
@@ -376,7 +407,7 @@ func loadMap[T any](q executor, query string, destination map[string]T) error {
 }
 
 func persistState(tx *sql.Tx, state State) error {
-	for _, table := range []string{"sessions", "nodes", "admins", "audit_logs", "xray_installs", "runtime_updates"} {
+	for _, table := range []string{"sessions", "nodes", "admins", "audit_logs", "xray_installs", "runtime_updates", "xray_clients"} {
 		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
 			return err
 		}
@@ -435,6 +466,15 @@ func persistState(tx *sql.Tx, state State) error {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO runtime_updates(id, payload) VALUES(?, ?)`, id, payload); err != nil {
+			return err
+		}
+	}
+	for _, id := range sortedKeys(state.XrayClients) {
+		payload, err := json.Marshal(state.XrayClients[id])
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO xray_clients(id, payload) VALUES(?, ?)`, id, payload); err != nil {
 			return err
 		}
 	}
