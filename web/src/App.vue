@@ -39,17 +39,21 @@ type XrayCatalog = {
 }
 type XrayDraft = { plan: XrayInbound[]; network: Network | null }
 type XraySubscriptionRow = { username: string; eligible: boolean; active: boolean; expires_at?: number }
+type XrayTraffic = { at_ms: number; totals: Record<string, { up: number; down: number }>; has_gap: boolean }
 type PanelXrayOptions = {
   architecture: string
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
     catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
     panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean
+    panel_statistics?: boolean; statistics_active?: boolean
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
   panel_inbounds?: boolean
   panel_trust?: { certificate: string; sha256: string } | null
+  draft_statistics?: boolean
+  traffic?: XrayTraffic
   draft_network?: Network | null
   managed_bindings?: { port: number; credential: string }[] | null
   usage?: { user_statistics: string; exact_quota: string; reason: string }
@@ -131,7 +135,9 @@ const shareOpen = ref(false)
 const shareUser = ref('')
 const shareQrFirst = ref(false)
 const selectedConfigCore = ref<'' | 'xray'>('')
-const draftTab = ref<'inbound' | 'client' | 'outbound' | 'routing'>('inbound')
+const draftTab = ref<'inbound' | 'client' | 'outbound' | 'routing' | 'traffic'>('inbound')
+const trafficScopeNames: Record<string, string> = { inbound: '入站', user: '客户端', outbound: '出站' }
+const byteFormat = new Intl.NumberFormat('zh-CN')
 const clientSearch = ref('')
 const clientNodeFilter = ref('')
 const previewOpen = ref(false)
@@ -905,7 +911,7 @@ function toggleDraftUser(port: number, user: string) {
   }
 }
 
-async function saveXrayDraft() {
+async function saveXrayDraft(statistics?: boolean) {
   const node = selectedNode.value
   const options = panelXray.value
   if (!node || !options || (!options.current.catalog && !options.panel_inbounds) || draftDisabled.value) return
@@ -919,7 +925,7 @@ async function saveXrayDraft() {
   xrayDraftSaving.value = true
   panelXrayError.value = ''
   try {
-    await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, ...savedPlan }) })
+    await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, ...savedPlan, statistics }) })
     if (!signal.aborted && selectedNodeID.value === node.id) {
       if (options.panel_inbounds) previewOpen.value = true
       await loadPanelXray(node.id, { savedPlan })
@@ -1374,6 +1380,7 @@ onMounted(async () => {
             <button v-if="!panelXray.panel_inbounds" type="button" :aria-pressed="draftTab === 'client'" @click="draftTab = 'client'">客户端</button>
             <button type="button" :aria-pressed="draftTab === 'routing'" @click="draftTab = 'routing'">路由</button>
             <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
+            <button type="button" :aria-pressed="draftTab === 'traffic'" @click="draftTab = 'traffic'">流量</button>
           </div>
           <p v-if="panelXrayError" class="notice" role="alert">{{ panelXrayError }}</p>
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
@@ -1454,6 +1461,39 @@ onMounted(async () => {
             </div>
             <p v-else class="empty">{{ clientSearch ? '没有匹配的客户端。' : '节点尚未登记客户端凭据。' }}</p>
           </template>
+          <template v-else-if="draftTab === 'traffic'">
+            <div v-if="panelXray.panel_inbounds && (panelXray.current.panel_statistics || panelXray.draft_statistics)" class="actions">
+              <button type="button" class="outline"
+                :disabled="draftDisabled || xrayDraftDirty || !panelXray.draft"
+                @click="saveXrayDraft(!panelXray.draft_statistics)">
+                {{ panelXray.draft_statistics ? '在草稿中停用统计' : '在草稿中启用统计' }}
+              </button>
+            </div>
+            <p v-if="panelXray.draft_statistics !== panelXray.current.statistics_active && (panelXray.draft_statistics || panelXray.current.statistics_active)" class="feedback">
+              下发后应用统计设置。
+            </p>
+            <template v-if="panelXray.traffic">
+              <p class="feedback">
+                当前修订采样累计 · {{ new Date(panelXray.traffic.at_ms).toLocaleString() }}
+                <template v-if="!panelXray.current.running || Date.now() - panelXray.traffic.at_ms > 45000"> · 采样已过期</template>
+                <template v-if="panelXray.traffic.has_gap"> · 存在采样缺口</template>
+              </p>
+              <div v-if="Object.keys(panelXray.traffic.totals).length" class="table-wrap">
+                <table class="data-table" aria-label="当前节点流量">
+                  <thead><tr><th scope="col">范围</th><th scope="col">标识</th><th scope="col">上行（字节）</th><th scope="col">下行（字节）</th></tr></thead>
+                  <tbody><tr v-for="(counter, key) in panelXray.traffic.totals" :key="key">
+                    <td>{{ trafficScopeNames[key.split(':')[0]] }}</td>
+                    <th scope="row">{{ key.split(':')[1] }}</th>
+                    <td>{{ byteFormat.format(counter.up) }}</td>
+                    <td>{{ byteFormat.format(counter.down) }}</td>
+                  </tr></tbody>
+                </table>
+              </div>
+              <p v-else class="empty">Xray 暂未返回计数。</p>
+            </template>
+            <p v-else class="empty">{{ panelXray.current.statistics_active ? '等待节点上报流量样本。' : panelXray.current.panel_statistics ? '当前配置未启用流量统计。' : '此节点当前不具备流量采集能力。' }}</p>
+            <p class="feedback">计数用于观察当前修订的用量。精确额度暂未启用。</p>
+          </template>
           <XrayNetworkEditor v-else-if="panelXray.current.catalog || panelXray.panel_inbounds" :tab="draftTab" :network="draftNetwork"
             :panel-inbounds="!!panelXray.panel_inbounds"
             :destinations="networkDestinations" :inbound-ports="xrayDraft.map(inbound => inbound.port)" :disabled="draftDisabled"
@@ -1465,9 +1505,9 @@ onMounted(async () => {
             <template v-if="latestApplyTask.status === 'SUCCEEDED' && !latestApplyVerified">，等待节点上报对应修订</template>
           </p>
           <div class="actions">
-            <button v-if="!panelXray.panel_inbounds || draftTab !== 'inbound'" type="button" class="outline"
+            <button v-if="draftTab !== 'traffic' && (!panelXray.panel_inbounds || draftTab !== 'inbound')" type="button" class="outline"
               :disabled="(!panelXray.current.catalog && !panelXray.panel_inbounds) || draftDisabled || (!xrayDraftDirty && !xrayDraftPolicyChanged && (panelXray.draft !== null || panelXray.panel_inbounds))"
-              @click="saveXrayDraft">{{ xrayDraftSaving ? '保存中…' : '保存草稿' }}</button>
+              @click="saveXrayDraft()">{{ xrayDraftSaving ? '保存中…' : '保存草稿' }}</button>
             <button type="button" class="outline" :disabled="!panelXray || xrayDraftDirty || draftConflict" @click="openPreview">预览变更</button>
             <button type="button" :disabled="!canApplyXrayDraft" @click="openPreview">下发配置</button>
             <button type="button" class="quiet" @click="refreshNodeTasks(selectedNode.id)">刷新状态</button>
@@ -1717,6 +1757,9 @@ onMounted(async () => {
       <p role="status">{{ draftStatus }}</p>
       <p v-if="panelXrayReadError || panelXrayError" class="notice" role="alert">{{ panelXrayError || panelXrayReadError }}</p>
       <p v-if="panelXray.current.candidate">候选配置 SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
+      <p v-if="!!panelXray.draft_statistics !== !!panelXray.current.statistics_active">
+        下发后{{ panelXray.draft_statistics ? '启用' : '停用' }}当前节点的流量统计。
+      </p>
       <div v-if="inboundChanges.length" class="table-wrap">
         <table class="data-table" aria-label="受控入站变更">
           <thead><tr><th scope="col">监听端口</th><th scope="col">当前授权</th><th scope="col">草稿授权</th></tr></thead>

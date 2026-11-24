@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
@@ -126,7 +127,7 @@ func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 	}
 	if i.PanelKey != "" {
 		plan, err := xrayconfig.ParseConfiguration(draft)
-		return err == nil && plan.Panel != nil && xrayDraftPreviewed(i, draft)
+		return err == nil && plan.Panel != nil && (!plan.Panel.Statistics || i.PanelStatistics) && xrayDraftPreviewed(i, draft)
 	}
 	if i.Catalog == nil {
 		return true
@@ -137,9 +138,10 @@ func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 
 func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		State   string              `json:"state"`
-		Plan    xrayconfig.Plan     `json:"plan"`
-		Network *xrayconfig.Network `json:"network,omitempty"`
+		State      string              `json:"state"`
+		Plan       xrayconfig.Plan     `json:"plan"`
+		Network    *xrayconfig.Network `json:"network,omitempty"`
+		Statistics *bool               `json:"statistics,omitempty"`
 	}
 	if readJSON(r, &in) != nil || len(in.State) != 64 {
 		http.Error(w, "invalid Xray configuration draft", http.StatusBadRequest)
@@ -181,7 +183,13 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 					return errXrayInventory
 				}
 				plan.Panel = prior.Panel
-			} else if inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.AllowsConfiguration(plan) {
+				if in.Statistics != nil {
+					if *in.Statistics && !inventory.Xray.PanelStatistics {
+						return errXrayInventory
+					}
+					plan.Panel.Statistics = *in.Statistics
+				}
+			} else if in.Statistics != nil || inventory.Xray.Catalog == nil || !inventory.Xray.Catalog.AllowsConfiguration(plan) {
 				return errXrayInventory
 			}
 			draft := plan.Encode()
@@ -293,7 +301,10 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		inventory.Xray.ConfigRevision > 0 {
 		usageReason = "accounting_incomplete"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	usage := map[string]string{
+		"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,
+	}
+	result := map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
 		"versions": versions, "catalog_version": manifest.ManifestVersion,
 		"config_ready":     configReady,
@@ -303,10 +314,28 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		"draft_previewed":  xrayDraftPreviewed(inventory.Xray, draft),
 		"panel_inbounds":   inventory.Xray.PanelKey != "" && inventory.Xray.Version == xrayconfig.Version,
 		"panel_trust":      panelTrust,
-		"usage": map[string]string{
-			"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,
-		},
-	})
+		"draft_statistics": plan.Panel != nil && plan.Panel.Statistics,
+		"usage":            usage,
+	}
+	if inventory.Xray.StatisticsActive {
+		traffic, err := s.store.XrayTraffic(r.Context(), r.PathValue("node"))
+		if err != nil {
+			http.Error(w, "could not read Xray traffic", http.StatusServiceUnavailable)
+			return
+		}
+		if traffic.Last.Revision == inventory.Xray.ConfigRevision {
+			result["traffic"] = map[string]any{
+				"at_ms": traffic.Last.At, "totals": traffic.Totals, "has_gap": traffic.HasGap,
+			}
+			for key := range traffic.Totals {
+				if strings.HasPrefix(key, "user:") {
+					usage["user_statistics"] = "SAMPLED"
+					break
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) panelXrayOperation(w http.ResponseWriter, r *http.Request) {

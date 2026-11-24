@@ -153,7 +153,7 @@ func TestVersionThreeMigrationPreservesCheckpointState(t *testing.T) {
 		return raw
 	}
 	before := stateJSON(s)
-	if _, err := s.db.Exec(`DROP TABLE xray_clients; DROP INDEX nodes_active_token_idx; DROP TABLE runtime_updates; UPDATE schema_migrations SET version = 3`); err != nil {
+	if _, err := s.db.Exec(`DROP TABLE xray_traffic; DROP TABLE xray_clients; DROP INDEX nodes_active_token_idx; DROP TABLE runtime_updates; UPDATE schema_migrations SET version = 3`); err != nil {
 		t.Fatal(err)
 	}
 	if version, err := VerifyDatabase(path); err != nil || version != 3 {

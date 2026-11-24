@@ -59,6 +59,7 @@ install_xray_bootstrap() {
   fi
 
   "$stage/$arch/mcui-xray" initialize >/dev/null
+  getent group mcui-xray-stats >/dev/null || groupadd --system mcui-xray-stats
   if [[ $panel_inbounds == true ]]; then
     "$stage/$arch/mcui-xray" initialize-panel-inbounds >/dev/null
     install -d -o root -g root -m 0755 /usr/local/libexec "$units/mcui-xray.service.d"

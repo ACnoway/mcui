@@ -15,6 +15,7 @@ import (
 type PanelConfiguration struct {
 	Credentials []string  `json:"credentials"`
 	TLS         *PanelTLS `json:"tls,omitempty"`
+	Statistics  bool      `json:"statistics,omitempty"`
 }
 
 func (p PanelConfiguration) valid(plan Plan, routes []Route) bool {
@@ -193,5 +194,5 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 		inbounds = append(inbounds, entry)
 		tags[inbound.Port] = tag
 	}
-	return c.Network.render(inbounds, tags, port)
+	return c.Network.render(inbounds, tags, port, c.Panel.Statistics)
 }

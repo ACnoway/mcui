@@ -44,12 +44,12 @@ func panelInbounds(draft xrayconfig.Configuration) []panelInbound {
 	return entries
 }
 
-func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS, network *xrayconfig.Network) xrayconfig.Configuration {
+func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS, network *xrayconfig.Network, statistics bool) xrayconfig.Configuration {
 	slices.SortFunc(entries, func(a, b panelInbound) int { return a.Inbound.Port - b.Inbound.Port })
 	draft := xrayconfig.Configuration{
 		Inbounds: xrayconfig.Plan{},
 		Network:  network,
-		Panel:    &xrayconfig.PanelConfiguration{Credentials: []string{}},
+		Panel:    &xrayconfig.PanelConfiguration{Credentials: []string{}, Statistics: statistics},
 	}
 	for _, entry := range entries {
 		if entry.Inbound.Protocol == xrayconfig.Trojan && identity != nil {
@@ -185,6 +185,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 			}
 			var entries []panelInbound
 			var identity *xrayconfig.PanelTLS
+			var statistics bool
 			network := &xrayconfig.Network{Outbounds: []xrayconfig.Outbound{}, Routes: []xrayconfig.Route{}}
 			if node.XrayDraft != "" {
 				draft, err := xrayconfig.ParseConfiguration(node.XrayDraft)
@@ -194,6 +195,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				if draft.Panel != nil {
 					entries = panelInbounds(draft)
 					identity = draft.Panel.TLS
+					statistics = draft.Panel.Statistics
 					network = draft.Network
 				} else if node.XrayPanelKey != "" || len(draft.Inbounds) != 0 {
 					return errXrayInventory
@@ -239,7 +241,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			updatePanelInboundRoute(network, port, in.Destination)
-			draft := encodePanelInbounds(entries, identity, network)
+			draft := encodePanelInbounds(entries, identity, network, statistics)
 			encoded := draft.Encode()
 			if !draft.Valid() || len(encoded) > xrayconfig.MaxConfigurationSize {
 				return lifecycleauth.ErrDenied

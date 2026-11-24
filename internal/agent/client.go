@@ -256,9 +256,17 @@ func (c *Client) heartbeat() (localState, error) {
 		if c.readXrayInventory != nil {
 			inventory.Xray, _ = c.readXrayInventory(context.Background(), state.NodeID, c.xrayDraft)
 		}
+		if inventory.Xray != nil && inventory.Xray.Traffic != nil {
+			body["xray_traffic"] = inventory.Xray.Traffic
+			inventory.Xray.Traffic = nil
+		}
 		body["inventory"] = inventory
 	}
 	raw, status, err := c.post(state, "/api/v1/agent/heartbeat", body)
+	if err == nil && status == http.StatusBadRequest && body["xray_traffic"] != nil {
+		delete(body, "xray_traffic")
+		raw, status, err = c.post(state, "/api/v1/agent/heartbeat", body)
+	}
 	if err == nil && status == http.StatusBadRequest && body["inventory"] != nil {
 		delete(body, "inventory")
 		raw, status, err = c.post(state, "/api/v1/agent/heartbeat", body)

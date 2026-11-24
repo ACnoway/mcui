@@ -130,6 +130,7 @@
 - [x] 主控定义入站支持多客户端，跨节点分配可为客户端生成独立凭据及领取链接，解绑和轮换按入站及客户端处理。[客户端订阅](./phase-4-xray-inbound.md#客户端订阅)
 - [ ] 扩展通用入站、用户和凭据管理。已接入 VLESS、VMess、Shadowsocks 2022、Trojan/TLS 和 VLESS/REALITY 的受控入站、逐协议用户授权及客户端订阅。Trojan/TLS 与 VLESS/REALITY 可由节点配置受控公网 TCP 入口。独立凭据管理仍待开发。[协议模板](./phase-4-xray-inbound.md#vlessvmess-和-shadowsocks-2022) · [公网接入](./phase-4-xray-inbound.md#受控公网-tcp-接入)
 - [x] 验证受控 SOCKS5 的实际连接、用户映射和上下行计数。默认转发的连接中读数存在缺口，进程重启丢失计数。面板明示 `UNSUPPORTED` 并禁用精确额度。[统计实测](./phase-4-xray-inbound.md#计数实测)
+- [x] 主控定义模式接入入站、客户端和出站的当前修订采样，按节点写入主控数据库并显示计数与采样时间。[用户级统计与额度](./phase-4-xray-inbound.md#用户级统计与额度)
 - [ ] 在能持续计量的配置组合上验证持久化上报、去重和离线补报。只有计量与补报可靠的组合才开放近实时额度。
 - [x] 交付受控 SOCKS5 基础订阅，按用户和已应用修订签发，支持令牌到期、撤销与轮换。验证授权变化、日志脱敏边界和 Xray 原生客户端输出。[客户端订阅](./phase-4-xray-inbound.md#客户端订阅)
 - [x] 从空 Agent 演示注册、安装 Xray、创建入站和用户、下发配置、客户端实际连接、查看任务和统计可用性、订阅及撤销，验证错误配置拒绝与回滚。[空 Agent 最小演示](./phase-4-xray-inbound.md#空-agent-最小演示2026-11-23)

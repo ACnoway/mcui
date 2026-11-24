@@ -425,7 +425,7 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 		}
 		if changed {
 			entries = slices.DeleteFunc(entries, func(entry panelInbound) bool { return len(entry.Inbound.Users) == 0 })
-			updated := encodePanelInbounds(entries, draft.Panel.TLS, draft.Network)
+			updated := encodePanelInbounds(entries, draft.Panel.TLS, draft.Network, draft.Panel.Statistics)
 			node.XrayDraft = updated.Encode()
 			if !updated.Valid() || len(node.XrayDraft) > xrayconfig.MaxConfigurationSize {
 				return errXrayInventory

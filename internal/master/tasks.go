@@ -809,6 +809,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		PanelInbounds:    query.Get("xray_panel_inbounds") == "v1",
 		PanelTrojan:      query.Get("xray_panel_trojan") == "v1",
 		PanelMultiClient: query.Get("xray_panel_multi_client") == "v1",
+		PanelStatistics:  query.Get("xray_panel_statistics") == "v1",
 	}
 	delivery, err := runtime.Store.LeaseWithXray(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
 		unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)

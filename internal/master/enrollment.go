@@ -17,6 +17,7 @@ import (
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/store"
+	"github.com/ACnoway/mcui/internal/xraytraffic"
 )
 
 const installCodeLifetime = 10 * time.Minute
@@ -302,6 +303,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		NodeID    string                       `json:"node_id"`
 		Inventory *lifecycleauth.NodeInventory `json:"inventory"`
+		Traffic   *xraytraffic.Sample          `json:"xray_traffic,omitempty"`
 	}
 	if readJSON(r, &in) != nil || (in.Inventory != nil && !in.Inventory.Valid()) {
 		http.Error(w, "invalid heartbeat", http.StatusBadRequest)
@@ -311,10 +313,34 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "heartbeat target rejected", http.StatusForbidden)
 		return
 	}
+	if in.Inventory != nil && in.Inventory.Xray != nil && in.Inventory.Xray.Traffic != nil {
+		http.Error(w, "invalid heartbeat traffic field", http.StatusBadRequest)
+		return
+	}
+	if in.Traffic != nil {
+		now := time.Now()
+		if in.Inventory == nil || in.Inventory.Xray == nil || in.Traffic.At < now.Add(-90*time.Second).UnixMilli() ||
+			in.Traffic.At > now.Add(5*time.Second).UnixMilli() {
+			http.Error(w, "invalid heartbeat traffic sample", http.StatusBadRequest)
+			return
+		}
+		check := *in.Inventory.Xray
+		check.Traffic = in.Traffic
+		if !check.Valid() {
+			http.Error(w, "invalid heartbeat traffic sample", http.StatusBadRequest)
+			return
+		}
+	}
 	err := s.store.RecordNodeHeartbeat(r.Context(), node.ID, node.TokenHash, time.Now().Unix(), in.Inventory)
 	if err != nil {
 		http.Error(w, "heartbeat unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	if in.Traffic != nil {
+		if err := s.store.RecordXrayTraffic(r.Context(), node.ID, node.TokenHash, *in.Traffic); err != nil {
+			http.Error(w, "heartbeat traffic unavailable", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ok", "node_id": node.ID, "inventory": "v1",

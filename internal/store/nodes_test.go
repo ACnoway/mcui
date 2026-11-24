@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ACnoway/mcui/internal/xraytraffic"
 )
 
 func TestVersionFourMigrationIndexesActiveNodeTokens(t *testing.T) {
@@ -22,7 +24,7 @@ func TestVersionFourMigrationIndexesActiveNodeTokens(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`DROP TABLE xray_clients; DROP INDEX nodes_active_token_idx; UPDATE schema_migrations SET version = 4`); err != nil {
+	if _, err := s.db.Exec(`DROP TABLE xray_traffic; DROP TABLE xray_clients; DROP INDEX nodes_active_token_idx; UPDATE schema_migrations SET version = 4`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -91,5 +93,45 @@ func assertNodeSeen(t *testing.T, s *Store, ctx context.Context, digest, id stri
 	node, err := s.NodeByTokenHash(ctx, digest)
 	if err != nil || node.ID != id || node.LastSeen != seen {
 		t.Fatalf("lookup returned node %q, seen %d, error %v", node.ID, node.LastSeen, err)
+	}
+}
+
+func TestXrayTrafficSurvivesNodeUpdates(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "traffic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	const id = "node-a"
+	const token = "digest-a"
+	if err := s.Update(func(st *State) error {
+		st.Nodes[id] = Node{ID: id, TokenHash: token}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const key = "outbound:allowed"
+	sample := xraytraffic.Sample{Revision: 1, Epoch: strings.Repeat("a", 64), At: 100,
+		Counters: map[string]xraytraffic.Bytes{key: {Up: 12, Down: 34}}}
+	if err := s.RecordXrayTraffic(ctx, id, token, sample); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(func(st *State) error {
+		row := st.Nodes[id]
+		row.Name, row.TokenHash = "renamed", "digest-b"
+		st.Nodes[id] = row
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sample.At++
+	sample.Counters[key] = xraytraffic.Bytes{Up: 99, Down: 99}
+	if err := s.RecordXrayTraffic(ctx, id, token, sample); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rotated token recorded usage: %v", err)
+	}
+	usage, err := s.XrayTraffic(ctx, id)
+	if err != nil || usage.Totals[key] != (xraytraffic.Bytes{Up: 12, Down: 34}) {
+		t.Fatalf("node update lost or changed usage: %+v (%v)", usage, err)
 	}
 }

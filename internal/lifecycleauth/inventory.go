@@ -6,6 +6,7 @@ import (
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
+	"github.com/ACnoway/mcui/internal/xraytraffic"
 )
 
 // NodeInventory travels in authenticated heartbeats. A missing Xray value
@@ -29,6 +30,9 @@ type XrayInventory struct {
 	PlanSupported    bool                    `json:"plan_supported,omitempty"`
 	PanelKey         string                  `json:"panel_key,omitempty"`
 	PanelMultiClient bool                    `json:"panel_multi_client,omitempty"`
+	PanelStatistics  bool                    `json:"panel_statistics,omitempty"`
+	StatisticsActive bool                    `json:"statistics_active,omitempty"`
+	Traffic          *xraytraffic.Sample     `json:"traffic,omitempty"`
 	PanelTrojan      bool                    `json:"panel_trojan,omitempty"`
 	PanelAddresses   []string                `json:"panel_addresses,omitempty"`
 	PanelTLS         *xrayconfig.TrojanTrust `json:"panel_tls,omitempty"`
@@ -50,7 +54,7 @@ func (x XrayInventory) Valid() bool {
 		(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview))) {
 		return false
 	}
-	if (x.PanelTrojan || x.PanelMultiClient) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
+	if (x.PanelTrojan || x.PanelMultiClient || x.PanelStatistics || x.StatisticsActive) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
 		len(x.PanelAddresses) > 16 || !slices.IsSorted(x.PanelAddresses) {
 		return false
 	}
@@ -92,6 +96,11 @@ func (x XrayInventory) Valid() bool {
 		return false
 	}
 	if x.Applied != nil && (x.ConfigRevision == 0 || !x.AppliedConfiguration().Valid()) {
+		return false
+	}
+	if x.StatisticsActive && x.Applied == nil || x.Traffic != nil &&
+		(!x.StatisticsActive || !x.Running || x.Traffic.Revision != x.ConfigRevision || !x.Traffic.Valid() ||
+			!x.Traffic.Matches(*x.Applied, x.AppliedNetwork)) {
 		return false
 	}
 	if x.Candidate != (xrayconfig.Reference{}) && (x.Version != xrayconfig.Version || !x.Candidate.Valid()) {

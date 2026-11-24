@@ -26,6 +26,7 @@ import (
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
+	"github.com/ACnoway/mcui/internal/xraytraffic"
 )
 
 func TestPanelXraySelectSignDeliverAndConfirm(t *testing.T) {
@@ -195,7 +196,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if response.Current.ConfigRevision != 0 {
 			reason = "accounting_incomplete"
 		}
-		if response.Usage.UserStatistics != "UNSUPPORTED" || response.Usage.ExactQuota != "UNSUPPORTED" || response.Usage.Reason != reason {
+		if (response.Usage.UserStatistics != "UNSUPPORTED" && (!response.Current.StatisticsActive || response.Usage.UserStatistics != "SAMPLED")) ||
+			response.Usage.ExactQuota != "UNSUPPORTED" || response.Usage.Reason != reason {
 			t.Fatalf("unsupported traffic or quota was not explicit: %+v", response.Usage)
 		}
 		return response.State
@@ -786,6 +788,22 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatalf("network save changed credentials or omitted an explicit outbound: %v", err)
 		}
 		config = routed
+		statsChange := func() *httptest.ResponseRecorder {
+			return subscriptionAdmin(http.MethodPut, "https://panel.example.test"+path+"/draft", client.csrf,
+				map[string]any{"state": options(), "plan": config.Inbounds, "network": network, "statistics": true})
+		}
+		expect(statsChange(), http.StatusConflict)
+		direct.PanelStatistics = true
+		heartbeat(&direct)
+		expect(statsChange(), http.StatusOK)
+		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, err = xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil || !config.Panel.Statistics {
+			t.Fatalf("draft did not enable statistics: %v", err)
+		}
 		const clientsURL = "https://panel.example.test/api/v1/admin/xray/clients"
 		const aggregateURL = "https://panel.example.test/api/v1/client-subscription"
 		central := func(method, suffix string, body any) *httptest.ResponseRecorder {
@@ -847,6 +865,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		expect(client.request(http.MethodGet, next+"&xray_panel_multi_client=v1", nil, true), http.StatusNoContent)
 		expect(client.request(http.MethodGet, next+"&xray_panel_trojan=v1", nil, true), http.StatusNoContent)
 		next += "&xray_panel_trojan=v1&xray_panel_multi_client=v1"
+		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
+		next += "&xray_panel_statistics=v1"
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: newer.Version, SHA256: newer.SHA256})
 		if err != nil {
@@ -856,7 +876,27 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			StatusVersion: 1, Status: "SUCCEEDED", Result: result}, true), http.StatusNoContent)
 		direct.Applied, direct.AppliedNetwork, direct.Config, direct.ConfigRevision = &config.Inbounds, config.Network, direct.Candidate, issued.Sequence
 		direct.PanelTLS = &config.Panel.TLS.Trust
+		direct.StatisticsActive = true
 		heartbeat(&direct)
+		reportStats := func(sample xraytraffic.Sample) *httptest.ResponseRecorder {
+			return client.request(http.MethodPost, "/api/v1/agent/heartbeat", map[string]any{
+				"node_id": client.nodeID, "inventory": lifecycleauth.NodeInventory{Architecture: "amd64", Xray: &direct},
+				"xray_traffic": sample,
+			}, true)
+		}
+		sample := xraytraffic.Sample{Revision: issued.Sequence, Epoch: strings.Repeat("a", 64), At: time.Now().UnixMilli(),
+			Counters: map[string]xraytraffic.Bytes{"user:denied": {Up: 100, Down: 200}}}
+		expect(reportStats(sample), http.StatusBadRequest)
+		sample.Counters = map[string]xraytraffic.Bytes{"user:alice": {Up: 10, Down: 20}}
+		expect(reportStats(sample), http.StatusOK)
+		expect(reportStats(sample), http.StatusOK)
+		trafficReply := admin(http.MethodGet, nil, "")
+		expect(trafficReply, http.StatusOK)
+		if !strings.Contains(trafficReply.Body.String(), `"user:alice":{"up":10,"down":20}`) ||
+			!strings.Contains(trafficReply.Body.String(), `"user_statistics":"SAMPLED"`) ||
+			!strings.Contains(trafficReply.Body.String(), `"exact_quota":"UNSUPPORTED"`) {
+			t.Fatal("sample retry changed observed bytes or enabled exact quotas")
+		}
 		reportedTrust := func() *xrayconfig.TrojanTrust {
 			r := admin(http.MethodGet, nil, "")
 			expect(r, http.StatusOK)

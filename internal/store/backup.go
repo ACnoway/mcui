@@ -150,6 +150,9 @@ func validateSchema(db *sql.DB, version int) error {
 	if version >= 6 {
 		expectedTables["xray_clients"] = []string{"id", "payload"}
 	}
+	if version >= 7 {
+		expectedTables["xray_traffic"] = []string{"node_id", "payload"}
+	}
 	for table, expected := range expectedTables {
 		rows, err := db.Query("PRAGMA table_info(" + table + ")")
 		if err != nil {

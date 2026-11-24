@@ -24,6 +24,8 @@ Master 地址、显式私有 CA 和任务/配置验证公钥的变更通过受�
 
 支持主控多客户端入站的 Helper 在 Xray 清单中上报 `panel_multi_client`。Agent 拉取任务时通过 `xray_panel_multi_client=v1` 声明支持。主控定义草稿的密文凭据按入站端口及入站内的用户名顺序排列。单客户端草稿保持原编码。多客户端草稿只投递给声明支持的 Agent。
 
+支持受控 Xray 统计的节点报告 `panel_statistics`。启用统计的配置任务要求 Agent 声明 `xray_panel_statistics=v1`。Agent 心跳可带 `xray_traffic` 样本，样本包含生效修订号、Xray 进程实例、采样时间和各口径累计上下行字节。Master 逐次检查节点凭据、样本与生效修订的关联，以及计数标识是否属于该节点上报的入站、客户端或出站。
+
 ## 3. 通用签名编码与校验
 
 V1 **仅使用 RFC 8785 JCS + 标准 Ed25519（RFC 8032，非 Ed25519ph）**。所有签名对象是 UTF-8 JSON，最外层 `signature` 为 64 字节签名的 RFC 4648 标准 Base64，保留 `=` padding；公钥是 32 字节原始 Ed25519 公钥。待签名输入为对应 ASCII 域字符串（包含末尾单个 `\n` 字节）拼接 `UTF8(JCS(删除顶层 signature 后的完整 JSON 对象))`，无 BOM、无额外换行、无预哈希。域分别为 `MCUI-TASK-V1\n`、`MCUI-CONFIG-V1\n`、`MCUI-CANCEL-V1\n`、`MCUI-SKIP-V1\n`。签名覆盖 `schema_version`、key ID、算法及所有其他字段；验签按对象种类固定域，不接受消息指定域或算法协商。

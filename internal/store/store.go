@@ -22,7 +22,7 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const driverName = "mcui-master-sqlite"
 
@@ -240,6 +240,11 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	if current < 7 {
+		if _, err := tx.Exec(createXrayTraffic); err != nil {
+			return err
+		}
+	}
 	if current == 0 {
 		for _, query := range schemaV2 {
 			if _, err := tx.Exec(query); err != nil {
@@ -439,6 +444,10 @@ func persistState(tx *sql.Tx, state State) error {
 		if _, err := tx.Exec(`INSERT INTO nodes(id, node_group, last_seen, disabled, payload) VALUES(?, ?, ?, ?, ?)`, id, value.Group, value.LastSeen, value.Disabled, payload); err != nil {
 			return err
 		}
+	}
+	// Nodes are rewritten above. Remove samples only for nodes absent from the committed state.
+	if _, err := tx.Exec(`DELETE FROM xray_traffic WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE id = xray_traffic.node_id)`); err != nil {
+		return err
 	}
 	for _, id := range sortedKeys(state.Sessions) {
 		value := state.Sessions[id]

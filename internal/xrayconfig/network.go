@@ -143,7 +143,7 @@ type renderedRule struct {
 	OutboundTag string   `json:"outboundTag"`
 }
 
-func (n Network) render(inbounds []any, tags map[int]string, port int) ([]byte, Reference, error) {
+func (n Network) render(inbounds []any, tags map[int]string, port int, statistics bool) ([]byte, Reference, error) {
 	outbounds := []renderedOutbound{{Protocol: "blackhole", Tag: denyTag}}
 	destinations := make(map[string]Destination, len(n.Outbounds))
 	for _, outbound := range n.Outbounds {
@@ -161,11 +161,15 @@ func (n Network) render(inbounds []any, tags map[int]string, port int) ([]byte, 
 			Port: destination.Port, OutboundTag: route.OutboundTag,
 		})
 	}
-	return encodeConfiguration(map[string]any{
+	config := map[string]any{
 		"log":      map[string]string{"loglevel": "none"},
 		"inbounds": inbounds, "outbounds": outbounds,
 		"routing": map[string]any{"domainStrategy": "AsIs", "rules": rules},
-	}, port)
+	}
+	if statistics {
+		enableStatistics(config)
+	}
+	return encodeConfiguration(config, port)
 }
 
 // AppliedNetwork reconstructs the signed network draft from the committed config,

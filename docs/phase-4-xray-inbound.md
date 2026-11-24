@@ -302,7 +302,11 @@ IPAddressAllow=<批准的目标 IPv4>/32
 
 ## 用户级统计与额度
 
-面板为已安装的 Xray 显示用户流量 `UNSUPPORTED` 和精确额度禁用。受控 SOCKS5 配置沿用现有节点隔离，统计服务只在独立验证环境临时启用。
+主控定义模式支持按当前生效修订采样。先更新 Master、独立签发服务、Agent、Helper 和节点的 Xray systemd 单元。在运行中的 Debian amd64 节点打开「代理配置 → 流量」，选择「在草稿中启用统计」，预览后完成 MFA 并下发。运行时用专用组保护的 Unix socket 查询 Xray `StatsService`。面板显示入站、客户端和出站各自的上行与下行累计、采样时间及状态。
+
+主控按节点、修订和进程实例计算增量。重复采样不会增加累计。Xray 重启后累计已采集的流量并标记可能存在缺口。主控离线期间，仍可从持续运行的 Xray 读取累计计数。停用统计、启用新修订或未收到当前修订的样本时，页面显示对应状态。当前按修订保留采样累计，已采样的客户端显示 `SAMPLED`。跨修订历史、跨节点客户端合计、节点离线队列、周期重置和精确额度待实现。
+
+现有节点若仅更新 Agent/Helper 二进制，另须应用新安装器中的 Xray 网络及 Helper 单元配置，并创建专用系统组 `mcui-xray-stats`。在维护窗口重载 systemd 并重启相关单元。统计端点由 Xray 服务创建在 `/run/mcui-xray-stats/`，Helper 属于同一专用组。节点目录模式继续使用原配置。
 
 锁定版 Xray 将 SOCKS5 认证用户名写入用户计数的标识。默认 `splice` 快速转发路径在该次拷贝返回后才累加下行字节，长连接中的定时读数可能落后于已收到的流量。Go 进程重启后，原有内存计数也无法用于找回漏采的字节。 [Xray 用户映射](https://github.com/XTLS/Xray-core/blob/v26.10.31/proxy/socks/protocol.go#L133-L154) · [Xray 转发计数](https://github.com/XTLS/Xray-core/blob/v26.10.31/proxy/proxy.go#L723-L750)
 
@@ -327,7 +331,7 @@ sudo unshare --net -- bash -eu -c '
 | 禁用 `splice`，已传完但连接仍开着 | 262,147 | 1,048,583 |
 | 禁用 `splice`，关闭连接后 | 262,147 | 1,048,583 |
 
-两种模式下均验证了 Alice 与 Bob 的计数互不影响、拒绝认证不计量，以及重复查询不重置计数。重启后查询为空。禁用 `splice` 的结果仅证明这组样本的连接内读数，持久化上报和缺口恢复仍待验证。面板保持 `UNSUPPORTED`，未知用量留空。
+两种模式下均验证了 Alice 与 Bob 的计数互不影响、拒绝认证不计量，以及重复查询不重置计数。重启后查询为空。禁用 `splice` 的结果仅证明这组样本的连接内读数。当时的面板显示 `UNSUPPORTED`，未知用量留空。
 
 同一提交通过 `scripts/check-static.sh`、面板 Xray 竞态回归，以及 Master amd64/arm64 安装包构建和 SHA-256 校验。
 

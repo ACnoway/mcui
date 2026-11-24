@@ -37,14 +37,17 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 		Config: current.Config, ConfigRevision: current.Revision, PlanSupported: managed,
 	}
 	key, keyErr := r.panelKey()
+	var statsGroup uint32
 	if keyErr == nil && managed && runtime.GOARCH == xrayconfig.Architecture {
 		view.PanelKey = base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
 		view.PanelMultiClient = true
+		statsGroup, view.PanelStatistics = statisticsGroup()
 		if network, ok := r.service.(panelNetworkService); ok {
 			view.PanelTrojan = true
 			view.PanelAddresses, _ = network.panelAddresses()
 		}
-		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil && plan.Panel != nil && checkPolicyDirectory(inboundPolicyPath, current.Release) == nil {
+		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil && plan.Panel != nil &&
+			(!plan.Panel.Statistics || view.PanelStatistics) && checkPolicyDirectory(inboundPolicyPath, current.Release) == nil {
 			_, view.Candidate, _ = plan.RenderPanel(key)
 			view.Preview = xrayconfig.PlanDigest(encoded)
 		}
@@ -67,6 +70,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 	}
 	if data, err := r.savedConfig(current.Config); err == nil {
 		var config struct {
+			Stats    json.RawMessage `json:"stats"`
 			Inbounds []struct {
 				Port     int    `json:"port"`
 				Protocol string `json:"protocol"`
@@ -147,6 +151,10 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				view.Applied = &plan
 				view.AppliedNetwork = network
 				view.PanelTLS = panelTLS
+				view.StatisticsActive = view.PanelKey != "" && len(config.Stats) != 0
+				if view.StatisticsActive && view.PanelStatistics && current.Running {
+					view.Traffic = collectXrayTraffic(statsGroup, current.Revision, ports, plan, network)
+				}
 			}
 		}
 	}
