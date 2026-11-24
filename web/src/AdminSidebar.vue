@@ -19,6 +19,7 @@ const settingsItems = [
   { page: 'admins', label: '管理员', icon: '♙' },
 ] as const
 const settingsOpen = ref(false)
+const settingsToggle = ref<HTMLButtonElement | null>(null)
 const menuOpen = ref(false)
 const menuToggle = ref<HTMLButtonElement | null>(null)
 const sidebar = ref<HTMLElement | null>(null)
@@ -39,6 +40,15 @@ function closeMenu() {
   menuToggle.value?.focus()
 }
 
+function closeOnEscape() {
+  if (!settingsOpen.value) {
+    closeMenu()
+    return
+  }
+  settingsOpen.value = false
+  settingsToggle.value?.focus()
+}
+
 function navigate(page: AdminPage) {
   emit('navigate', page)
   closeMenu()
@@ -52,25 +62,32 @@ function navigate(page: AdminPage) {
       aria-controls="admin-sidebar" @click="toggleMenu" @keydown.esc.stop="closeMenu">菜单</button>
   </header>
   <button v-if="menuOpen" class="menu-backdrop" type="button" tabindex="-1" aria-label="关闭菜单" @click="closeMenu"></button>
-  <aside id="admin-sidebar" ref="sidebar" class="admin-sidebar" :class="{ 'is-open': menuOpen }" @keydown.esc.stop="closeMenu">
+  <aside id="admin-sidebar" ref="sidebar" class="admin-sidebar" :class="{ 'is-open': menuOpen }" @keydown.esc.stop="closeOnEscape">
     <div class="brand"><span class="brand-mark" aria-hidden="true">M</span><strong>MCUI</strong></div>
     <nav aria-label="面板导航" class="side-nav">
-      <button type="button" :aria-current="page === 'overview' ? 'page' : undefined" @click="navigate('overview')">
-        <span class="nav-icon" aria-hidden="true">▦</span>总览
-      </button>
-      <p class="nav-label">节点管理</p>
-      <button v-for="item in mainItems" :key="item.page" type="button"
-        :aria-current="page === item.page ? 'page' : undefined" @click="navigate(item.page)">
-        <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span>{{ item.label }}
-      </button>
+      <div class="side-primary">
+        <button class="nav-link" type="button" :aria-current="page === 'overview' ? 'page' : undefined" @click="navigate('overview')">
+          <span class="nav-icon" aria-hidden="true">▦</span>总览
+        </button>
+        <p class="nav-label">节点管理</p>
+        <button v-for="item in mainItems" :key="item.page" class="nav-link" type="button"
+          :aria-current="page === item.page ? 'page' : undefined" @click="navigate(item.page)">
+          <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span>{{ item.label }}
+        </button>
+        <div class="side-account">
+          <strong>{{ username }}</strong>
+          <button class="quiet" type="button" @click="emit('logout')">退出登录</button>
+        </div>
+      </div>
       <div class="settings-nav">
-        <button type="button" :aria-expanded="settingsOpen" aria-controls="settings-items" @click="settingsOpen = !settingsOpen">
+        <button ref="settingsToggle" class="nav-link" type="button" :aria-expanded="settingsOpen"
+          aria-controls="settings-items" @click="settingsOpen = !settingsOpen">
           <span class="nav-icon" aria-hidden="true">⚙</span>设置
-          <span class="settings-chevron" aria-hidden="true">{{ settingsOpen ? '▾' : '▸' }}</span>
+          <span class="settings-chevron" aria-hidden="true">{{ settingsOpen ? '▾' : '▴' }}</span>
         </button>
         <div v-show="settingsOpen" id="settings-items">
           <template v-for="item in settingsItems" :key="item.page">
-            <button v-if="item.page !== 'admins' || canManageAdmins" type="button"
+            <button v-if="item.page !== 'admins' || canManageAdmins" class="nav-link" type="button"
               :aria-current="page === item.page ? 'page' : undefined" @click="navigate(item.page)">
               <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span>{{ item.label }}
             </button>
@@ -78,9 +95,5 @@ function navigate(page: AdminPage) {
         </div>
       </div>
     </nav>
-    <div class="side-account">
-      <strong>{{ username }}</strong>
-      <button class="quiet" type="button" @click="emit('logout')">退出登录</button>
-    </div>
   </aside>
 </template>

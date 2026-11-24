@@ -120,6 +120,7 @@ const shareUser = ref('')
 const sharePort = ref<number | ''>('')
 const shareQrFirst = ref(false)
 const shareTab = ref<'subscription' | 'node'>('subscription')
+const selectedConfigCore = ref<'' | 'xray'>('')
 const draftTab = ref<'inbound' | 'outbound' | 'routing'>('inbound')
 const previewOpen = ref(false)
 const coreDrawer = ref(false)
@@ -218,6 +219,7 @@ const nodeCounts = computed(() => {
   return counts
 })
 const canReadCore = computed(() => !!admin.value?.can_manage_xray)
+const installedXrayVersion = computed(() => panelXray.value?.current.version ?? '')
 const subscriptionRows = computed(() => xraySubscriptions.value.filter(row =>
   row.username.includes(subscriptionSearch.value.trim().toLowerCase()) &&
   (!subscriptionFilter.value || subscriptionStatus(row) === subscriptionFilter.value),
@@ -452,6 +454,8 @@ function selectNode(id: string) {
   nodeReads.abort()
   nodeReads = new AbortController()
   selectedNodeID.value = id
+  selectedConfigCore.value = ''
+  draftTab.value = 'inbound'
   tasks.value = []
   taskError.value = ''
   xrayInstalls.value = []
@@ -486,6 +490,11 @@ function changeSelectedNode(event: Event) {
 
 function openCore(node: NodeRecord) {
   if (switchNode(node.id)) coreDrawer.value = true
+}
+
+function openCoreInstallation(node: NodeRecord) {
+  openNodeList('')
+  openCore(node)
 }
 
 function shareNode(node: NodeRecord) {
@@ -769,6 +778,10 @@ async function loadPanelXray(nodeID: string, { background = false, savedPlan }: 
         draftConflict.value = true
       }
       panelXray.value = options
+      if (!options.current.version) {
+        selectedConfigCore.value = ''
+        previewOpen.value = false
+      }
       panelXrayReadError.value = ''
       coreSummaries.value[nodeID] = options.current
     }
@@ -1099,7 +1112,7 @@ watch(page, next => {
 })
 
 watch([page, selectedNodeID, coreDrawer], ([next, id, drawer]) => {
-  if (!id && ['config', 'subscriptions', 'tasks'].includes(next)) {
+  if (!id && (next === 'subscriptions' || next === 'tasks')) {
     selectNode((nodes.value.find(node => !node.disabled && !node.pending) ?? nodes.value[0])?.id ?? '')
     return
   }
@@ -1180,7 +1193,21 @@ onMounted(async () => {
           <button class="outline" type="button" :disabled="nodesLoading" @click="refreshNodes">{{ nodesLoading ? '刷新中…' : '刷新节点' }}</button>
           <button v-if="page === 'nodes' && admin?.can_create_nodes" type="button" @click="addNodeOpen = true">添加节点</button>
         </div>
-        <label v-if="['config', 'subscriptions', 'tasks'].includes(page)" class="node-select">当前节点
+        <div v-if="page === 'config'" class="actions config-selectors">
+          <label class="node-select">Agent
+            <select :value="selectedNodeID" :disabled="!canReadCore" @change="changeSelectedNode">
+              <option value="" disabled>请选择 Agent</option>
+              <option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }} · {{ node.group }}</option>
+            </select>
+          </label>
+          <label class="node-select">Core 类型
+            <select v-model="selectedConfigCore" :disabled="!canReadCore || !selectedNode || selectedNode.pending || selectedNode.disabled || !installedXrayVersion || !!panelXrayReadError">
+              <option value="" disabled>请选择 Core 类型</option>
+              <option v-if="installedXrayVersion && !panelXrayReadError" value="xray">Xray {{ installedXrayVersion }}</option>
+            </select>
+          </label>
+        </div>
+        <label v-else-if="page === 'subscriptions' || page === 'tasks'" class="node-select">当前节点
           <select :value="selectedNodeID" @change="changeSelectedNode">
             <option v-if="!selectedNodeID" value="" disabled>请选择节点</option>
             <option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }} · {{ node.group }}</option>
@@ -1247,10 +1274,21 @@ onMounted(async () => {
 
       <section v-else-if="page === 'config'" class="card page-stack">
         <p v-if="!admin?.can_manage_xray" class="empty">当前账号没有代理配置权限。</p>
-        <p v-else-if="!selectedNode" class="empty">添加节点或从页头选择节点。</p>
+        <p v-else-if="!selectedNode" class="empty">请先从页头选择 Agent。</p>
+        <p v-else-if="selectedNode.disabled" class="empty">此 Agent 已禁用。</p>
+        <p v-else-if="selectedNode.pending" class="empty">此 Agent 尚未接入。请先在节点管理中完成接入。</p>
+        <div v-else-if="panelXrayReadError" class="empty">
+          <p role="alert">无法读取此 Agent 的 Core 安装状态。{{ panelXrayReadError }}</p>
+          <button type="button" class="outline" @click="loadPanelXray(selectedNode.id)">重试读取 Core</button>
+        </div>
+        <p v-else-if="!panelXray" class="empty" role="status">正在读取 Agent 上报的 Core 安装状态…</p>
+        <div v-else-if="!installedXrayVersion" class="empty">
+          <p>此 Agent 尚未安装可配置的 Core。请前往节点管理安装。</p>
+          <button type="button" @click="openCoreInstallation(selectedNode)">前往节点管理安装 Core</button>
+        </div>
+        <p v-else-if="selectedConfigCore !== 'xray'" class="empty">请选择已安装的 Core 类型后进行配置。</p>
         <template v-else>
           <div class="context-bar">
-            <span>Core <strong>Xray {{ panelXray?.current.version ?? '' }}</strong></span>
             <span v-if="panelXray?.current.config_revision">{{ appliedConfigVerified ? '已生效修订' : '节点上报修订' }} <strong>{{ panelXray.current.config_revision }}</strong></span>
             <span v-else>暂无生效修订</span>
             <span class="status idle">{{ draftStatus }}</span>
@@ -1260,7 +1298,7 @@ onMounted(async () => {
             <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
             <button type="button" :aria-pressed="draftTab === 'routing'" @click="draftTab = 'routing'">路由</button>
           </div>
-          <p v-if="panelXrayReadError || panelXrayError" class="notice" role="alert">{{ panelXrayError || panelXrayReadError }}</p>
+          <p v-if="panelXrayError" class="notice" role="alert">{{ panelXrayError }}</p>
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
           <template v-if="draftTab === 'inbound'">
             <div v-if="panelXray?.current.catalog && draftPorts.length" class="table-wrap">
