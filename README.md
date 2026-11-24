@@ -17,7 +17,9 @@ The Master can be built as a systemd installer or a Compose image with local acc
 
 Phase 3 adds the official Core release catalog, a backup cache, signed Xray lifecycle tasks, and paired Agent/Helper updates with rollback. A single administrator can select a verified Xray version and queue a task through a dedicated signer. A single Master supports the remote workflows with Cloudflare NTS and an optional independent rollback checkpoint. Phase 4 starts with an opt-in SOCKS5 template for Xray `v26.10.31` on Linux amd64. The node administrator approves listening ports and provisions credentials. The panel assigns users to those ports and approves the node-rendered configuration digest. [Xray signing](docs/phase-3-approval.md) · [Controlled SOCKS5 inbound](docs/phase-4-xray-inbound.md) · [Production release](docs/phase-3-release.md#生产发布验收)
 
-Administrators can issue and revoke client subscription links for an applied SOCKS5 revision. The browser generates an Xray client configuration from that user's approved loopback ports and their node-issued password. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
+The panel opens on the node overview. Use the node list for Agent enrollment and Core lifecycle operations, and open Proxy Configuration to edit and deploy approved Xray inbound grants. Settings contains the audit log, Core releases, task history, and administrator management. [Frontend design](docs/frontend-design.md)
+
+Administrators can issue, rotate, and revoke subscriptions for an applied Xray revision. The panel provides copy and QR actions for freshly issued links. The subscription page downloads an Xray client configuration from the user's approved endpoints and node-issued credentials. General outbound and routing editing, persistent access to issued links, and per-inbound share links are pending backend support. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
 
 ## Development checks
 

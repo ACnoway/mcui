@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import AdminSidebar, { type AdminPage } from './AdminSidebar.vue'
+import LinkActions from './LinkActions.vue'
+import PanelDialog from './PanelDialog.vue'
 import { xrayProtocolName, type XrayProtocol, type XrayPublicEndpoint } from './xraySubscription'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; pending: boolean }
@@ -44,7 +47,7 @@ type XrayInstall = {
   proposal: {
     task_id: string; node_id: string; sequence: number; operation: XrayOperation
     version: string; architecture: string; sha256: string; manifest_version?: number
-    current_version?: string; current_sha256?: string; requester_id: string; expires_at: number
+    current_version?: string; current_sha256?: string; requester_id: string; expires_at: number; config?: XrayConfigReference
   }
   status: 'AWAITING_SIGNATURE' | 'SIGNED_TASK_VERIFIED' | 'EXPIRED' | 'LEGACY'
 }
@@ -62,7 +65,8 @@ const code = ref('')
 const nodes = ref<NodeRecord[]>([])
 const audits = ref<Audit[]>([])
 const tasks = ref<StatusTask[]>([])
-const statusTasks = computed(() => tasks.value.filter(task => task.operation === 'core.status'))
+const latestCoreTask = computed(() => tasks.value.find(task => task.core === 'xray' && task.operation.startsWith('core.') && task.operation !== 'core.status'))
+const latestApplyTask = computed(() => tasks.value.find(task => task.operation === 'config.apply'))
 const xrayInstalls = ref<XrayInstall[]>([])
 const runtimeUpdates = ref<RuntimeUpdate[]>([])
 const runtimeUpdateBusy = ref(false)
@@ -95,17 +99,37 @@ const xrayInstallError = ref('')
 const xrayInstallStatus = { AWAITING_SIGNATURE: '待签发', SIGNED_TASK_VERIFIED: '已核验签发任务', EXPIRED: '已过期', LEGACY: '旧版记录' }
 let xrayInstallRetry: { intent: string; id: string } | undefined
 const panelXray = ref<PanelXrayOptions | null>(null)
-const panelXrayOperation = ref<XrayOperation>('core.install')
+const panelXrayOperation = ref<CoreXrayOperation>('core.install')
 const panelXrayVersion = ref('')
 const panelXrayError = ref('')
+const panelXrayReadError = ref('')
 const panelXraySubmitting = ref(false)
 const xrayDraft = ref<XrayInbound[]>([])
 const xrayDraftSaving = ref(false)
+const draftConflict = ref(false)
 const xraySubscriptions = ref<XraySubscriptionRow[]>([])
 const xraySubscriptionLink = ref<{ username: string; url: string; expiresAt: number } | null>(null)
 const xraySubscriptionBusy = ref(false)
 const xraySubscriptionError = ref('')
-const xraySubscriptionCopied = ref(false)
+const subscriptionsLoading = ref(false)
+const subscriptionNotice = ref('')
+const subscriptionSearch = ref('')
+const subscriptionFilter = ref('')
+const shareOpen = ref(false)
+const shareUser = ref('')
+const sharePort = ref<number | ''>('')
+const shareQrFirst = ref(false)
+const shareTab = ref<'subscription' | 'node'>('subscription')
+const draftTab = ref<'inbound' | 'outbound' | 'routing'>('inbound')
+const previewOpen = ref(false)
+const coreDrawer = ref(false)
+const addNodeOpen = ref(false)
+const page = ref<AdminPage>('overview')
+const pageTitle: Record<AdminPage, string> = {
+  overview: '总览', nodes: '节点列表', config: '代理配置', subscriptions: '客户端订阅',
+  audit: '审计日志', versions: 'Core 版本', tasks: '任务', admins: '管理员',
+}
+const now = ref(Date.now())
 const xrayDraftDirty = computed(() => JSON.stringify(xrayDraft.value) !== JSON.stringify(panelXray.value?.draft ?? []))
 const xrayDraftPolicyChanged = computed(() => xrayDraft.value.some(inbound =>
   panelXray.value?.current.catalog?.ports.includes(inbound.port) &&
@@ -118,11 +142,11 @@ const draftPorts = computed(() => [...new Set([
   ...xrayDraft.value.map(inbound => inbound.port),
 ])].sort((left, right) => left - right))
 let panelXrayRetry: { intent: string; id: string } | undefined
-const panelXrayOperations = computed<XrayOperation[]>(() => {
+const panelXrayOperations = computed<CoreXrayOperation[]>(() => {
   if (!panelXray.value?.current.version) return ['core.install']
-  const operations: XrayOperation[] = ['core.start', 'core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
-  if (panelXray.value.config_ready) operations.push('config.apply')
-  return operations
+  return panelXray.value.current.running
+    ? ['core.stop', 'core.upgrade', 'core.downgrade', 'core.uninstall']
+    : ['core.start', 'core.upgrade', 'core.downgrade', 'core.uninstall']
 })
 const panelXrayUsesArtifact = computed(() => ['core.install', 'core.upgrade', 'core.downgrade'].includes(panelXrayOperation.value))
 const panelXrayVersions = computed(() => {
@@ -151,6 +175,7 @@ const coreBackupError = ref('')
 const managedAdmins = ref<ManagedAdmin[]>([])
 const error = ref('')
 const loading = ref(false)
+const nodesLoading = ref(false)
 const loggedIn = ref(false)
 const newNodeName = ref('')
 const newNodeGroup = ref('default')
@@ -165,11 +190,76 @@ const bootstrapTOTP = ref('')
 const firstLoginSecret = ref('')
 const firstLoginPassword = ref('')
 const admin = ref<AdminInfo | null>(null)
-const selectedNode = ref<NodeRecord | null>(null)
-watch(() => selectedNode.value?.id, () => {
-  xraySubscriptions.value = []
-  xraySubscriptionLink.value = null
-  xraySubscriptionError.value = ''
+const selectedNodeID = ref('')
+const selectedNode = computed(() => nodes.value.find(node => node.id === selectedNodeID.value))
+let nodeReads = new AbortController()
+let inventoryRequest = 0
+let tasksRequest = 0
+const taskError = ref('')
+const auditError = ref('')
+const adminsError = ref('')
+const nodeGroup = ref('')
+const nodeStatusFilter = ref('')
+const nodePage = ref(1)
+const nodePageSize = 8
+const coreSummaries = ref<Record<string, { version: string; running: boolean } | 'loading' | 'unknown'>>({})
+const nodeGroups = computed(() => [...new Set(nodes.value.map(node => node.group))].sort())
+const filteredNodes = computed(() => nodes.value.filter(node =>
+  (!nodeGroup.value || node.group === nodeGroup.value) && (!nodeStatusFilter.value || nodeStatus(node) === nodeStatusFilter.value),
+).sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)))
+const nodePageCount = computed(() => Math.max(1, Math.ceil(filteredNodes.value.length / nodePageSize)))
+const visibleNodes = computed(() => filteredNodes.value.slice((nodePage.value - 1) * nodePageSize, nodePage.value * nodePageSize))
+const overviewStatuses = ['在线', '离线', '待接入'] as const
+const nodeCounts = computed(() => {
+  const counts = { 在线: 0, 离线: 0, 待接入: 0, 已禁用: 0 }
+  for (const node of nodes.value) counts[nodeStatus(node)]++
+  return counts
+})
+const canReadCore = computed(() => !!admin.value?.can_manage_xray)
+const subscriptionRows = computed(() => xraySubscriptions.value.filter(row =>
+  row.username.includes(subscriptionSearch.value.trim().toLowerCase()) &&
+  (!subscriptionFilter.value || subscriptionStatus(row) === subscriptionFilter.value),
+))
+const activeShareRow = computed(() => xraySubscriptions.value.find(row => row.username === shareUser.value))
+const subscriptionInbounds = computed(() => panelXray.value?.current.applied ?? [])
+const shareInbounds = computed(() => subscriptionInbounds.value.filter(inbound => inbound.users.includes(shareUser.value)))
+const shareLink = computed(() => {
+  const link = xraySubscriptionLink.value
+  return activeShareRow.value && link?.username === activeShareRow.value.username && hasShareLink(activeShareRow.value) ? link : null
+})
+const canApplyXrayDraft = computed(() => {
+  const options = panelXray.value
+  return !!options?.config_ready && !panelXrayReadError.value && !draftConflict.value &&
+    !xrayDraftSaving.value && !panelXraySubmitting.value &&
+    (!options.current.catalog || (!xrayDraftDirty.value && !xrayDraftPolicyChanged.value))
+})
+const appliedConfigVerified = computed(() => {
+  const current = panelXray.value?.current
+  const task = tasks.value.find(item => item.operation === 'config.apply' && item.sequence === current?.config_revision)
+  if (task?.status !== 'SUCCEEDED' || !current?.config) return false
+  const proposal = xrayInstalls.value.find(item => item.proposal.task_id === task.task_id)?.proposal
+  return !proposal?.config || proposal.config.sha256 === current.config.sha256
+})
+const latestApplyVerified = computed(() => appliedConfigVerified.value &&
+  latestApplyTask.value?.sequence === panelXray.value?.current.config_revision)
+const inboundChanges = computed(() => {
+  const applied = panelXray.value?.current.applied ?? []
+  const draft = panelXray.value?.draft ?? []
+  const ports = [...new Set([...applied, ...draft].map(inbound => inbound.port))].sort((a, b) => a - b)
+  return ports.map(port => ({
+    port, before: applied.find(inbound => inbound.port === port), after: draft.find(inbound => inbound.port === port),
+  })).filter(change => JSON.stringify(change.before) !== JSON.stringify(change.after))
+})
+const draftStatus = computed(() => {
+  const options = panelXray.value
+  if (!options) return '状态不可用'
+  if (draftConflict.value) return '主控草稿已更新'
+  if (xrayDraftDirty.value || xrayDraftPolicyChanged.value) return '有未保存修改'
+  if (options.config_ready) return '预览完成，可下发'
+  if (options.draft_previewed && !options.current.candidate) return '草稿未通过节点策略校验'
+  if (options.draft !== null && !options.draft_previewed) return '等待节点预览'
+  if (options.draft_previewed) return '节点已预览，暂无可下发变更'
+  return '暂无草稿'
 })
 const statusCore = ref('xray')
 const newAdminUsername = ref('')
@@ -199,16 +289,45 @@ async function apiWithStepUp<T>(path: string, body: Record<string, unknown>): Pr
     return api<T>(path, { method: 'POST', body: JSON.stringify({ ...body, mfa_code: code }) })
   }
 }
-async function refresh() {
-  const adminRequest = admin.value?.can_manage_admins ? api<ManagedAdmin[]>('/api/v1/admin/admins') : Promise.resolve([] as ManagedAdmin[])
-  const [nodeData, auditData, adminData] = await Promise.all([api<NodeRecord[]>('/api/v1/admin/nodes'), api<Audit[]>('/api/v1/admin/audit'), adminRequest])
-  nodes.value = nodeData
-  audits.value = auditData.slice(-100).reverse()
-  managedAdmins.value = adminData
-  await Promise.all([loadCoreCatalog(), loadCoreBackups()])
-  if (selectedNode.value) {
-    selectedNode.value = nodeData.find(node => node.id === selectedNode.value?.id) ?? null
-    if (selectedNode.value) await refreshNodeTasks(selectedNode.value.id)
+async function refreshNodes() {
+  if (nodesLoading.value) return
+  nodesLoading.value = true
+  error.value = ''
+  const account = admin.value
+  try {
+    const records = await api<NodeRecord[]>('/api/v1/admin/nodes')
+    if (admin.value !== account) return
+    nodes.value = records
+    if (!selectedNode.value) selectNode('')
+    coreSummaries.value = {}
+    void loadVisibleCore()
+  } catch (cause) {
+    if (admin.value === account) error.value = cause instanceof Error ? cause.message : '读取节点失败'
+  } finally {
+    nodesLoading.value = false
+  }
+}
+
+async function loadAudit() {
+  auditError.value = ''
+  const account = admin.value
+  try {
+    const records = await api<Audit[]>('/api/v1/admin/audit')
+    if (admin.value === account) audits.value = records.slice(-100).reverse()
+  } catch (cause) {
+    if (admin.value === account) auditError.value = cause instanceof Error ? cause.message : '读取审计失败'
+  }
+}
+
+async function loadAdmins() {
+  adminsError.value = ''
+  const account = admin.value
+  if (!account?.can_manage_admins) return
+  try {
+    const records = await api<ManagedAdmin[]>('/api/v1/admin/admins')
+    if (admin.value === account) managedAdmins.value = records
+  } catch (cause) {
+    if (admin.value === account) adminsError.value = cause instanceof Error ? cause.message : '读取管理员失败'
   }
 }
 async function loadCoreBackups() {
@@ -262,7 +381,7 @@ async function login() {
     loggedIn.value = true
     password.value = ''
     code.value = ''
-    await refresh()
+    await refreshNodes()
   } catch (e) {
     error.value = e instanceof Error ? e.message : '登录失败'
   } finally {
@@ -307,10 +426,154 @@ async function bootstrap() {
 function nodeStatus(node: NodeRecord) {
   if (node.disabled) return '已禁用'
   if (node.pending) return '待接入'
-  return Date.now() / 1000 - node.last_seen < 60 ? '在线' : '离线'
+  return now.value / 1000 - node.last_seen < 60 ? '在线' : '离线'
+}
+
+function openPage(next: AdminPage, node?: NodeRecord) {
+  if (node && !switchNode(node.id)) return
+  error.value = ''
+  page.value = next
+  if (next !== 'nodes') installCommand.value = null
+  if (next !== 'admins') createdTOTP.value = ''
+  if (next !== 'subscriptions') shareOpen.value = false
+}
+
+function openNodeList(status: string) {
+  nodeGroup.value = ''
+  nodeStatusFilter.value = status
+  openPage('nodes')
+}
+
+function selectNode(id: string) {
+  if (selectedNodeID.value === id) return
+  nodeReads.abort()
+  nodeReads = new AbortController()
+  selectedNodeID.value = id
+  tasks.value = []
+  taskError.value = ''
+  xrayInstalls.value = []
+  xrayInstallError.value = ''
+  runtimeUpdates.value = []
+  runtimeUpdateError.value = ''
+  panelXray.value = null
+  panelXrayError.value = ''
+  panelXrayReadError.value = ''
+  xrayDraft.value = []
+  draftConflict.value = false
+  previewOpen.value = false
+  xraySubscriptions.value = []
+  xraySubscriptionLink.value = null
+  xraySubscriptionError.value = ''
+  subscriptionNotice.value = ''
+  subscriptionsLoading.value = false
+  shareOpen.value = false
+  shareUser.value = ''
+}
+
+function switchNode(id: string) {
+  if (selectedNodeID.value !== id && xrayDraftDirty.value && !confirm('放弃未保存的入站修改并切换节点？')) return false
+  selectNode(id)
+  return true
+}
+
+function changeSelectedNode(event: Event) {
+  const select = event.target as HTMLSelectElement
+  if (!switchNode(select.value)) select.value = selectedNodeID.value
+}
+
+function openCore(node: NodeRecord) {
+  if (switchNode(node.id)) coreDrawer.value = true
+}
+
+function shareNode(node: NodeRecord) {
+  if (!switchNode(node.id)) return
+  openPage('subscriptions')
+  openShare()
+}
+
+function coreSummary(node: NodeRecord) {
+  const summary = coreSummaries.value[node.id]
+  if (!canReadCore.value || node.disabled || node.pending) return '—'
+  if (summary === 'loading') return '读取中…'
+  if (!summary || summary === 'unknown') return '状态不可用'
+  if (!summary.version) return '未安装'
+  const reported = nodeStatus(node) === '离线' ? '上次上报 ' : ''
+  return `${reported}Xray ${summary.version} · ${summary.running ? '运行中' : '已停止'}`
+}
+
+async function loadVisibleCore() {
+  if (!canReadCore.value || page.value !== 'nodes' || !loggedIn.value) return
+  const summaries = coreSummaries.value
+  const account = admin.value
+  await Promise.all(visibleNodes.value.map(async node => {
+    if (nodeStatus(node) !== '在线' || summaries[node.id]) return
+    summaries[node.id] = 'loading'
+    try {
+      const options = await api<PanelXrayOptions>(panelXrayPath(node.id))
+      if (admin.value === account && summaries[node.id] === 'loading') summaries[node.id] = options.current
+    } catch {
+      if (summaries[node.id] === 'loading') summaries[node.id] = 'unknown'
+    }
+  }))
+}
+
+function subscriptionStatus(row: XraySubscriptionRow) {
+  if (!row.expires_at) return '无有效链接'
+  if (row.expires_at * 1000 <= now.value) return '已过期'
+  return row.active ? '有效' : '暂不可用'
+}
+
+function hasShareLink(row: XraySubscriptionRow) {
+  const link = xraySubscriptionLink.value
+  return subscriptionStatus(row) === '有效' && link?.username === row.username && link.expiresAt === row.expires_at
+}
+
+function openShare(user = '', showQr = false) {
+  shareUser.value = user || (xraySubscriptionLink.value?.username ?? xraySubscriptions.value[0]?.username ?? '')
+  shareTab.value = 'subscription'
+  shareQrFirst.value = showQr
+  shareOpen.value = true
+}
+
+async function copyIssuedLink(row: XraySubscriptionRow) {
+  const link = xraySubscriptionLink.value
+  if (!link || !hasShareLink(row)) return
+  try {
+    await navigator.clipboard.writeText(link.url)
+    if (xraySubscriptionLink.value === link) subscriptionNotice.value = '已复制订阅链接。'
+  } catch {
+    if (xraySubscriptionLink.value === link) openShare(row.username)
+  }
+}
+
+function taskStatus(task: StatusTask) {
+  const labels: Record<string, string> = {
+    QUEUED: '待投递', DELIVERED: '已投递', RUNNING: '执行中', SUCCEEDED: '执行成功',
+    FAILED: '执行失败', ROLLED_BACK: '已回滚', NEEDS_RECONCILIATION: '待对账', EXPIRED: '已过期',
+  }
+  return labels[task.status] ?? task.status
+}
+
+function operationLabel(operation: string) {
+  if (operation === 'core.status') return '只读状态查询'
+  return xrayOperationLabel[operation as XrayOperation] ?? operation
+}
+
+function discardDraft() {
+  xrayDraft.value = copyXrayDraft(panelXray.value?.draft ?? null)
+  draftConflict.value = false
+  panelXrayError.value = ''
+}
+
+async function openPreview() {
+  if (!selectedNode.value) return
+  previewOpen.value = true
+  await refreshNodeTasks(selectedNode.value.id)
 }
 
 async function createNode() {
+  if (loading.value) return
+  loading.value = true
   error.value = ''
   try {
     const node = await api<NodeRecord>('/api/v1/admin/nodes', {
@@ -319,8 +582,11 @@ async function createNode() {
     })
     nodes.value.push(node)
     newNodeName.value = ''
+    addNodeOpen.value = false
   } catch (e) {
     error.value = e instanceof Error ? e.message : '添加节点失败'
+  } finally {
+    loading.value = false
   }
 }
 
@@ -331,7 +597,7 @@ async function generateInstallCommand(node: NodeRecord) {
   generatingCommand.value = true
   try {
     const result = await apiWithStepUp<{ command: string; expires_at: number }>('/api/v1/admin/nodes/' + encodeURIComponent(node.id) + '/install-command', {})
-    if (loggedIn.value) installCommand.value = { node, ...result }
+    if (loggedIn.value && page.value === 'nodes') installCommand.value = { node, ...result }
   } catch (e) {
     error.value = e instanceof Error ? e.message : '生成安装命令失败'
   } finally {
@@ -351,7 +617,7 @@ async function copyInstallCommand() {
 
 async function disableNode(id: string) {
   if (!confirm('确认禁用该节点？')) return
-  try { await apiWithStepUp('/api/v1/admin/nodes/disable', { node_id: id }); if (installCommand.value?.node.id === id) installCommand.value = null; await refresh() }
+  try { await apiWithStepUp('/api/v1/admin/nodes/disable', { node_id: id }); if (installCommand.value?.node.id === id) installCommand.value = null; await refreshNodes() }
   catch (e) { error.value = e instanceof Error ? e.message : '禁用失败' }
 }
 function splitScope(value: string) { return [...new Set(value.split(/[\s,]+/).map((part) => part.trim()).filter(Boolean))] }
@@ -366,76 +632,111 @@ async function createAdmin() {
     })
     createdTOTP.value = result.totp_secret
     newAdminUsername.value = ''; newAdminPassword.value = ''; newAdminGroups.value = ''; newAdminNodeIDs.value = ''
-    await refresh()
+    await loadAdmins()
   } catch (e) { error.value = e instanceof Error ? e.message : '创建管理员失败' }
 }
 async function disableAdmin(id: string) {
   if (!confirm('确认禁用该管理员并撤销其全部会话？')) return
-  try { await apiWithStepUp('/api/v1/admin/admins/disable', { admin_id: id }); await refresh() }
+  try { await apiWithStepUp('/api/v1/admin/admins/disable', { admin_id: id }); await loadAdmins() }
   catch (e) { error.value = e instanceof Error ? e.message : '禁用管理员失败' }
 }
-async function loadTasks(nodeID: string) { try { tasks.value = await api<StatusTask[]>(`/api/v1/admin/tasks?node_id=${encodeURIComponent(nodeID)}`) } catch (e) { tasks.value = []; error.value = e instanceof Error ? e.message : '读取任务失败' } }
+async function loadTasks(nodeID: string) {
+  const { signal } = nodeReads
+  const request = ++tasksRequest
+  try {
+    const records = await api<StatusTask[]>(`/api/v1/admin/tasks?node_id=${encodeURIComponent(nodeID)}`, { signal })
+    if (!signal.aborted && request === tasksRequest && selectedNodeID.value === nodeID) {
+      tasks.value = records
+      taskError.value = ''
+    }
+  } catch (e) {
+    if (!signal.aborted && request === tasksRequest && selectedNodeID.value === nodeID) {
+      taskError.value = e instanceof Error ? e.message : '读取任务失败'
+    }
+  }
+}
 async function loadXrayInstalls(nodeID: string) {
   if (!admin.value?.can_prepare_xray_installs && !admin.value?.can_manage_xray) return
+  const { signal } = nodeReads
   xrayInstallError.value = ''
   try {
-    const records = await api<XrayInstall[]>(`/api/v1/admin/xray-installs?node_id=${encodeURIComponent(nodeID)}`)
-    if (selectedNode.value?.id === nodeID) xrayInstalls.value = records
+    const records = await api<XrayInstall[]>(`/api/v1/admin/xray-installs?node_id=${encodeURIComponent(nodeID)}`, { signal })
+    if (!signal.aborted && selectedNodeID.value === nodeID) xrayInstalls.value = records
   } catch (e) {
-    if (selectedNode.value?.id !== nodeID) return
+    if (signal.aborted || selectedNodeID.value !== nodeID) return
     xrayInstalls.value = []
     xrayInstallError.value = e instanceof Error ? e.message : '读取 Xray 操作提案失败'
   }
 }
-async function refreshNodeTasks(nodeID: string) {
-  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadPanelXray(nodeID), loadRuntimeUpdates(nodeID), loadXraySubscriptions(nodeID)])
+async function refreshNodeTasks(nodeID: string, background = false) {
+  if (selectedNodeID.value !== nodeID) return
+  await Promise.all([loadTasks(nodeID), loadXrayInstalls(nodeID), loadPanelXray(nodeID, { background })])
 }
-async function showNode(id: string) { try { selectedNode.value = await api<NodeRecord>(`/api/v1/admin/nodes/${encodeURIComponent(id)}`); xrayInstalls.value = []; panelXray.value = null; runtimeUpdates.value = []; await refreshNodeTasks(id) } catch (e) { error.value = e instanceof Error ? e.message : '读取节点失败' } }
 
 function panelXrayPath(nodeID: string) {
   return `/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/xray`
 }
 
 async function loadXraySubscriptions(nodeID: string) {
-  if (!admin.value?.can_manage_xray) return
+  if (!admin.value?.can_manage_xray || subscriptionsLoading.value) return
+  const { signal } = nodeReads
+  subscriptionsLoading.value = true
   try {
-    const rows = await api<XraySubscriptionRow[]>(panelXrayPath(nodeID) + '/subscriptions')
-    if (selectedNode.value?.id !== nodeID) return
+    const rows = await api<XraySubscriptionRow[]>(panelXrayPath(nodeID) + '/subscriptions', { signal })
+    if (signal.aborted || selectedNodeID.value !== nodeID) return
     xraySubscriptions.value = rows
-    if (!rows.some(row => row.active && row.username === xraySubscriptionLink.value?.username)) {
+    const link = xraySubscriptionLink.value
+    if (link && (link.expiresAt * 1000 <= now.value || !rows.some(row =>
+      row.username === link.username && row.expires_at === link.expiresAt,
+    ))) {
       xraySubscriptionLink.value = null
     }
     xraySubscriptionError.value = ''
   } catch (cause) {
-    if (selectedNode.value?.id !== nodeID) return
-    xraySubscriptions.value = []
-    xraySubscriptionLink.value = null
+    if (signal.aborted || selectedNodeID.value !== nodeID) return
+    if (cause instanceof ApiError && [401, 403, 404].includes(cause.status)) {
+      xraySubscriptions.value = []
+      xraySubscriptionLink.value = null
+    }
     xraySubscriptionError.value = cause instanceof Error ? cause.message : '读取订阅失败。'
+  } finally {
+    if (!signal.aborted) subscriptionsLoading.value = false
   }
+}
+
+async function refreshSubscriptions() {
+  const id = selectedNodeID.value
+  if (id) await Promise.all([loadPanelXray(id), loadXraySubscriptions(id)])
 }
 
 async function changeXraySubscription(row: XraySubscriptionRow, action: 'issue' | 'revoke') {
   const nodeID = selectedNode.value?.id
-  if (!nodeID || xraySubscriptionBusy.value) return
+  if (!nodeID || xraySubscriptionBusy.value || subscriptionsLoading.value) return
   if (action === 'revoke' && !confirm(`撤销 ${row.username} 的订阅链接？`)) return
   if (action === 'issue' && row.active && !confirm(`轮换 ${row.username} 的订阅链接？旧链接会立即失效。`)) return
+  const { signal } = nodeReads
   xraySubscriptionBusy.value = true
   xraySubscriptionError.value = ''
-  xraySubscriptionLink.value = null
-  xraySubscriptionCopied.value = false
   try {
     const issued = await apiWithStepUp<{ token?: string; expires_at?: number }>(
       panelXrayPath(nodeID) + '/subscriptions', { action, username: row.username },
     )
-    if (selectedNode.value?.id !== nodeID) return
+    if (signal.aborted || selectedNodeID.value !== nodeID) return
+    if (xraySubscriptionLink.value?.username === row.username) xraySubscriptionLink.value = null
     if (issued.token && issued.expires_at) {
       const link = new URL('/subscription', window.location.origin)
       link.hash = issued.token
       xraySubscriptionLink.value = { username: row.username, url: link.href, expiresAt: issued.expires_at }
+      row.active = true
+      row.expires_at = issued.expires_at
+      openShare(row.username)
+    } else if (action === 'revoke') {
+      row.active = false
+      row.expires_at = undefined
     }
     await loadXraySubscriptions(nodeID)
   } catch (cause) {
-    if (selectedNode.value?.id === nodeID) {
+    if (!signal.aborted && selectedNodeID.value === nodeID) {
       xraySubscriptionError.value = cause instanceof Error ? cause.message : '更新订阅失败。'
     }
   } finally {
@@ -443,36 +744,35 @@ async function changeXraySubscription(row: XraySubscriptionRow, action: 'issue' 
   }
 }
 
-async function copyXraySubscription() {
-  const link = xraySubscriptionLink.value
-  if (!link) return
-  try {
-    await navigator.clipboard.writeText(link.url)
-    if (xraySubscriptionLink.value === link) xraySubscriptionCopied.value = true
-  } catch {
-    xraySubscriptionError.value = '无法访问剪贴板，请手动复制链接。'
-  }
-}
-
-async function loadPanelXray(nodeID: string) {
+async function loadPanelXray(nodeID: string, { background = false, savedPlan }: {
+  background?: boolean; savedPlan?: XrayInbound[]
+} = {}) {
   if (!admin.value?.can_manage_xray) return
-  panelXrayError.value = ''
+  const { signal } = nodeReads
+  const request = ++inventoryRequest
+  if (!background && !panelXraySubmitting.value && !xrayDraftSaving.value) panelXrayError.value = ''
   if (selectedNode.value?.disabled || selectedNode.value?.pending) {
     panelXray.value = null
     return
   }
   try {
-    const options = await api<PanelXrayOptions>(panelXrayPath(nodeID))
-    if (selectedNode.value?.id === nodeID) {
-      if (!panelXray.value || JSON.stringify(options.draft) !== JSON.stringify(panelXray.value.draft)) {
+    const options = await api<PanelXrayOptions>(panelXrayPath(nodeID), { signal })
+    if (!signal.aborted && request === inventoryRequest && selectedNodeID.value === nodeID) {
+      const savedDraftChanged = !panelXray.value || JSON.stringify(options.draft) !== JSON.stringify(panelXray.value.draft)
+      const savedByThisPage = savedPlan && JSON.stringify(options.draft) === JSON.stringify(savedPlan)
+      if (savedDraftChanged && (!xrayDraftDirty.value || savedByThisPage)) {
         xrayDraft.value = copyXrayDraft(options.draft)
+      } else if (savedDraftChanged) {
+        draftConflict.value = true
       }
       panelXray.value = options
+      panelXrayReadError.value = ''
+      coreSummaries.value[nodeID] = options.current
     }
   } catch (e) {
-    if (selectedNode.value?.id !== nodeID) return
-    panelXray.value = null
-    panelXrayError.value = e instanceof Error ? e.message : '读取节点 Xray 状态失败'
+    if (signal.aborted || request !== inventoryRequest || selectedNodeID.value !== nodeID) return
+    coreSummaries.value[nodeID] = 'unknown'
+    panelXrayReadError.value = e instanceof Error ? e.message : '读取节点 Xray 状态失败'
   }
 }
 
@@ -545,7 +845,8 @@ function toggleDraftUser(port: number, user: string) {
 async function saveXrayDraft() {
   const node = selectedNode.value
   const options = panelXray.value
-  if (!node || !options?.current.catalog || xrayDraftSaving.value) return
+  if (!node || !options?.current.catalog || xrayDraftSaving.value || panelXrayReadError.value || draftConflict.value) return
+  const { signal } = nodeReads
   const { ports } = options.current.catalog
   const plan = xrayDraft.value.map(inbound => ports.includes(inbound.port) ? {
     port: inbound.port, protocol: approvedProtocol(inbound.port), tls_cert_sha256: approvedTLSCert(inbound.port),
@@ -555,20 +856,20 @@ async function saveXrayDraft() {
   panelXrayError.value = ''
   try {
     await api(panelXrayPath(node.id) + '/draft', { method: 'PUT', body: JSON.stringify({ state: options.state, plan }) })
-    if (selectedNode.value?.id === node.id) await loadPanelXray(node.id)
+    if (!signal.aborted && selectedNodeID.value === node.id) await loadPanelXray(node.id, { savedPlan: plan })
   } catch (e) {
-    if (selectedNode.value?.id === node.id) panelXrayError.value = e instanceof Error ? e.message : '保存入站草稿失败'
+    if (!signal.aborted && selectedNodeID.value === node.id) panelXrayError.value = e instanceof Error ? e.message : '保存入站草稿失败'
   } finally {
     xrayDraftSaving.value = false
   }
 }
 
-async function submitPanelXray() {
+async function submitPanelXray(operation: XrayOperation = panelXrayOperation.value) {
   const node = selectedNode.value
   const options = panelXray.value
-  if (!node || !options || panelXraySubmitting.value) return
-  const operation = panelXrayOperation.value
-  if (operation === 'config.apply' && (!options.config_ready || (options.current.catalog && (xrayDraftDirty.value || xrayDraftPolicyChanged.value || xrayDraftSaving.value)))) return
+  if (!node || !options || panelXraySubmitting.value || panelXrayReadError.value) return
+  if (operation === 'config.apply' && !canApplyXrayDraft.value) return
+  const { signal } = nodeReads
   const version = operation === 'config.apply' ? options.current.version : panelXrayUsesArtifact.value ? panelXrayVersion.value : ''
   const dangerous = operation === 'core.downgrade' || operation === 'core.uninstall' || operation === 'config.apply'
   const replacesConfig = version !== '' && panelXrayUsesArtifact.value && !!options.current.config
@@ -585,11 +886,15 @@ async function submitPanelXray() {
   panelXraySubmitting.value = true
   panelXrayError.value = ''
   try {
-    await apiWithStepUp<StatusTask>(panelXrayPath(node.id), { ...fields, task_id: panelXrayRetry.id })
+    const task = await apiWithStepUp<StatusTask>(panelXrayPath(node.id), { ...fields, task_id: panelXrayRetry.id })
     panelXrayRetry = undefined
-    if (selectedNode.value?.id === node.id) await refreshNodeTasks(node.id)
+    if (!signal.aborted && selectedNodeID.value === node.id) {
+      tasks.value = [task, ...tasks.value.filter(record => record.task_id !== task.task_id)]
+      previewOpen.value = false
+      await refreshNodeTasks(node.id)
+    }
   } catch (e) {
-    if (selectedNode.value?.id === node.id) panelXrayError.value = e instanceof Error ? e.message : '提交 Xray 任务失败'
+    if (!signal.aborted && selectedNodeID.value === node.id) panelXrayError.value = e instanceof Error ? e.message : '提交 Xray 任务失败'
   } finally {
     panelXraySubmitting.value = false
   }
@@ -735,12 +1040,13 @@ async function dispatchXrayInstall(install: XrayInstall) {
   }
 }
 async function createStatusTask() {
-  if (!selectedNode.value) return
+  const nodeID = selectedNodeID.value
+  if (!nodeID) return
   error.value = ''
   try {
     const requestID = crypto.randomUUID().replaceAll('-', '')
-    await api<StatusTask>('/api/v1/admin/tasks', { method: 'POST', body: JSON.stringify({ request_id: requestID, node_id: selectedNode.value.id, core: statusCore.value }) })
-    await loadTasks(selectedNode.value.id)
+    await api<StatusTask>('/api/v1/admin/tasks', { method: 'POST', body: JSON.stringify({ request_id: requestID, node_id: nodeID, core: statusCore.value }) })
+    if (selectedNodeID.value === nodeID) await loadTasks(nodeID)
   } catch (e) { error.value = e instanceof Error ? e.message : '创建状态查询失败' }
 }
 async function controlStatusTask(task: StatusTask, action: 'cancel' | 'skip' | 'void') {
@@ -752,16 +1058,75 @@ async function controlStatusTask(task: StatusTask, action: 'cancel' | 'skip' | '
   try {
     const requestID = crypto.randomUUID().replaceAll('-', '')
     await api<StatusTask>(`/api/v1/admin/tasks/${encodeURIComponent(task.task_id)}/${action}`, { method: 'POST', body: JSON.stringify({ request_id: requestID }) })
-    if (selectedNode.value) await loadTasks(selectedNode.value.id)
+    if (selectedNodeID.value === task.node_id) await loadTasks(task.node_id)
   } catch (e) { error.value = e instanceof Error ? e.message : action === 'cancel' ? '取消任务失败' : action === 'void' ? '关闭未投递任务失败' : '跳过任务失败' }
 }
-async function logout() { try { await api('/api/v1/admin/logout', { method: 'POST', body: '{}' }) } finally { csrfToken = ''; admin.value = null; selectedNode.value = null; loggedIn.value = false; nodes.value = []; audits.value = []; tasks.value = []; xrayInstalls.value = []; xrayInstallRetry = undefined; managedAdmins.value = []; createdTOTP.value = ''; installCommand.value = null } }
+async function logout() {
+  try {
+    await api('/api/v1/admin/logout', { method: 'POST', body: '{}' })
+  } finally {
+    csrfToken = ''
+    admin.value = null
+    loggedIn.value = false
+    selectNode('')
+    page.value = 'overview'
+    coreDrawer.value = false
+    addNodeOpen.value = false
+    nodes.value = []
+    coreSummaries.value = {}
+    audits.value = []
+    managedAdmins.value = []
+    xrayInstallRetry = undefined
+    panelXrayRetry = undefined
+    createdTOTP.value = ''
+    installCommand.value = null
+  }
+}
+
+watch([nodeGroup, nodeStatusFilter], () => { nodePage.value = 1 })
+watch(shareUser, () => { sharePort.value = '' })
+watch(nodePageCount, count => { nodePage.value = Math.min(nodePage.value, count) })
+watch([page, loggedIn, () => visibleNodes.value.map(node => node.id + ':' + node.last_seen).join(',')], loadVisibleCore)
+
+watch(page, next => {
+  if (next === 'audit') void loadAudit()
+  if (next === 'versions') void Promise.all([loadCoreCatalog(), loadCoreBackups()])
+  if (next === 'admins') void loadAdmins()
+})
+
+watch([page, selectedNodeID, coreDrawer], ([next, id, drawer]) => {
+  if (!id && ['config', 'subscriptions', 'tasks'].includes(next)) {
+    selectNode((nodes.value.find(node => !node.disabled && !node.pending) ?? nodes.value[0])?.id ?? '')
+    return
+  }
+  if (!id) return
+  if (drawer || next === 'config') void refreshNodeTasks(id)
+  if (next === 'subscriptions') void refreshSubscriptions()
+  if (next === 'tasks') void Promise.all([loadTasks(id), loadRuntimeUpdates(id)])
+})
+
+const refreshTimer = window.setInterval(() => {
+  now.value = Date.now()
+  const id = selectedNodeID.value
+  if (!id || document.hidden || panelXraySubmitting.value || xrayDraftSaving.value) return
+  const awaitingCore = coreDrawer.value && latestCoreTask.value?.active
+  const awaitingConfig = page.value === 'config' && latestApplyTask.value &&
+    (latestApplyTask.value.active || (latestApplyTask.value.status === 'SUCCEEDED' && !latestApplyVerified.value &&
+      now.value - Date.parse(latestApplyTask.value.issued_at) < 120_000))
+  if (awaitingCore || awaitingConfig) void refreshNodeTasks(id, true)
+}, 8_000)
+
+onUnmounted(() => {
+  window.clearInterval(refreshTimer)
+  nodeReads.abort()
+})
+
 onMounted(async () => {
   try {
     admin.value = await api<AdminInfo>('/api/v1/admin/me')
     csrfToken = admin.value.csrf_token
-    await refresh()
     loggedIn.value = true
+    await refreshNodes()
   } catch {
     loggedIn.value = false
     try {
@@ -774,10 +1139,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="shell">
-    <header class="topbar"><div><span class="eyebrow">MCUI / CONTROL PLANE</span><h1>节点管理</h1></div><button v-if="loggedIn" class="quiet" @click="logout">退出登录</button></header>
-    <p v-if="error" class="notice">{{ error }}</p>
-    <section v-if="!loggedIn" class="auth-grid">
+  <main v-if="!loggedIn" class="shell auth-shell">
+    <header class="brand auth-brand"><span class="brand-mark" aria-hidden="true">M</span><h1>MCUI</h1></header>
+    <p v-if="error" class="notice" role="status">{{ error }}</p>
+    <section class="auth-grid">
       <form v-if="firstLoginSecret" class="card" @submit.prevent="completeFirstLogin">
         <h2>设置管理员密码和 MFA</h2>
         <label>新密码（至少 12 位）<input v-model="firstLoginPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required /></label>
@@ -795,94 +1160,332 @@ onMounted(async () => {
       </form>
       <form v-if="manualBootstrap && !firstLoginSecret" class="card secondary" @submit.prevent="bootstrap"><h2>初始化安全管理员</h2><label>初始化令牌<input v-model="bootstrapToken" type="password" required /></label><label>用户名<input v-model="bootstrapUser" required /></label><label>密码（至少 12 位）<input v-model="bootstrapPassword" type="password" minlength="12" required /></label><label>TOTP 密钥（Base32）<input v-model="bootstrapTOTP" autocomplete="off" required /></label><button class="outline" :disabled="loading">创建管理员</button></form>
     </section>
-    <template v-else>
-      <section class="metrics"><div class="metric"><span>登记节点</span><strong>{{ nodes.length }}</strong></div><div class="metric"><span>在线心跳</span><strong>{{ nodes.filter(n => nodeStatus(n) === '在线').length }}</strong></div><div class="metric"><span>当前阶段</span><strong>03 / CORE LIFECYCLE</strong></div><div class="metric"><span>当前账号</span><strong>{{ admin?.role }}</strong></div></section>
-      <section class="card core-catalog"><div class="section-head"><div><span class="eyebrow">MASTER BACKUP ARTIFACTS</span><h2>主控备用制品</h2></div><button class="outline" @click="loadCoreBackups">刷新状态</button></div><p>主控从官方 Releases 同步每种 Core 最新稳定版的 amd64/arm64 制品，每种 Core 只保留一版。远程 Xray 安装优先访问官方源。官方源不可用时，只有与签名清单完全匹配的缓存才能用于安装。</p><p v-if="coreBackupError" class="catalog-error">{{ coreBackupError }}</p><p v-if="coreBackups?.updated_at" class="catalog-stale">最近更新：{{ new Date(coreBackups.updated_at).toLocaleString() }}</p><div v-if="coreBackups?.cores.length" class="release-list"><article v-for="core in coreBackups.cores" :key="core.id" class="release-row"><div class="release-heading"><div><strong>{{ core.name }} {{ core.version }}</strong><small>{{ core.repository }} · 缓存于 {{ new Date(core.cached_at).toLocaleString() }}</small></div><a :href="core.release_url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><div v-for="asset in core.assets" :key="asset.architecture" class="release-asset"><span>{{ asset.architecture }} · {{ asset.name }}</span><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest }}</small></div></article></div><div v-else-if="!coreBackupError" class="empty">主控尚未缓存备用制品；后台会在启动后从官方源同步。</div></section>
-      <section class="card core-catalog"><div class="section-head"><div><span class="eyebrow">OFFICIAL RELEASE CATALOG</span><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="refreshCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases，每页 10 个、最多浏览最近 100 个版本。此目录用于发现版本。面板安装可选版本来自已验签的 Xray 发布清单。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div><button v-if="selectedCoreCatalog?.has_more" class="outline load-older" :disabled="coreCatalogLoading" @click="loadOlderCoreReleases">{{ coreCatalogLoading ? '读取中…' : '加载较早版本' }}</button></div></div></section>
-      <section class="card">
-        <div class="section-head">
-          <h2>节点管理</h2>
-          <button @click="refresh">刷新</button>
+  </main>
+
+  <div v-else class="admin-layout">
+    <AdminSidebar :page="page" :username="admin?.username ?? ''" :can-manage-admins="!!admin?.can_manage_admins"
+      @navigate="openPage" @logout="logout" />
+    <main class="admin-main">
+      <header class="page-header section-head">
+        <h1>{{ pageTitle[page] }}</h1>
+        <div v-if="page === 'overview' || page === 'nodes'" class="actions">
+          <button class="outline" type="button" :disabled="nodesLoading" @click="refreshNodes">{{ nodesLoading ? '刷新中…' : '刷新节点' }}</button>
+          <button v-if="page === 'nodes' && admin?.can_create_nodes" type="button" @click="addNodeOpen = true">添加节点</button>
         </div>
-        <form v-if="admin?.can_create_nodes" class="node-row" @submit.prevent="createNode">
-          <label>节点名称<input v-model="newNodeName" maxlength="64" required /></label>
-          <label>节点分组<input v-model="newNodeGroup" maxlength="64" required /></label>
-          <button>添加节点</button>
-        </form>
-        <div v-if="!nodes.length" class="empty">暂无节点。</div>
-        <div v-for="node in nodes" :key="node.id" class="node-row">
-          <div class="node-avatar">{{ node.name.slice(0,1).toUpperCase() }}</div>
-          <div class="node-main"><strong>{{ node.name }}</strong><span>{{ node.id }} · {{ node.group }}</span></div>
-          <span class="status" :class="node.disabled ? 'off' : nodeStatus(node) === '在线' ? 'on' : 'idle'">{{ nodeStatus(node) }}</span>
-          <button class="outline" @click="showNode(node.id)">详情</button>
-          <button v-if="admin?.can_install_agents && !node.disabled" class="outline" :disabled="generatingCommand" @click="generateInstallCommand(node)">生成安装命令</button>
-          <button v-if="admin?.can_disable_nodes && !node.disabled" class="danger" @click="disableNode(node.id)">禁用</button>
-        </div>
-        <div v-if="installCommand" class="install-command">
-          <label>在 {{ installCommand.node.name }} 的服务器终端执行
-            <textarea :value="installCommand.command" readonly rows="9" spellcheck="false"></textarea>
-          </label>
-          <small>一次性命令，{{ new Date(installCommand.expires_at * 1000).toLocaleTimeString() }} 过期。补发命令会使未兑换的旧命令失效。</small>
-          <div class="section-head">
-            <button @click="copyInstallCommand">{{ commandCopied ? '已复制' : '复制命令' }}</button>
-            <button class="quiet" @click="installCommand = null">关闭</button>
+        <label v-if="['config', 'subscriptions', 'tasks'].includes(page)" class="node-select">当前节点
+          <select :value="selectedNodeID" @change="changeSelectedNode">
+            <option v-if="!selectedNodeID" value="" disabled>请选择节点</option>
+            <option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }} · {{ node.group }}</option>
+          </select>
+        </label>
+      </header>
+      <p v-if="error" class="notice" role="alert">{{ error }}</p>
+
+      <template v-if="page === 'overview'">
+        <section class="metrics" aria-label="节点状态">
+          <button v-for="status in overviewStatuses" :key="status" class="metric" type="button" @click="openNodeList(status)">
+            <span :class="['status', status === '在线' ? 'on' : status === '离线' ? 'off' : 'idle']">{{ status }}</span>
+            <strong>{{ nodeCounts[status] }}</strong>
+          </button>
+        </section>
+        <section class="card overview-nodes">
+          <div>
+            <h2>节点管理</h2>
+            <p>共 {{ nodes.length }} 个节点<span v-if="nodeCounts.已禁用">，{{ nodeCounts.已禁用 }} 个已禁用</span></p>
           </div>
+          <button type="button" @click="openNodeList('')">查看节点列表</button>
+        </section>
+      </template>
+
+      <section v-else-if="page === 'nodes'" class="card">
+        <div class="filters">
+          <label>分组<select v-model="nodeGroup"><option value="">全部分组</option><option v-for="group in nodeGroups" :key="group">{{ group }}</option></select></label>
+          <label>Agent 状态<select v-model="nodeStatusFilter"><option value="">全部状态</option>
+            <option v-for="status in [...overviewStatuses, '已禁用']" :key="status">{{ status }}</option>
+          </select></label>
         </div>
-        <div v-if="selectedNode" class="audit-row">
-          <span>{{ selectedNode.name }} · {{ selectedNode.id }} · {{ selectedNode.group }} · {{ nodeStatus(selectedNode) }}
-            <template v-if="selectedNode.last_seen"> · 最近心跳 {{ new Date(selectedNode.last_seen*1000).toLocaleString() }}</template>
-          </span>
-          <button class="quiet" @click="selectedNode = null">关闭</button>
+        <div v-if="visibleNodes.length" class="table-wrap">
+          <table class="data-table" aria-label="节点列表">
+            <thead><tr><th scope="col">节点</th><th scope="col">分组</th><th scope="col">Agent</th><th scope="col">Core</th><th scope="col">操作</th></tr></thead>
+            <tbody>
+              <tr v-for="node in visibleNodes" :key="node.id">
+                <th scope="row"><strong>{{ node.name }}</strong><small class="mono">{{ node.id }}</small></th>
+                <td>{{ node.group }}</td>
+                <td>
+                  <span :class="['status', nodeStatus(node) === '在线' ? 'on' : nodeStatus(node) === '待接入' ? 'idle' : 'off']">{{ nodeStatus(node) }}</span>
+                  <small v-if="node.last_seen">{{ new Date(node.last_seen * 1000).toLocaleString() }}</small>
+                </td>
+                <td>{{ coreSummary(node) }}</td>
+                <td><div class="actions">
+                  <button v-if="admin?.can_manage_xray || admin?.can_prepare_xray_installs" type="button" class="outline" @click="openCore(node)">管理 Core</button>
+                  <button v-if="admin?.can_manage_xray && !node.disabled" type="button" class="quiet" @click="openPage('config', node)">代理配置</button>
+                  <button v-if="admin?.can_manage_xray && !node.disabled" type="button" class="quiet" @click="shareNode(node)">分享</button>
+                  <button v-if="admin?.can_install_agents && !node.disabled" type="button" class="quiet"
+                    :disabled="generatingCommand" @click="generateInstallCommand(node)">生成安装命令</button>
+                  <button v-if="admin?.can_disable_nodes && !node.disabled" type="button" class="danger" @click="disableNode(node.id)">禁用</button>
+                </div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="empty">{{ nodesLoading ? '正在读取节点…' : nodes.length ? '没有符合筛选条件的节点。' : '暂无节点。' }}</p>
+        <div v-if="nodePageCount > 1" class="pager actions">
+          <button type="button" class="outline" :disabled="nodePage === 1" @click="nodePage--">上一页</button>
+          <span>{{ nodePage }} / {{ nodePageCount }}</span>
+          <button type="button" class="outline" :disabled="nodePage === nodePageCount" @click="nodePage++">下一页</button>
         </div>
       </section>
-      <section v-if="selectedNode" class="card"><div class="section-head"><div><span class="eyebrow">SIGNED STATUS TASKS</span><h2>只读状态查询</h2></div><button class="outline" @click="loadTasks(selectedNode.id)">刷新任务</button></div><div class="node-row"><label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label><button @click="createStatusTask">签发查询任务</button></div><div v-if="!statusTasks.length" class="empty">暂无任务；查询任务只读取固定 Core 服务状态。</div><div v-for="task in statusTasks" :key="task.task_id" class="audit-row task-row"><div><strong>{{ task.core }} · #{{ task.sequence }}</strong><span>{{ task.task_id }} · {{ task.created_at ? new Date(task.created_at).toLocaleString() : new Date(task.issued_at).toLocaleString() }}</span><small>来源：{{ task.created_by || '审计记录可查' }} · 审批：无需单独审批 · 步骤：{{ task.operation }}</small><small v-if="task.control">控制消息：{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small></div><span class="status" :class="task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off'">{{ task.status }}</span><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() < Date.parse(task.expires_at) && task.control !== 'cancel'" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button><button v-if="task.active && task.status === 'QUEUED' && !task.lease_deadline && !task.control && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button><button v-if="task.active && (admin?.role === 'security_admin' || admin?.role === 'operator') && Date.now() >= Date.parse(task.expires_at) && task.control !== 'skip'" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button><div v-for="ack in task.acks" :key="ack.status_version" class="task-ack"><small>{{ ack.status_version }} · {{ ack.status }}</small><small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small><small v-if="ack.result?.error_code">失败代码：{{ ack.result.error_code }}</small></div></div></section>
-      <section v-if="selectedNode && admin?.can_manage_xray" class="card">
-        <div class="section-head">
-          <h2>Xray 远程管理</h2>
-          <button class="outline" @click="refreshNodeTasks(selectedNode.id)">刷新状态和任务</button>
-        </div>
-        <p v-if="selectedNode.disabled || selectedNode.pending">节点上线后可管理 Xray。</p>
-        <p v-if="panelXray">节点架构 {{ panelXray.architecture }} · {{ panelXray.current.version || '未安装' }}</p>
-        <div v-if="panelXray?.current.version && panelXray.usage">
-          <p v-if="panelXray.usage.user_statistics === 'UNSUPPORTED'">
-            用户流量 <code>UNSUPPORTED</code> · {{ panelXray.usage.reason === 'accounting_incomplete' ? '计量无法覆盖连接中和重启前的全部流量' : '当前配置尚未验证用户级计量' }}
-          </p>
-          <p v-if="panelXray.usage.exact_quota === 'UNSUPPORTED'">精确额度已禁用。</p>
-        </div>
-        <p v-if="panelXray?.current.config">
-          已应用修订 {{ panelXray.current.config_revision }}
-          <template v-if="!panelXray.current.applied"> · 参考端口 {{ panelXray.current.config.port }}</template>
-          · SHA-256 <code>{{ panelXray.current.config.sha256 }}</code>
-        </p>
-        <ul v-if="panelXray?.current.applied?.length">
-          <li v-for="inbound in panelXray.current.applied" :key="inbound.port">{{ endpointLabel(inbound.public_endpoint, inbound.port) }} · {{ inboundProtocolLabel(inbound.protocol) }} · {{ inbound.users.join('、') }}</li>
-        </ul>
-        <p v-else-if="panelXray?.current.applied">当前没有已授权入站。</p>
-        <div v-if="panelXray?.current.catalog" class="xray-draft">
-          <h3>入站授权草稿</h3>
-          <fieldset v-for="port in draftPorts" :key="port" :disabled="xrayDraftSaving || panelXraySubmitting">
-            <legend>{{ endpointLabel(approvedPublicEndpoint(port), port) }} · {{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '端口已移出节点目录' }}</legend>
-            <p v-if="approvedTLSCert(port)">TLS 证书 SHA-256 <code>{{ approvedTLSCert(port) }}</code></p>
-            <p v-if="approvedRealityKey(port)">REALITY 公钥 <code>{{ approvedRealityKey(port) }}</code></p>
-            <label v-for="user in draftUsers(port)" :key="user">
-              <input type="checkbox" :checked="draftHasUser(port, user)"
-                :disabled="!draftHasUser(port, user) && !approvedUsers(port).includes(user)"
-                @change="toggleDraftUser(port, user)" />
-              {{ user }}
-            </label>
-            <p v-if="!draftUsers(port).length">节点尚未登记此协议的用户凭据。</p>
-          </fieldset>
+
+      <section v-else-if="page === 'config'" class="card page-stack">
+        <p v-if="!admin?.can_manage_xray" class="empty">当前账号没有代理配置权限。</p>
+        <p v-else-if="!selectedNode" class="empty">添加节点或从页头选择节点。</p>
+        <template v-else>
+          <div class="context-bar">
+            <span>Core <strong>Xray {{ panelXray?.current.version ?? '' }}</strong></span>
+            <span v-if="panelXray?.current.config_revision">{{ appliedConfigVerified ? '已生效修订' : '节点上报修订' }} <strong>{{ panelXray.current.config_revision }}</strong></span>
+            <span v-else>暂无生效修订</span>
+            <span class="status idle">{{ draftStatus }}</span>
+          </div>
+          <div class="tabs" role="group" aria-label="代理配置类型">
+            <button type="button" :aria-pressed="draftTab === 'inbound'" @click="draftTab = 'inbound'">入站</button>
+            <button type="button" :aria-pressed="draftTab === 'outbound'" @click="draftTab = 'outbound'">出站</button>
+            <button type="button" :aria-pressed="draftTab === 'routing'" @click="draftTab = 'routing'">路由</button>
+          </div>
+          <p v-if="panelXrayReadError || panelXrayError" class="notice" role="alert">{{ panelXrayError || panelXrayReadError }}</p>
+          <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
+          <template v-if="draftTab === 'inbound'">
+            <div v-if="panelXray?.current.catalog && draftPorts.length" class="table-wrap">
+              <table class="data-table inbound-table" aria-label="入站授权草稿">
+                <thead><tr><th scope="col">入站</th><th scope="col">协议</th><th scope="col">监听及接入端口</th><th scope="col">用户授权</th></tr></thead>
+                <tbody>
+                  <tr v-for="port in draftPorts" :key="port">
+                    <th scope="row">入站 {{ port }}</th>
+                    <td>{{ panelXray.current.catalog.ports.includes(port) ? inboundProtocolLabel(approvedProtocol(port)) : '已移出节点目录' }}</td>
+                    <td><span>{{ port }}</span><small>{{ endpointLabel(approvedPublicEndpoint(port), port) }}</small></td>
+                    <td>
+                      <details>
+                        <summary>{{ xrayDraft.find(inbound => inbound.port === port)?.users.join('、') || '未授权' }} · 查看与编辑</summary>
+                        <fieldset class="inbound-users" :disabled="xrayDraftSaving || panelXraySubmitting || !!panelXrayReadError || draftConflict">
+                          <legend class="sr-only">入站 {{ port }} 用户授权</legend>
+                          <p v-if="approvedTLSCert(port)">TLS 证书 SHA-256 <code>{{ approvedTLSCert(port) }}</code></p>
+                          <p v-if="approvedRealityKey(port)">REALITY 公钥 <code>{{ approvedRealityKey(port) }}</code></p>
+                          <label v-for="user in draftUsers(port)" :key="user">
+                            <input type="checkbox" :checked="draftHasUser(port, user)"
+                              :disabled="!draftHasUser(port, user) && !approvedUsers(port).includes(user)"
+                              @change="toggleDraftUser(port, user)" />{{ user }}
+                          </label>
+                          <p v-if="!draftUsers(port).length">节点尚未登记此协议的凭据。</p>
+                        </fieldset>
+                      </details>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-else class="empty">{{ panelXray ? '节点尚未上报面板可管理的入站目录。' : '等待节点上报 Xray 状态。' }}</p>
+            <div v-if="panelXray?.current.config" class="revision-summary">
+              <strong>节点当前配置</strong>
+              <code>{{ panelXray.current.config.sha256 }}</code>
+              <ul v-if="panelXray.current.applied?.length">
+                <li v-for="inbound in panelXray.current.applied" :key="inbound.port">
+                  {{ endpointLabel(inbound.public_endpoint, inbound.port) }} · {{ inboundProtocolLabel(inbound.protocol) }} · {{ inbound.users.join('、') }}
+                </li>
+              </ul>
+              <span v-else>{{ panelXray.current.applied ? '无已授权入站' : endpointLabel(undefined, panelXray.current.config.port) }}</span>
+            </div>
+          </template>
+          <div v-else class="empty">
+            <strong>{{ draftTab === 'outbound' ? '出站管理待接入' : '路由管理待接入' }}</strong>
+            <p>{{ draftTab === 'outbound' ? '待节点策略和接口支持后，可编辑出站、查看默认出站及路由引用。' : '待节点策略和接口支持后，可编辑匹配条件、目标出站和规则顺序。' }}</p>
+          </div>
           <p v-if="xrayDraftPolicyChanged">节点批准的端口、接入地址或服务端身份有变化。核对后重新保存草稿。</p>
-          <p v-else-if="panelXray.draft_previewed && panelXray.current.candidate">节点已预览草稿 · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
-          <p v-else-if="panelXray.draft_previewed" class="error">节点策略拒绝了此草稿。请更新授权后重新保存。</p>
-          <p v-else-if="panelXray.draft">等待节点预览。可在节点心跳后刷新状态。</p>
-          <button class="outline" :disabled="xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && !xrayDraftPolicyChanged && panelXray.draft !== null)" @click="saveXrayDraft">保存草稿</button>
-          <button v-if="xrayDraftDirty" class="quiet" :disabled="xrayDraftSaving" @click="xrayDraft = copyXrayDraft(panelXray.draft)">放弃未保存修改</button>
+          <p v-if="latestApplyTask" role="status">最近下发 #{{ latestApplyTask.sequence }} · {{ taskStatus(latestApplyTask) }}
+            <template v-if="latestApplyTask.status === 'SUCCEEDED' && !latestApplyVerified">，等待节点上报对应修订</template>
+          </p>
+          <div class="actions">
+            <button type="button" class="outline" :disabled="!panelXray?.current.catalog || !!panelXrayReadError || draftConflict || xrayDraftSaving || panelXraySubmitting || (!xrayDraftDirty && !xrayDraftPolicyChanged && panelXray.draft !== null)"
+              @click="saveXrayDraft">{{ xrayDraftSaving ? '保存中…' : '保存草稿' }}</button>
+            <button type="button" class="outline" :disabled="!panelXray || xrayDraftDirty || draftConflict" @click="openPreview">预览变更</button>
+            <button type="button" :disabled="!canApplyXrayDraft" @click="openPreview">下发配置</button>
+            <button type="button" class="quiet" @click="refreshNodeTasks(selectedNode.id)">刷新状态</button>
+            <button v-if="xrayDraftDirty || draftConflict" type="button" class="quiet" :disabled="xrayDraftSaving" @click="discardDraft">放弃未保存修改</button>
+          </div>
+        </template>
+      </section>
+
+      <section v-else-if="page === 'subscriptions'" class="card">
+        <p v-if="!admin?.can_manage_xray" class="empty">当前账号没有客户端订阅管理权限。</p>
+        <p v-else-if="!selectedNode" class="empty">添加节点或从页头选择节点。</p>
+        <template v-else>
+          <div class="filters">
+            <label>用户名<input v-model="subscriptionSearch" type="search" placeholder="搜索用户名" /></label>
+            <label>订阅状态<select v-model="subscriptionFilter">
+              <option value="">全部状态</option>
+              <option v-for="status in ['有效', '无有效链接', '已过期', '暂不可用']" :key="status">{{ status }}</option>
+            </select></label>
+            <button type="button" class="outline" :disabled="subscriptionsLoading || xraySubscriptionBusy"
+              @click="refreshSubscriptions">刷新订阅</button>
+          </div>
+          <p v-if="xraySubscriptionError" class="notice" role="alert">{{ xraySubscriptionError }}</p>
+          <p v-if="subscriptionNotice" class="feedback" role="status">{{ subscriptionNotice }}</p>
+          <div v-if="subscriptionRows.length" class="table-wrap">
+            <table class="data-table" aria-label="客户端订阅">
+              <thead><tr><th scope="col">客户端</th><th scope="col">已授权入站</th><th scope="col">订阅状态</th><th scope="col">到期时间</th><th scope="col">操作</th></tr></thead>
+              <tbody>
+                <tr v-for="row in subscriptionRows" :key="row.username">
+                  <th scope="row"><button type="button" class="text-button" @click="openShare(row.username)">{{ row.username }}</button></th>
+                  <td>{{ subscriptionInbounds.filter(inbound => inbound.users.includes(row.username)).map(inbound => inbound.port).join('、') || '—' }}</td>
+                  <td><span :class="['status', subscriptionStatus(row) === '有效' ? 'on' : 'idle']">{{ subscriptionStatus(row) }}</span></td>
+                  <td>{{ row.expires_at ? new Date(row.expires_at * 1000).toLocaleString() : '—' }}</td>
+                  <td><div class="actions">
+                    <template v-if="hasShareLink(row)">
+                      <button type="button" class="outline" @click="copyIssuedLink(row)">复制订阅</button>
+                      <button type="button" class="outline" @click="openShare(row.username, true)">二维码</button>
+                    </template>
+                    <button v-if="row.eligible && !row.expires_at" type="button" :disabled="xraySubscriptionBusy || subscriptionsLoading"
+                      @click="changeXraySubscription(row, 'issue')">签发链接</button>
+                    <details v-else-if="row.expires_at" class="row-menu">
+                      <summary>更多</summary>
+                      <div class="actions">
+                        <button v-if="row.eligible" type="button" class="outline" :disabled="xraySubscriptionBusy || subscriptionsLoading"
+                          @click="changeXraySubscription(row, 'issue')">{{ row.active ? '轮换链接' : '重新签发' }}</button>
+                        <button type="button" class="danger" :disabled="xraySubscriptionBusy || subscriptionsLoading"
+                          @click="changeXraySubscription(row, 'revoke')">撤销</button>
+                      </div>
+                    </details>
+                  </div></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="empty">{{ subscriptionsLoading ? '正在读取订阅…' : xraySubscriptions.length ? '没有符合筛选条件的客户端。' : '节点报告已生效的用户授权后可签发订阅。' }}</p>
+        </template>
+      </section>
+
+      <section v-else-if="page === 'audit'" class="card">
+        <div class="section-head"><h2>安全事件</h2><button type="button" class="outline" @click="loadAudit">刷新日志</button></div>
+        <p v-if="auditError" class="notice" role="alert">{{ auditError }}</p>
+        <div v-if="audits.length" class="table-wrap">
+          <table class="data-table" aria-label="审计日志">
+            <thead><tr><th scope="col">时间</th><th scope="col">操作者</th><th scope="col">操作</th><th scope="col">资源</th><th scope="col">结果</th></tr></thead>
+            <tbody><tr v-for="(event, index) in audits" :key="index">
+              <td>{{ new Date(event.at * 1000).toLocaleString() }}</td><td>{{ event.actor }}</td><td>{{ event.action }}</td><td>{{ event.resource }}</td><td>{{ event.outcome }}</td>
+            </tr></tbody>
+          </table>
         </div>
-        <p v-else-if="panelXrayOperation === 'config.apply' && panelXray?.current.candidate">
-          候选入站 127.0.0.1:{{ panelXray.current.candidate.port }} · SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code>
-        </p>
-        <form v-if="panelXray" class="node-row" @submit.prevent="submitPanelXray">
+        <p v-else-if="!auditError" class="empty">暂无事件。</p>
+      </section>
+
+      <template v-else-if="page === 'versions'">
+      <section class="card core-catalog"><div class="section-head"><div><h2>主控备用制品</h2></div><button class="outline" @click="loadCoreBackups">刷新状态</button></div><p>主控从官方 Releases 同步每种 Core 最新稳定版的 amd64/arm64 制品，每种 Core 只保留一版。远程 Xray 安装优先访问官方源。官方源不可用时，只有与签名清单完全匹配的缓存才能用于安装。</p><p v-if="coreBackupError" class="catalog-error">{{ coreBackupError }}</p><p v-if="coreBackups?.updated_at" class="catalog-stale">最近更新：{{ new Date(coreBackups.updated_at).toLocaleString() }}</p><div v-if="coreBackups?.cores.length" class="release-list"><article v-for="core in coreBackups.cores" :key="core.id" class="release-row"><div class="release-heading"><div><strong>{{ core.name }} {{ core.version }}</strong><small>{{ core.repository }} · 缓存于 {{ new Date(core.cached_at).toLocaleString() }}</small></div><a :href="core.release_url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><div v-for="asset in core.assets" :key="asset.architecture" class="release-asset"><span>{{ asset.architecture }} · {{ asset.name }}</span><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest }}</small></div></article></div><div v-else-if="!coreBackupError" class="empty">主控尚未缓存备用制品；后台会在启动后从官方源同步。</div></section>
+      <section class="card core-catalog"><div class="section-head"><div><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="refreshCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases，每页 10 个、最多浏览最近 100 个版本。此目录用于发现版本。面板安装可选版本来自已验签的 Xray 发布清单。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div><button v-if="selectedCoreCatalog?.has_more" class="outline load-older" :disabled="coreCatalogLoading" @click="loadOlderCoreReleases">{{ coreCatalogLoading ? '读取中…' : '加载较早版本' }}</button></div></div></section>
+      </template>
+
+      <template v-else-if="page === 'tasks'">
+        <section v-if="selectedNode" class="card page-stack">
+          <div class="section-head"><h2>节点任务记录</h2><button class="outline" type="button" @click="loadTasks(selectedNode.id)">刷新任务</button></div>
+          <form v-if="(admin?.role === 'security_admin' || admin?.role === 'operator') && !selectedNode.disabled && !selectedNode.pending"
+            class="filters" @submit.prevent="createStatusTask">
+            <label>Core<select v-model="statusCore"><option value="xray">Xray</option><option value="sing-box">sing-box</option><option value="mita">Mita</option></select></label>
+            <button type="submit">签发只读查询</button>
+          </form>
+          <p v-if="taskError" class="notice" role="alert">{{ taskError }}</p>
+          <div v-if="tasks.length" class="table-wrap">
+            <table class="data-table" aria-label="节点任务记录">
+              <thead><tr><th scope="col">任务</th><th scope="col">来源</th><th scope="col">状态与回执</th><th scope="col">操作</th></tr></thead>
+              <tbody>
+                <tr v-for="task in tasks" :key="task.task_id">
+                  <th scope="row">#{{ task.sequence }} · {{ operationLabel(task.operation) }}
+                    <small>{{ task.core }} · {{ new Date(task.created_at || task.issued_at).toLocaleString() }}</small>
+                    <small class="mono">{{ task.task_id }}</small>
+                  </th>
+                  <td>{{ task.created_by || '审计记录可查' }}<small>{{ task.approval }}</small></td>
+                  <td>
+                    <span :class="['status', task.status === 'SUCCEEDED' ? 'on' : task.active ? 'idle' : 'off']">{{ taskStatus(task) }}</span>
+                    <small v-if="task.control">{{ task.control === 'cancel' ? '取消待处理' : '跳过待处理' }}</small>
+                    <details v-if="task.acks?.length">
+                      <summary>执行回执</summary>
+                      <ul><li v-for="ack in task.acks" :key="ack.status_version">
+                        {{ ack.status_version }} · {{ ack.status }}
+                        <small v-if="ack.result?.active_state">{{ ack.result.active_state }} / {{ ack.result.sub_state }} · {{ ack.result.load_state }}</small>
+                        <small v-if="ack.result?.error_code">失败代码 {{ ack.result.error_code }}</small>
+                      </li></ul>
+                    </details>
+                  </td>
+                  <td><div v-if="task.operation === 'core.status' && task.active && (admin?.role === 'security_admin' || admin?.role === 'operator')" class="actions">
+                    <button v-if="now < Date.parse(task.expires_at) && task.control !== 'cancel'" type="button" class="danger" @click="controlStatusTask(task, 'cancel')">取消待处理</button>
+                    <button v-if="task.status === 'QUEUED' && !task.lease_deadline && !task.control" type="button" class="danger" @click="controlStatusTask(task, 'void')">关闭未投递任务</button>
+                    <button v-if="now >= Date.parse(task.expires_at) && task.control !== 'skip'" type="button" class="outline" @click="controlStatusTask(task, 'skip')">跳过已过期任务</button>
+                  </div></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else-if="!taskError" class="empty">暂无任务记录。</p>
+        </section>
+        <p v-else class="empty">添加节点或从页头选择节点。</p>
+      <section v-if="selectedNode && admin?.can_update_runtime" :key="selectedNode.id" class="card">
+        <div class="section-head">
+          <h2>Agent / Helper 成对更新</h2>
+          <button class="outline" @click="loadRuntimeUpdates(selectedNode.id)">刷新结果</button>
+        </div>
+        <form v-if="!selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="submitRuntimeUpdate">
+          <label v-for="field in runtimeProofFields" :key="field.name">{{ field.label }}<input :name="field.name" type="file" required /></label>
+          <button :disabled="runtimeUpdateBusy">验证签名并投递</button>
+        </form>
+        <p v-if="runtimeUpdateError" class="error" role="alert">{{ runtimeUpdateError }}</p>
+        <p v-if="!runtimeUpdates.length" class="empty">暂无成对更新记录</p>
+        <div v-for="update in runtimeUpdates" :key="update.id" class="audit-row">
+          <div>
+            <strong>{{ update.version }} · {{ update.architecture }} · #{{ update.sequence }}</strong>
+            <small v-if="update.current_pair_sha256">当前成对 SHA-256 {{ update.current_pair_sha256 }}</small>
+          </div>
+          <span>{{ runtimeUpdateStatus[update.status] }}</span>
+        </div>
+      </section>
+      </template>
+
+      <template v-else-if="page === 'admins'">
+        <p v-if="adminsError" class="notice" role="alert">{{ adminsError }}</p>
+      <section v-if="admin?.can_manage_admins" class="admin-grid">
+        <form class="card" @submit.prevent="createAdmin"><h2>开通范围账号</h2><p>仅创建节点范围受限的审计员或运维员。运维员可创建只读状态查询任务；范围不可超出当前安全管理员的授权。</p><label>用户名<input v-model="newAdminUsername" autocomplete="off" required /></label><label>初始密码（至少 12 位）<input v-model="newAdminPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label>角色<select v-model="newAdminRole"><option value="auditor">审计员</option><option value="operator">运维员（只读状态查询）</option></select></label><label>节点组范围<input v-model="newAdminGroups" placeholder="west, east" autocomplete="off" /></label><label>节点 ID 范围<input v-model="newAdminNodeIDs" placeholder="node-…" autocomplete="off" /></label><button :disabled="loading">创建范围账号</button><p v-if="createdTOTP" class="invite">一次性 TOTP 密钥：{{ createdTOTP }}<br />请通过可信渠道交给该账号持有人；此页面退出后不再显示。</p></form>
+        <section class="card"><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
+      </section>
+      </template>
+    </main>
+
+    <PanelDialog v-if="addNodeOpen" title="添加节点" @close="addNodeOpen = false">
+      <form class="stack-form" @submit.prevent="createNode">
+        <p v-if="error" class="notice" role="alert">{{ error }}</p>
+        <label>节点名称<input v-model.trim="newNodeName" name="name" required autofocus /></label>
+        <label>分组<input v-model.trim="newNodeGroup" name="group" required /></label>
+        <button type="submit" :disabled="loading">添加节点</button>
+      </form>
+    </PanelDialog>
+
+    <PanelDialog v-if="installCommand" :title="'安装 Agent · ' + installCommand.node.name" @close="installCommand = null">
+      <p v-if="error" class="notice" role="alert">{{ error }}</p>
+      <label>在节点服务器终端执行<textarea :value="installCommand.command" readonly rows="8" spellcheck="false"></textarea></label>
+      <p>一次性命令，{{ new Date(installCommand.expires_at * 1000).toLocaleString() }} 过期。补发命令会使未兑换的旧命令失效。</p>
+      <button type="button" @click="copyInstallCommand">{{ commandCopied ? '已复制' : '复制命令' }}</button>
+    </PanelDialog>
+
+    <PanelDialog v-if="coreDrawer && selectedNode" :title="'管理 Core · ' + selectedNode.name" drawer @close="coreDrawer = false">
+      <div class="page-stack">
+        <div class="context-bar">
+          <span>Agent <strong>{{ nodeStatus(selectedNode) }}</strong></span>
+          <span>Xray <strong>{{ panelXray?.current.version || (panelXray ? '未安装' : '状态不可用') }}</strong></span>
+          <span v-if="panelXray?.current.version">{{ panelXray.current.running ? '运行中' : '已停止' }}</span>
+        </div>
+        <div class="actions">
+          <button class="outline" type="button" @click="refreshNodeTasks(selectedNode.id)">刷新状态和任务</button>
+          <button class="quiet" type="button" @click="coreDrawer = false; openPage('tasks')">查看任务历史</button>
+        </div>
+        <p v-if="panelXrayReadError || panelXrayError || taskError" class="notice" role="alert">{{ panelXrayError || panelXrayReadError || taskError }}</p>
+        <p v-if="selectedNode.disabled || selectedNode.pending">节点接入且启用后可管理 Xray。</p>
+        <form v-if="admin?.can_manage_xray && panelXray && !selectedNode.disabled && !selectedNode.pending"
+          class="stack-form" @submit.prevent="submitPanelXray()">
+          <p>节点架构 {{ panelXray.architecture }}</p>
           <label>操作<select v-model="panelXrayOperation">
             <option v-for="operation in panelXrayOperations" :key="operation" :value="operation">{{ xrayOperationLabel[operation] }}</option>
           </select></label>
@@ -890,46 +1493,18 @@ onMounted(async () => {
             <option v-if="!panelXrayVersions.length" value="" disabled>暂无可用版本</option>
             <option v-for="version in panelXrayVersions" :key="version" :value="version">{{ version }}</option>
           </select></label>
-          <button :disabled="panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion) || (panelXrayOperation === 'config.apply' && !!panelXray.current.catalog && (xrayDraftDirty || xrayDraftPolicyChanged || xrayDraftSaving))">提交任务</button>
+          <button type="submit" :disabled="!!panelXrayReadError || panelXraySubmitting || (panelXrayUsesArtifact && !panelXrayVersion)">
+            {{ panelXraySubmitting ? '提交中…' : '提交任务' }}
+          </button>
         </form>
-        <p v-if="panelXrayError || xrayInstallError" class="error" role="alert">{{ panelXrayError || xrayInstallError }}</p>
-        <div v-for="install in xrayInstalls" :key="install.proposal.task_id" class="audit-row">
-          <div>
-            <strong>#{{ install.proposal.sequence }} · {{ xrayOperationLabel[install.proposal.operation] }} Xray {{ install.proposal.version }}</strong>
-            <span v-if="xrayTask(install.proposal.task_id)">{{ xrayTaskResult(install) }}</span>
-            <span v-else>{{ xrayInstallStatus[install.status] }}</span>
-          </div>
+        <div v-if="admin?.can_manage_xray" class="revision-summary" role="status">
+          <strong>最近一次 Core 操作</strong>
+          <p v-if="latestCoreTask">#{{ latestCoreTask.sequence }} · {{ operationLabel(latestCoreTask.operation) }} · {{ taskStatus(latestCoreTask) }}</p>
+          <p v-else>暂无操作记录。</p>
         </div>
-        <section class="subscription-manager" aria-label="Xray 客户端订阅">
-          <h3>客户端订阅</h3>
-          <p v-if="!xraySubscriptions.length && !xraySubscriptionError">节点报告已生效的用户授权后可签发订阅。</p>
-          <div v-for="row in xraySubscriptions" :key="row.username" class="node-row">
-            <div class="node-main">
-              <strong>{{ row.username }}</strong>
-              <span v-if="row.active">{{ row.expires_at ? new Date(row.expires_at * 1000).toLocaleString() : '' }} 到期</span>
-              <span v-else>{{ row.expires_at ? '当前不可拉取' : '尚未签发' }}</span>
-            </div>
-            <button v-if="row.eligible" class="outline" :disabled="xraySubscriptionBusy" @click="changeXraySubscription(row, 'issue')">
-              {{ row.active ? '轮换链接' : '签发链接' }}
-            </button>
-            <button v-if="row.expires_at" class="danger" :disabled="xraySubscriptionBusy" @click="changeXraySubscription(row, 'revoke')">撤销</button>
-          </div>
-          <div v-if="xraySubscriptionLink" class="install-command">
-            <label>{{ xraySubscriptionLink.username }} 的订阅链接
-              <input :value="xraySubscriptionLink.url" readonly spellcheck="false" autocomplete="off" />
-            </label>
-            <p>链接只显示一次。{{ new Date(xraySubscriptionLink.expiresAt * 1000).toLocaleString() }} 到期。</p>
-            <div class="section-head">
-              <button @click="copyXraySubscription">{{ xraySubscriptionCopied ? '已复制' : '复制链接' }}</button>
-              <button class="quiet" @click="xraySubscriptionLink = null">关闭</button>
-            </div>
-          </div>
-          <p v-if="xraySubscriptionError" class="error" role="alert">{{ xraySubscriptionError }}</p>
-        </section>
-      </section>
       <section v-if="selectedNode && admin?.can_prepare_xray_installs" class="card">
         <div class="section-head">
-          <h2>Xray 远程管理</h2>
+          <h2>独立签发提案</h2>
           <button class="outline" @click="refreshNodeTasks(selectedNode.id)">刷新提案和结果</button>
         </div>
         <p>当前账号 ID：{{ admin.id }}。提案预留节点的下一个任务序号，有效期 30 分钟。</p>
@@ -968,31 +1543,67 @@ onMounted(async () => {
             :disabled="xrayInstallBusy" @click="dispatchXrayInstall(install)">投递{{ xrayOperationLabel[install.proposal.operation] }}任务</button>
         </div>
       </section>
-      <section v-if="selectedNode && admin?.can_update_runtime" :key="selectedNode.id" class="card">
-        <div class="section-head">
-          <h2>Agent / Helper 成对更新</h2>
-          <button class="outline" @click="loadRuntimeUpdates(selectedNode.id)">刷新结果</button>
+      </div>
+    </PanelDialog>
+
+    <PanelDialog v-if="previewOpen && panelXray && selectedNode" :title="'预览变更 · ' + selectedNode.name" @close="previewOpen = false">
+      <p role="status">{{ draftStatus }}</p>
+      <p v-if="panelXrayReadError || panelXrayError" class="notice" role="alert">{{ panelXrayError || panelXrayReadError }}</p>
+      <p v-if="panelXray.current.candidate">候选配置 SHA-256 <code>{{ panelXray.current.candidate.sha256 }}</code></p>
+      <div v-if="inboundChanges.length" class="table-wrap">
+        <table class="data-table" aria-label="受控入站变更">
+          <thead><tr><th scope="col">监听端口</th><th scope="col">当前授权</th><th scope="col">草稿授权</th></tr></thead>
+          <tbody><tr v-for="change in inboundChanges" :key="change.port">
+            <th scope="row">{{ change.port }}</th>
+            <td><template v-if="change.before">{{ change.before.users.join('、') }}<small>{{ inboundProtocolLabel(change.before.protocol) }} · {{ endpointLabel(change.before.public_endpoint, change.port) }}</small></template><span v-else>—</span></td>
+            <td><template v-if="change.after">{{ change.after.users.join('、') }}<small>{{ inboundProtocolLabel(change.after.protocol) }} · {{ endpointLabel(change.after.public_endpoint, change.port) }}</small></template><span v-else>—</span></td>
+          </tr></tbody>
+        </table>
+      </div>
+      <p v-else-if="panelXray.current.candidate && !panelXray.current.catalog">
+        候选入站 {{ endpointLabel(undefined, panelXray.current.candidate.port) }}
+      </p>
+      <p v-else>暂无用户授权差异。</p>
+      <div class="actions">
+        <button class="outline" type="button" @click="refreshNodeTasks(selectedNode.id)">刷新预览</button>
+        <button type="button" :disabled="!canApplyXrayDraft" @click="submitPanelXray('config.apply')">确认下发</button>
+      </div>
+    </PanelDialog>
+
+    <PanelDialog v-if="shareOpen && selectedNode" :title="'分享 · ' + selectedNode.name" @close="shareOpen = false">
+      <div class="page-stack">
+        <label>客户端<select v-model="shareUser">
+          <option value="" disabled>选择客户端</option>
+          <option v-for="row in xraySubscriptions" :key="row.username" :value="row.username">{{ row.username }}</option>
+        </select></label>
+        <div class="tabs" role="group" aria-label="分享类型">
+          <button type="button" :aria-pressed="shareTab === 'subscription'" @click="shareTab = 'subscription'">订阅链接</button>
+          <button type="button" :aria-pressed="shareTab === 'node'" @click="shareTab = 'node'">节点分享</button>
         </div>
-        <form v-if="!selectedNode.disabled && !selectedNode.pending" class="node-row" @submit.prevent="submitRuntimeUpdate">
-          <label v-for="field in runtimeProofFields" :key="field.name">{{ field.label }}<input :name="field.name" type="file" required /></label>
-          <button :disabled="runtimeUpdateBusy">验证签名并投递</button>
-        </form>
-        <p v-if="runtimeUpdateError" class="error" role="alert">{{ runtimeUpdateError }}</p>
-        <p v-if="!runtimeUpdates.length" class="empty">暂无成对更新记录</p>
-        <div v-for="update in runtimeUpdates" :key="update.id" class="audit-row">
-          <div>
-            <strong>{{ update.version }} · {{ update.architecture }} · #{{ update.sequence }}</strong>
-            <small v-if="update.current_pair_sha256">当前成对 SHA-256 {{ update.current_pair_sha256 }}</small>
+        <p v-if="xraySubscriptionError" class="notice" role="alert">{{ xraySubscriptionError }}</p>
+        <div v-if="shareTab === 'node'" class="revision-summary">
+          <label>已授权入站<select v-model.number="sharePort" :disabled="!shareInbounds.length">
+            <option value="">{{ shareInbounds.length ? '选择入站' : '暂无可选入站' }}</option>
+            <option v-for="inbound in shareInbounds" :key="inbound.port" :value="inbound.port">
+              {{ endpointLabel(inbound.public_endpoint, inbound.port) }} · {{ inboundProtocolLabel(inbound.protocol) }}
+            </option>
+          </select></label>
+          <p>指定节点、入站和用户的领取链接待后端接入。</p>
+        </div>
+        <template v-else-if="shareLink">
+          <p>有效至 {{ new Date(shareLink.expiresAt * 1000).toLocaleString() }}。请妥善保存刚签发的链接，刷新或重新登录后需要轮换才能生成新链接。</p>
+          <LinkActions :key="shareLink.url" :url="shareLink.url" :show-qr="shareQrFirst" />
+        </template>
+        <template v-else-if="activeShareRow">
+          <p v-if="subscriptionStatus(activeShareRow) === '有效'">订阅有效。查看已签发链接待后端接入，现有客户端可继续使用原链接。</p>
+          <p v-else>{{ subscriptionStatus(activeShareRow) }}</p>
+          <div class="actions">
+            <button v-if="activeShareRow.eligible" type="button" :disabled="xraySubscriptionBusy || subscriptionsLoading"
+              @click="changeXraySubscription(activeShareRow, 'issue')">{{ activeShareRow.active ? '轮换链接' : activeShareRow.expires_at ? '重新签发' : '签发链接' }}</button>
           </div>
-          <span>{{ runtimeUpdateStatus[update.status] }}</span>
-        </div>
-      </section>
-      <section class="card"><span class="eyebrow">AUDIT TRAIL</span><h2>安全事件</h2><div v-for="(event, i) in audits" :key="i" class="audit-row"><time>{{ new Date(event.at*1000).toLocaleString() }}</time><span>{{ event.action }}</span><small>{{ event.outcome }}</small></div><p v-if="!audits.length" class="empty">暂无事件</p></section>
-      <section v-if="admin?.can_manage_admins" class="admin-grid">
-        <form class="card" @submit.prevent="createAdmin"><span class="eyebrow">SCOPED ACCESS</span><h2>开通范围账号</h2><p>仅创建节点范围受限的审计员或运维员。运维员可创建只读状态查询任务；范围不可超出当前安全管理员的授权。</p><label>用户名<input v-model="newAdminUsername" autocomplete="off" required /></label><label>初始密码（至少 12 位）<input v-model="newAdminPassword" type="password" autocomplete="new-password" minlength="12" required /></label><label>角色<select v-model="newAdminRole"><option value="auditor">审计员</option><option value="operator">运维员（只读状态查询）</option></select></label><label>节点组范围<input v-model="newAdminGroups" placeholder="west, east" autocomplete="off" /></label><label>节点 ID 范围<input v-model="newAdminNodeIDs" placeholder="node-…" autocomplete="off" /></label><button :disabled="loading">创建范围账号</button><p v-if="createdTOTP" class="invite">一次性 TOTP 密钥：{{ createdTOTP }}<br />请通过可信渠道交给该账号持有人；此页面退出后不再显示。</p></form>
-        <section class="card"><span class="eyebrow">ADMIN ACCOUNTS</span><h2>管理员账号</h2><div v-for="account in managedAdmins" :key="account.id" class="admin-row"><div><strong>{{ account.username }}</strong><span>{{ account.role }} · {{ account.node_groups.join(', ') || '指定节点' }}{{ account.node_ids.length ? ` · ${account.node_ids.join(', ')}` : '' }}</span></div><span class="status" :class="account.disabled ? 'off' : 'on'">{{ account.disabled ? '已禁用' : '启用中' }}</span><button v-if="!account.disabled && account.id !== admin?.id && account.role !== 'security_admin'" class="danger" @click="disableAdmin(account.id)">禁用</button></div><p v-if="!managedAdmins.length" class="empty">暂无可管理的范围账号</p></section>
-      </section>
-    </template>
-    <footer>管理请求需经服务端认证与授权。启用远程 Xray 的节点可执行独立签发的生命周期任务。</footer>
-  </main>
+        </template>
+        <p v-else>{{ subscriptionsLoading ? '正在读取客户端…' : '选择一个客户端查看分享选项。' }}</p>
+      </div>
+    </PanelDialog>
+  </div>
 </template>

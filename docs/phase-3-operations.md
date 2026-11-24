@@ -103,20 +103,20 @@ runuser -u mcui-agent -- mcui-manifest init-state -state /var/lib/mcui-agent/xra
 
 使用更新后的 Agent 任务运行时 drop-in。将 `deploy/systemd/mcui-helper-xray-install.conf` 安装到 `mcui-helper.service.d/`，然后重载单元并重新启动 Agent 与 Helper。该 drop-in 为 Helper 开放固定的 Xray 运行目录。Master、Agent 和 Helper 均通过 [受控 loopback 监控接口](./phase-2-operations.md#11-配置认证-nts-时间)读取认证时间。本地 root 工具继续使用 chrony Unix 套接字。
 
-单管理员在节点详情选择安装和经过核验的版本，经面板授权及 MFA 检查，由后台独立签发并投递。手工授权部署由原发起运维员上传签名请求和任务后投递。两种流程均可通过节点详情刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 在面板显示为「待对账」，后续序号暂时阻塞。[签发配置](./phase-3-approval.md)
+单管理员在节点列表打开「管理 Core」，选择安装和经过核验的版本，经面板授权及 MFA 检查，由后台独立签发并投递。手工授权部署由原发起运维员在抽屉内的「独立签发提案」上传签名请求和任务后投递。两种流程均可在抽屉内刷新结果。Agent 可以每 15 秒续订当前 60 秒租约。Helper 在候选预检和激活前重新向主控校验租约和范围，并以本地可信时间约束任务期限。`FAILED` 表示激活前退出，`ROLLED_BACK` 表示已恢复，`NEEDS_RECONCILIATION` 在面板显示为「待对账」，后续序号暂时阻塞。[签发配置](./phase-3-approval.md)
 
 ### 远程安装对账
 
 1. Master、Agent、Helper 和节点端 `mcui-xray` 使用支持对账的同版构建。节点替换 Helper 与本地工具时一起部署，确保两者均能读取含安装事务凭证的状态文件。保留现有状态目录和账本。
-2. 安装被中断后，等待 Agent 重新轮询，并在节点详情刷新任务结果。Helper 核对原签名任务、节点、序号和信封摘要。已有完成记录时直接返回。若激活事务仍未决且能绑定原任务，Helper 恢复上次提交状态，再记录回滚完成。开机恢复也会保留相同凭证。
+2. 安装被中断后，等待 Agent 重新轮询，在「管理 Core」抽屉或「设置 → 任务」刷新任务结果。Helper 核对原签名任务、节点、序号和信封摘要。已有完成记录时直接返回。若激活事务仍未决且能绑定原任务，Helper 恢复上次提交状态，再记录回滚完成。开机恢复也会保留相同凭证。
 3. Agent 先保存结果，再向 Master 补报 `SUCCEEDED` 或 `ROLLED_BACK`。原任务过期后仍能补报。待对账投递不会续发安装租约，也不会下载制品或开始新的安装。Master 收到终态后开放下一序号。
 4. 一直待对账时，按第 3 节检查节点本地状态并保留 Master、Agent、Helper 账本和 Xray 状态目录。旧版未决记录可能没有签名任务凭证。凭证缺失、不匹配或回滚仍失败时保留阻塞，供运维核验。
 
 ## 6. 远程启停
 
 1. 在已启用远程 Xray 的测试节点部署支持启停的 Master、签发工具、Agent、Helper 和节点端 `mcui-xray`。Helper 和本地工具需同时支持启停事务凭证。旧 Agent 不会领取启停任务。
-2. 在节点详情的「Xray 远程管理」中选择「启动」或「停止」。单管理员面板从节点心跳读取已提交的版本、架构和 SHA-256。手工签发流程需要用 `mcui-xray status` 核对该版本与摘要并填写提案。[授权与签发](./phase-3-approval.md)
-3. 刷新节点详情查看任务结果。启动确认 `mcui-xray.service` 持续运行及主 PID 稳定，停止确认服务处于 `inactive/dead` 且主 PID 为 0。Helper 用同一租约复验精确目标，只控制固定服务。启停使用节点现有制品。
+2. 在节点列表的「管理 Core」抽屉中选择「启动」或「停止」。单管理员面板从节点心跳读取已提交的版本、架构和 SHA-256。手工签发流程需要用 `mcui-xray status` 核对该版本与摘要并填写提案。[授权与签发](./phase-3-approval.md)
+3. 在抽屉内刷新状态和任务。启动确认 `mcui-xray.service` 持续运行及主 PID 稳定，停止确认服务处于 `inactive/dead` 且主 PID 为 0。Helper 用同一租约复验精确目标，只控制固定服务。启停使用节点现有制品。
 4. 中断时沿用远程安装的对账规则。已提交或已回滚的原任务可补报，证据不足时保留待对账。停止会改变持久化运行意图，节点开机恢复后仍保持停止。
 
 ## 7. 远程版本切换与卸载
