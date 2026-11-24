@@ -43,6 +43,17 @@ type Network struct {
 	Routes    []Route    `json:"routes"`
 }
 
+func (n Network) HasMultipleRoutes() bool {
+	ports := make(map[int]bool, len(n.Routes))
+	for _, route := range n.Routes {
+		if ports[route.InboundPort] {
+			return true
+		}
+		ports[route.InboundPort] = true
+	}
+	return false
+}
+
 // Configuration preserves the signed array format for existing inbound-only drafts.
 type Configuration struct {
 	Inbounds Plan                `json:"inbounds"`
@@ -54,7 +65,7 @@ func (c Configuration) Valid() bool {
 	if !c.Inbounds.Valid() {
 		return false
 	}
-	if c.Panel != nil && (c.Network == nil || !c.Panel.valid(c.Inbounds, c.Network.Routes)) {
+	if c.Panel != nil && (c.Network == nil || !c.Panel.valid(c.Inbounds)) {
 		return false
 	}
 	if c.Network == nil {

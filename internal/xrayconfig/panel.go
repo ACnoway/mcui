@@ -18,7 +18,7 @@ type PanelConfiguration struct {
 	Statistics  bool      `json:"statistics,omitempty"`
 }
 
-func (p PanelConfiguration) valid(plan Plan, routes []Route) bool {
+func (p PanelConfiguration) valid(plan Plan) bool {
 	if p.Credentials == nil {
 		return false
 	}
@@ -45,17 +45,7 @@ func (p PanelConfiguration) valid(plan Plan, routes []Route) bool {
 		}
 		offset += len(inbound.Users)
 	}
-	if offset != len(p.Credentials) || usesTLS != (p.TLS != nil) || (usesTLS && !p.TLS.valid()) {
-		return false
-	}
-	ports := make(map[int]bool, len(routes))
-	for _, route := range routes {
-		if ports[route.InboundPort] {
-			return false
-		}
-		ports[route.InboundPort] = true
-	}
-	return true
+	return offset == len(p.Credentials) && usesTLS == (p.TLS != nil) && (!usesTLS || p.TLS.valid())
 }
 
 func PanelProtocol(protocol string) bool {

@@ -776,9 +776,16 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		expect(saveNetwork(xrayconfig.Plan{}, &xrayconfig.Network{Outbounds: network.Outbounds, Routes: []xrayconfig.Route{}}), http.StatusConflict)
 		duplicateRoute := *network
-		duplicateRoute.Routes = append(append([]xrayconfig.Route{}, network.Routes...), xrayconfig.Route{InboundPort: 1080, OutboundTag: "spare"})
+		duplicateRoute.Routes = append(append([]xrayconfig.Route{}, network.Routes...), network.Routes[0])
 		expect(saveNetwork(config.Inbounds, &duplicateRoute), http.StatusBadRequest)
+		network.Routes = append(network.Routes, xrayconfig.Route{InboundPort: 1080, OutboundTag: "spare"})
+		expect(saveNetwork(config.Inbounds, network), http.StatusConflict)
+		direct.PanelMultiRoute = true
+		heartbeat(&direct)
 		expect(saveNetwork(config.Inbounds, network), http.StatusOK)
+		change.State, change.Destination = options(), xrayconfig.Destination{}
+		change.Clients[0].Credential = ""
+		expect(write(client.csrf), http.StatusOK)
 		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
 		if err != nil {
 			t.Fatal(err)
@@ -867,6 +874,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		next += "&xray_panel_trojan=v1&xray_panel_multi_client=v1"
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
 		next += "&xray_panel_statistics=v1"
+		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
+		next += "&xray_panel_multi_route=v1"
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: newer.Version, SHA256: newer.SHA256})
 		if err != nil {

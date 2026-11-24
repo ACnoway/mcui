@@ -9,6 +9,7 @@ const props = defineProps<{
   inboundPorts: number[]
   disabled: boolean
   panelInbounds: boolean
+  multiRoute: boolean
 }>()
 const emit = defineEmits<{ change: [network: Network | null] }>()
 const outboundIndex = ref<number | null>(null)
@@ -37,10 +38,10 @@ const target = computed<Destination | undefined>(() => {
 const tagAvailable = computed(() => /^[a-z][a-z0-9_-]{0,23}$/.test(tag.value) && tag.value !== 'deny' &&
   !outbounds.value.some((outbound, index) => index !== outboundIndex.value && outbound.tag === tag.value))
 const routeOutbounds = computed(() => outbounds.value.filter(outbound => !routes.value.some((route, index) =>
-  index !== routeIndex.value && route.inbound_port === inboundPort.value && (props.panelInbounds || route.outbound_tag === outbound.tag),
+  index !== routeIndex.value && route.inbound_port === inboundPort.value && (!props.multiRoute || route.outbound_tag === outbound.tag),
 )))
 const canAddRoute = computed(() => props.inboundPorts.some(port => outbounds.value.some(outbound =>
-  !routes.value.some(route => route.inbound_port === port && (props.panelInbounds || route.outbound_tag === outbound.tag)),
+  !routes.value.some(route => route.inbound_port === port && (!props.multiRoute || route.outbound_tag === outbound.tag)),
 )))
 const withdrawnDestinations = computed(() => outbounds.value.filter(outbound =>
   !props.destinations.some(target => destinationLabel(target) === destinationLabel(outbound.destination)),

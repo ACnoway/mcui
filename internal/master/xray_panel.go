@@ -127,7 +127,8 @@ func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 	}
 	if i.PanelKey != "" {
 		plan, err := xrayconfig.ParseConfiguration(draft)
-		return err == nil && plan.Panel != nil && (!plan.Panel.Statistics || i.PanelStatistics) && xrayDraftPreviewed(i, draft)
+		return err == nil && plan.Panel != nil && (!plan.Panel.Statistics || i.PanelStatistics) &&
+			(i.PanelMultiRoute || !plan.Network.HasMultipleRoutes()) && xrayDraftPreviewed(i, draft)
 	}
 	if i.Catalog == nil {
 		return true
@@ -179,7 +180,8 @@ func (s *Server) savePanelXrayDraft(w http.ResponseWriter, r *http.Request) {
 			if inventory.Xray.PanelKey != "" {
 				prior, err := xrayconfig.ParseConfiguration(node.XrayDraft)
 				if err != nil || prior.Panel == nil || inventory.Xray.Version != xrayconfig.Version ||
-					plan.Inbounds.Encode() != prior.Inbounds.Encode() {
+					plan.Inbounds.Encode() != prior.Inbounds.Encode() ||
+					(plan.Network != nil && plan.Network.HasMultipleRoutes() && !inventory.Xray.PanelMultiRoute) {
 					return errXrayInventory
 				}
 				plan.Panel = prior.Panel

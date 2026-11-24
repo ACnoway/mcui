@@ -41,6 +41,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 	if keyErr == nil && managed && runtime.GOARCH == xrayconfig.Architecture {
 		view.PanelKey = base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
 		view.PanelMultiClient = true
+		view.PanelMultiRoute = true
 		statsGroup, view.PanelStatistics = statisticsGroup()
 		if network, ok := r.service.(panelNetworkService); ok {
 			view.PanelTrojan = true

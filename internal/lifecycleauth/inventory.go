@@ -30,6 +30,7 @@ type XrayInventory struct {
 	PlanSupported    bool                    `json:"plan_supported,omitempty"`
 	PanelKey         string                  `json:"panel_key,omitempty"`
 	PanelMultiClient bool                    `json:"panel_multi_client,omitempty"`
+	PanelMultiRoute  bool                    `json:"panel_multi_route,omitempty"`
 	PanelStatistics  bool                    `json:"panel_statistics,omitempty"`
 	StatisticsActive bool                    `json:"statistics_active,omitempty"`
 	Traffic          *xraytraffic.Sample     `json:"traffic,omitempty"`
@@ -54,7 +55,7 @@ func (x XrayInventory) Valid() bool {
 		(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview))) {
 		return false
 	}
-	if (x.PanelTrojan || x.PanelMultiClient || x.PanelStatistics || x.StatisticsActive) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
+	if (x.PanelTrojan || x.PanelMultiClient || x.PanelMultiRoute || x.PanelStatistics || x.StatisticsActive) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
 		len(x.PanelAddresses) > 16 || !slices.IsSorted(x.PanelAddresses) {
 		return false
 	}

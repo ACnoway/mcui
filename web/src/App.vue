@@ -46,6 +46,7 @@ type PanelXrayOptions = {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
     catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
     panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean
+    panel_multi_route?: boolean
     panel_statistics?: boolean; statistics_active?: boolean
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
@@ -1496,6 +1497,7 @@ onMounted(async () => {
           </template>
           <XrayNetworkEditor v-else-if="panelXray.current.catalog || panelXray.panel_inbounds" :tab="draftTab" :network="draftNetwork"
             :panel-inbounds="!!panelXray.panel_inbounds"
+            :multi-route="!panelXray.panel_inbounds || !!panelXray.current.panel_multi_route"
             :destinations="networkDestinations" :inbound-ports="xrayDraft.map(inbound => inbound.port)" :disabled="draftDisabled"
             @change="draftNetwork = $event" />
           <p v-else class="empty">节点尚未上报代理配置目录。</p>

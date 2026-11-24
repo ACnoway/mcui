@@ -54,13 +54,15 @@ function boundClient(port: number, client: ClientEdit) {
   return client.originalUsername !== undefined && centrallyBound(port, client.originalUsername)
 }
 
-function target(port: number) {
-  const tag = props.network?.routes.find(route => route.inbound_port === port)?.outbound_tag
-  return props.network?.outbounds.find(outbound => outbound.tag === tag)?.destination
+function targets(port: number) {
+  const network = props.network
+  return network?.routes.filter(route => route.inbound_port === port)
+    .flatMap(route => network.outbounds.find(outbound => outbound.tag === route.outbound_tag)?.destination ?? []) ?? []
 }
 
 function open(inbound?: Inbound) {
-  const existing = inbound && target(inbound.port)
+  const configured = inbound ? targets(inbound.port) : []
+  const existing = configured.length === 1 ? configured[0] : undefined
   const firstFree = Array.from({ length: 5 }, (_, index) => 1080 + index)
     .find(port => !props.inbounds.some(entry => entry.port === port)) ?? 1080
   form.value = {
@@ -93,7 +95,7 @@ async function submit() {
   try {
     await props.save(draft.port, {
       protocol: draft.protocol, clients: draft.clients.map(({ username, credential }) => ({ username, credential })),
-      destination: draft.address ? { address: draft.address, port: draft.targetPort } : undefined,
+      destination: draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
       public_endpoint: draft.protocol === 'trojan' && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
       rotate_tls: draft.protocol === 'trojan' && draft.rotateTLS ? true : undefined,
     })
@@ -172,7 +174,7 @@ async function remove(port: number) {
         <th scope="row">{{ inbound.public_endpoint ? destinationLabel(inbound.public_endpoint) : `127.0.0.1:${inbound.port}` }}</th>
         <td>{{ protocolLabel(inbound.protocol) }}</td>
         <td>{{ inbound.users.join('、') }}<template v-if="centrallyBound(inbound.port)"> · 已在「客户端」绑定</template></td>
-        <td>{{ target(inbound.port) ? destinationLabel(target(inbound.port)!) : '拒绝全部' }}</td>
+        <td>{{ targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
         <td><div class="actions">
           <button type="button" class="outline" :disabled="busy" @click="open(inbound)">编辑</button>
           <button v-if="!centrallyBound(inbound.port)" type="button" class="quiet" :disabled="busy" @click="remove(inbound.port)">删除</button>
@@ -221,8 +223,11 @@ async function remove(port: number) {
           <input v-model="form.rotateTLS" type="checkbox" /> 轮换此节点主控入站共用的 TLS 证书
         </label>
       </template>
-      <label>允许的目标 IPv4 <input v-model.trim="form.address" inputmode="decimal" placeholder="留空拒绝全部" /></label>
-      <label>目标 TCP 端口 <input v-model.number="form.targetPort" type="number" min="1" max="65535" :required="!!form.address" :disabled="!form.address" /></label>
+      <p v-if="form.editing && targets(form.port).length > 1">此入站有多条放行规则。到「路由」编辑目标和顺序。</p>
+      <template v-else>
+        <label>允许的目标 IPv4 <input v-model.trim="form.address" inputmode="decimal" placeholder="留空拒绝全部" /></label>
+        <label>目标 TCP 端口 <input v-model.number="form.targetPort" type="number" min="1" max="65535" :required="!!form.address" :disabled="!form.address" /></label>
+      </template>
       <p v-if="duplicate" class="notice" role="alert">该端口已在草稿中使用。</p>
       <p v-if="duplicateClient" class="notice" role="alert">同一个入站的客户端用户名不能重复。</p>
       <p v-if="error" class="notice" role="alert">{{ error }}</p>

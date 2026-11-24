@@ -96,6 +96,21 @@ func updatePanelInboundRoute(network *xrayconfig.Network, port int, destination 
 	network.Routes = append(network.Routes, xrayconfig.Route{InboundPort: port, OutboundTag: tag})
 }
 
+func removePanelInboundRoutes(network *xrayconfig.Network, port int) {
+	generatedTag := "target-" + strconv.Itoa(port)
+	removeGenerated := false
+	network.Routes = slices.DeleteFunc(network.Routes, func(route xrayconfig.Route) bool {
+		if route.InboundPort != port {
+			return false
+		}
+		removeGenerated = removeGenerated || route.OutboundTag == generatedTag
+		return true
+	})
+	if removeGenerated && !slices.ContainsFunc(network.Routes, func(route xrayconfig.Route) bool { return route.OutboundTag == generatedTag }) {
+		network.Outbounds = slices.DeleteFunc(network.Outbounds, func(entry xrayconfig.Outbound) bool { return entry.Tag == generatedTag })
+	}
+}
+
 func updatePanelInboundClients(entry *panelInbound, previous panelInbound, clients []panelInboundClient,
 	bindings []store.XrayBinding, publicKey string) error {
 	for _, binding := range bindings {
@@ -217,6 +232,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				entries = slices.Delete(entries, index, index+1)
+				removePanelInboundRoutes(network, port)
 			} else {
 				if in.Clients == nil && len(previous.Inbound.Users) > 1 {
 					return lifecycleauth.ErrDenied
@@ -239,8 +255,18 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				} else {
 					entries[index] = entry
 				}
+				routes := 0
+				for _, route := range network.Routes {
+					if route.InboundPort == port {
+						routes++
+					}
+				}
+				if routes <= 1 {
+					updatePanelInboundRoute(network, port, in.Destination)
+				} else if in.Destination != (xrayconfig.Destination{}) {
+					return errXrayInventory
+				}
 			}
-			updatePanelInboundRoute(network, port, in.Destination)
 			draft := encodePanelInbounds(entries, identity, network, statistics)
 			encoded := draft.Encode()
 			if !draft.Valid() || len(encoded) > xrayconfig.MaxConfigurationSize {

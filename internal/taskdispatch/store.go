@@ -76,6 +76,7 @@ type XrayDeliveryCapabilities struct {
 	PanelInbounds    bool
 	PanelTrojan      bool
 	PanelMultiClient bool
+	PanelMultiRoute  bool
 	PanelStatistics  bool
 }
 
@@ -107,6 +108,9 @@ func (c XrayDeliveryCapabilities) supportsTask(task lifecycleauth.InstallTask) b
 	plan, err := xrayconfig.ParseConfiguration(task.Plan)
 	if err != nil || (plan.Network != nil && !c.Routing) ||
 		(plan.Panel != nil && (!c.PanelInbounds || (plan.Panel.TLS != nil && !c.PanelTrojan) || (plan.Panel.Statistics && !c.PanelStatistics))) {
+		return false
+	}
+	if plan.Panel != nil && !c.PanelMultiRoute && plan.Network.HasMultipleRoutes() {
 		return false
 	}
 	for _, inbound := range plan.Inbounds {

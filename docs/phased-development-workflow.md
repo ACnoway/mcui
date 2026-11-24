@@ -128,6 +128,7 @@
 - [x] 为 Xray `v26.10.31` 的首个受控 SOCKS5 模板接入双签名配置修订、节点本地语义校验、低权限预检、切换、对账和 LKG 回滚。[受控入站部署](./phase-4-xray-inbound.md)
 - [x] 在面板保存受控 SOCKS5 端口与用户授权草稿，查看节点已应用配置和候选，复用 MFA、精确签发和回滚。凭据由节点 root 创建和轮换。[面板管理](./phase-4-xray-inbound.md#面板管理入站与授权)
 - [x] 主控定义入站支持多客户端，跨节点分配可为客户端生成独立凭据及领取链接，解绑和轮换按入站及客户端处理。[客户端订阅](./phase-4-xray-inbound.md#客户端订阅)
+- [x] 同一主控定义入站可按顺序配置多条 IPv4 TCP 放行规则。未匹配的连接继续走默认拒绝。[主控入站与路由](./phase-4-xray-inbound.md#从主控添加入站)
 - [ ] 扩展通用入站、用户和凭据管理。已接入 VLESS、VMess、Shadowsocks 2022、Trojan/TLS 和 VLESS/REALITY 的受控入站、逐协议用户授权及客户端订阅。Trojan/TLS 与 VLESS/REALITY 可由节点配置受控公网 TCP 入口。独立凭据管理仍待开发。[协议模板](./phase-4-xray-inbound.md#vlessvmess-和-shadowsocks-2022) · [公网接入](./phase-4-xray-inbound.md#受控公网-tcp-接入)
 - [x] 验证受控 SOCKS5 的实际连接、用户映射和上下行计数。默认转发的连接中读数存在缺口，进程重启丢失计数。面板明示 `UNSUPPORTED` 并禁用精确额度。[统计实测](./phase-4-xray-inbound.md#计数实测)
 - [x] 主控定义模式接入入站、客户端和出站的当前修订采样，按节点写入主控数据库并显示计数与采样时间。[用户级统计与额度](./phase-4-xray-inbound.md#用户级统计与额度)

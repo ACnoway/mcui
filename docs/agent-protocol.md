@@ -24,6 +24,8 @@ Master 地址、显式私有 CA 和任务/配置验证公钥的变更通过受�
 
 支持主控多客户端入站的 Helper 在 Xray 清单中上报 `panel_multi_client`。Agent 拉取任务时通过 `xray_panel_multi_client=v1` 声明支持。主控定义草稿的密文凭据按入站端口及入站内的用户名顺序排列。单客户端草稿保持原编码。多客户端草稿只投递给声明支持的 Agent。
 
+同一主控定义入站带多条放行规则时，任务投递要求 Agent 声明 `xray_panel_multi_route=v1`，主控通过清单中的 `panel_multi_route` 判断能否为节点保存这类草稿。规则顺序随草稿签名并按该顺序渲染。
+
 支持受控 Xray 统计的节点报告 `panel_statistics`。启用统计的配置任务要求 Agent 声明 `xray_panel_statistics=v1`。Agent 心跳可带 `xray_traffic` 样本，样本包含生效修订号、Xray 进程实例、采样时间和各口径累计上下行字节。Master 逐次检查节点凭据、样本与生效修订的关联，以及计数标识是否属于该节点上报的入站、客户端或出站。
 
 ## 3. 通用签名编码与校验
