@@ -42,16 +42,22 @@ type xrayClientView struct {
 }
 
 type clientNodeOption struct {
-	ID            string             `json:"id"`
-	Name          string             `json:"name"`
-	PanelInbounds bool               `json:"panel_inbounds,omitempty"`
-	Inbounds      []clientPortOption `json:"inbounds"`
+	ID               string             `json:"id"`
+	Name             string             `json:"name"`
+	PanelInbounds    bool               `json:"panel_inbounds,omitempty"`
+	PanelMultiClient bool               `json:"panel_multi_client,omitempty"`
+	Inbounds         []clientPortOption `json:"inbounds"`
 }
 
 type clientPortOption struct {
 	Port        int      `json:"port"`
 	Protocol    string   `json:"protocol"`
 	Credentials []string `json:"credentials"`
+}
+
+type generatedXrayBinding struct {
+	Delivery store.CredentialDelivery
+	Link     issuedClientShare
 }
 
 func (s *Server) xrayClientAuth(w http.ResponseWriter, r *http.Request) (adminContext, bool) {
@@ -111,6 +117,7 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 				draft, err := xrayconfig.ParseConfiguration(node.XrayDraft)
 				if err == nil && draft.Panel != nil {
 					option.PanelInbounds = true
+					option.PanelMultiClient = inventory.Xray.PanelMultiClient
 					for _, inbound := range draft.Inbounds {
 						option.Inbounds = append(option.Inbounds, clientPortOption{inbound.Port, inbound.Protocol, inbound.Users})
 					}
@@ -147,7 +154,7 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 					PanelInbound:      node.XrayPanelKey != "",
 					DeliveryExpiresAt: binding.Delivery.Link.ExpiresAt, DeliveryID: clientShareID(binding.Delivery.Link),
 					DeliveryReady: applied && binding.Delivery.Link.ExpiresAt > now.Unix() &&
-						binding.Delivery.CredentialHash == grant.credentialHashes[binding.Port],
+						binding.Delivery.CredentialHash == grant.credentialHashes[binding.XrayBinding],
 					ShareExpiresAt: binding.Share.ExpiresAt, ShareID: clientShareID(binding.Share),
 				})
 			}
@@ -202,12 +209,21 @@ func (s *Server) saveXrayClientBindings(w http.ResponseWriter, r *http.Request) 
 	var in struct {
 		Revision int64               `json:"revision"`
 		Bindings []store.XrayBinding `json:"bindings"`
+		Generate []store.XrayBinding `json:"generate,omitempty"`
 		MFACode  string              `json:"mfa_code"`
 	}
 	username := r.PathValue("user")
 	if readJSON(r, &in) != nil || !xrayconfig.ValidUsername(username) || in.Revision < 1 || !validClientBindings(in.Bindings) {
 		http.Error(w, "invalid client bindings", http.StatusBadRequest)
 		return
+	}
+	generated := make(map[store.XrayBinding]generatedXrayBinding, len(in.Generate))
+	for _, binding := range in.Generate {
+		if _, repeated := generated[binding]; repeated || binding.Credential != username || !slices.Contains(in.Bindings, binding) {
+			http.Error(w, "invalid generated client binding", http.StatusBadRequest)
+			return
+		}
+		generated[binding] = generatedXrayBinding{}
 	}
 	if !s.stepUp(ctx, in.MFACode) {
 		http.Error(w, "MFA re-verification required", http.StatusPreconditionRequired)
@@ -221,6 +237,7 @@ func (s *Server) saveXrayClientBindings(w http.ResponseWriter, r *http.Request) 
 	slices.SortFunc(in.Bindings, func(a, b store.XrayBinding) int {
 		return cmp.Or(cmp.Compare(a.NodeID, b.NodeID), cmp.Compare(a.Port, b.Port))
 	})
+	var links []issuedBindingShare
 	err = s.store.Update(func(st *store.State) error {
 		client, found := st.XrayClients[username]
 		if !found {
@@ -271,16 +288,23 @@ func (s *Server) saveXrayClientBindings(w http.ResponseWriter, r *http.Request) 
 					}
 				}
 			}
-			if err := stageClientBindings(st, id, additions, removed[id], now); err != nil {
+			if err := stageClientBindings(st, id, additions, removed[id], generated, now); err != nil {
 				return err
 			}
 			delete(removed, id)
 		}
 		for id, removals := range removed {
 			if _, exists := st.Nodes[id]; exists {
-				if err := stageClientBindings(st, id, nil, removals, now); err != nil {
+				if err := stageClientBindings(st, id, nil, removals, nil, now); err != nil {
 					return err
 				}
+			}
+		}
+		for index := range next {
+			binding := &next[index]
+			if issued := generated[binding.XrayBinding]; issued.Link.Token != "" {
+				binding.Delivery = issued.Delivery
+				links = append(links, issuedBindingShare{binding.XrayBinding, issued.Link})
 			}
 		}
 		client.Bindings = next
@@ -289,6 +313,14 @@ func (s *Server) saveXrayClientBindings(w http.ResponseWriter, r *http.Request) 
 		s.auditXrayClient(st, ctx.Admin.ID, username, "bindings", now)
 		return nil
 	})
+	if err == nil && len(links) != 0 {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, struct {
+			Status     string               `json:"status"`
+			Deliveries []issuedBindingShare `json:"deliveries"`
+		}{"saved", links})
+		return
+	}
 	writeXrayClientResult(w, r, err, http.StatusOK)
 }
 
@@ -313,7 +345,8 @@ func validClientBindings(bindings []store.XrayBinding) bool {
 	return true
 }
 
-func stageClientBindings(st *store.State, id string, additions, removals []store.XrayBinding, now time.Time) error {
+func stageClientBindings(st *store.State, id string, additions, removals []store.XrayBinding,
+	generated map[store.XrayBinding]generatedXrayBinding, now time.Time) error {
 	if err := checkXrayDraftReservation(st, id, now); err != nil {
 		return err
 	}
@@ -343,21 +376,60 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 		if len(additions) > 0 && (inventory.Xray.PanelKey == "" || inventory.Xray.Version != xrayconfig.Version) {
 			return errXrayInventory
 		}
+		entries := panelInbounds(draft)
+		changed := false
 		for _, binding := range additions {
-			if !hasClientBinding(draft.Inbounds, binding) {
+			index := inboundIndex(draft.Inbounds, binding.Port)
+			if index < 0 {
 				return errClientCredential
 			}
-		}
-		entries := panelInbounds(draft)
-		entries = slices.DeleteFunc(entries, func(entry panelInbound) bool {
-			if !slices.Contains(removals, store.XrayBinding{NodeID: id, Port: entry.Inbound.Port, Credential: entry.Inbound.Users[0]}) {
-				return false
+			entry := &entries[index]
+			position, exists := slices.BinarySearch(entry.Inbound.Users, binding.Credential)
+			_, generate := generated[binding]
+			if !generate {
+				if !exists {
+					return errClientCredential
+				}
+				continue
 			}
-			updatePanelInboundRoute(draft.Network, entry.Inbound.Port, xrayconfig.Destination{})
-			return true
-		})
-		if len(entries) != len(draft.Inbounds) {
-			node.XrayDraft = encodePanelInbounds(entries, draft.Panel.TLS, draft.Network).Encode()
+			if exists || !inventory.Xray.PanelMultiClient {
+				return errClientCredential
+			}
+			inbound := entry.Inbound
+			inbound.Users = []string{binding.Credential}
+			box, delivery, link, err := issueXrayCredentialDelivery(binding.Credential, inventory.Xray.PanelKey, inbound, now)
+			if err != nil {
+				return err
+			}
+			entry.Inbound.Users = slices.Insert(entry.Inbound.Users, position, binding.Credential)
+			entry.Credentials = slices.Insert(entry.Credentials, position, box)
+			generated[binding] = generatedXrayBinding{delivery, link}
+			changed = true
+		}
+		for _, binding := range removals {
+			index := inboundIndex(draft.Inbounds, binding.Port)
+			if index < 0 {
+				continue
+			}
+			entry := &entries[index]
+			user := slices.Index(entry.Inbound.Users, binding.Credential)
+			if user < 0 {
+				continue
+			}
+			entry.Inbound.Users = slices.Delete(entry.Inbound.Users, user, user+1)
+			entry.Credentials = slices.Delete(entry.Credentials, user, user+1)
+			if len(entry.Inbound.Users) == 0 {
+				updatePanelInboundRoute(draft.Network, entry.Inbound.Port, xrayconfig.Destination{})
+			}
+			changed = true
+		}
+		if changed {
+			entries = slices.DeleteFunc(entries, func(entry panelInbound) bool { return len(entry.Inbound.Users) == 0 })
+			updated := encodePanelInbounds(entries, draft.Panel.TLS, draft.Network)
+			node.XrayDraft = updated.Encode()
+			if !updated.Valid() || len(node.XrayDraft) > xrayconfig.MaxConfigurationSize {
+				return errXrayInventory
+			}
 			st.Nodes[id] = node
 		}
 		return nil
@@ -376,6 +448,9 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 		}
 	}
 	for _, binding := range additions {
+		if _, generate := generated[binding]; generate {
+			return errClientCredential
+		}
 		in, users, ok := catalog.Inbound(binding.Port)
 		if !ok || !slices.Contains(users, binding.Credential) {
 			return errClientCredential

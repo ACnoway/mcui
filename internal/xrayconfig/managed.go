@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	maxPorts    = 4
-	maxUsers    = 8
-	maxGrants   = 16
-	MaxPlanSize = 1536
+	maxPorts        = 4
+	MaxInboundUsers = 8
+	maxGrants       = 16
+	MaxPlanSize     = 1536
 )
 
 var userID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,23}$`)
@@ -65,7 +65,7 @@ func (p Plan) Valid() bool {
 }
 
 func validUsers(users []string) bool {
-	if len(users) == 0 || len(users) > maxUsers {
+	if len(users) == 0 || len(users) > MaxInboundUsers {
 		return false
 	}
 	last := ""
@@ -182,7 +182,7 @@ func (c Catalog) Valid() bool {
 			names[user] = true
 		}
 	}
-	return len(names) > 0 && len(names) <= maxUsers
+	return len(names) > 0 && len(names) <= MaxInboundUsers
 }
 
 func (c Catalog) Allows(p Plan) bool {
@@ -250,7 +250,7 @@ func (c *LocalCatalog) UnmarshalJSON(raw []byte) error {
 func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	if !digest.MatchString(c.ReleaseSHA256) || c.ReleaseSHA256 != releaseSHA256 ||
 		!publicIPv4(c.DestinationIP) || c.DestinationPort < 1 || c.DestinationPort > 65535 ||
-		len(c.Credentials) > maxUsers || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) ||
+		len(c.Credentials) > MaxInboundUsers || len(c.Ports) > maxPorts || len(c.HTTPPorts)+len(c.PortProtocols) > len(c.Ports) ||
 		len(c.PublicEndpoints) > len(c.PortProtocols) {
 		return Catalog{}, errors.New("invalid node-local Xray catalog")
 	}
@@ -306,7 +306,7 @@ func (c LocalCatalog) Public(releaseSHA256 string) (Catalog, error) {
 	}
 	shortIDs := make(map[string]bool)
 	for protocol, credentials := range c.ProtocolCredentials {
-		if !UsesProtocolCredentials(protocol) || len(credentials) == 0 || len(credentials) > maxUsers {
+		if !UsesProtocolCredentials(protocol) || len(credentials) == 0 || len(credentials) > MaxInboundUsers {
 			return Catalog{}, errors.New("invalid node-local Xray protocol credentials")
 		}
 		names := make([]string, 0, len(credentials))

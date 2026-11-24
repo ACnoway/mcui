@@ -794,20 +794,21 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 	capabilities := taskdispatch.XrayDeliveryCapabilities{
-		InstallMode:   query.Get("install"),
-		Reconcile:     query.Get("install_reconciliation") == "v1",
-		Control:       query.Get("xray_control") == "v1",
-		Change:        query.Get("xray_change") == "v1",
-		Config:        query.Get("xray_config") == "v1",
-		Plan:          query.Get("xray_plan") == "v1",
-		HTTP:          query.Get("xray_http") == "v1",
-		Protocols:     query.Get("xray_protocols") == "v1",
-		TrojanTLS:     query.Get("xray_trojan_tls") == "v1",
-		Reality:       query.Get("xray_reality") == "v1",
-		Public:        query.Get("xray_public") == "v1",
-		Routing:       query.Get("xray_routing") == "v1",
-		PanelInbounds: query.Get("xray_panel_inbounds") == "v1",
-		PanelTrojan:   query.Get("xray_panel_trojan") == "v1",
+		InstallMode:      query.Get("install"),
+		Reconcile:        query.Get("install_reconciliation") == "v1",
+		Control:          query.Get("xray_control") == "v1",
+		Change:           query.Get("xray_change") == "v1",
+		Config:           query.Get("xray_config") == "v1",
+		Plan:             query.Get("xray_plan") == "v1",
+		HTTP:             query.Get("xray_http") == "v1",
+		Protocols:        query.Get("xray_protocols") == "v1",
+		TrojanTLS:        query.Get("xray_trojan_tls") == "v1",
+		Reality:          query.Get("xray_reality") == "v1",
+		Public:           query.Get("xray_public") == "v1",
+		Routing:          query.Get("xray_routing") == "v1",
+		PanelInbounds:    query.Get("xray_panel_inbounds") == "v1",
+		PanelTrojan:      query.Get("xray_panel_trojan") == "v1",
+		PanelMultiClient: query.Get("xray_panel_multi_client") == "v1",
 	}
 	delivery, err := runtime.Store.LeaseWithXray(node.ID, now, runtime.KeyID, runtime.PublicKey, expectedSequence, func(sequence int64, reason string) ([]byte, error) {
 		unsigned, buildErr := makeUnsignedTaskSkip(node.ID, sequence, reason, runtime.KeyID, now)

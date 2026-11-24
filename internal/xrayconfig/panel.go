@@ -10,20 +10,21 @@ import (
 	"github.com/ACnoway/mcui/internal/security"
 )
 
-// PanelConfiguration carries one encrypted credential for each inbound, in
-// port order. The signed plan binds the ciphertext to its node and release.
+// PanelConfiguration carries encrypted credentials in port and username order.
+// A plan with one user per inbound retains its original wire encoding.
 type PanelConfiguration struct {
 	Credentials []string  `json:"credentials"`
 	TLS         *PanelTLS `json:"tls,omitempty"`
 }
 
 func (p PanelConfiguration) valid(plan Plan, routes []Route) bool {
-	if p.Credentials == nil || len(p.Credentials) != len(plan) {
+	if p.Credentials == nil {
 		return false
 	}
 	usesTLS := false
-	for index, inbound := range plan {
-		if !PanelProtocol(inbound.Protocol) || len(inbound.Users) != 1 {
+	offset := 0
+	for _, inbound := range plan {
+		if !PanelProtocol(inbound.Protocol) || len(p.Credentials)-offset < len(inbound.Users) {
 			return false
 		}
 		if inbound.Protocol == Trojan {
@@ -36,11 +37,14 @@ func (p PanelConfiguration) valid(plan Plan, routes []Route) bool {
 		if inbound.Protocol == VLESS || inbound.Protocol == VMess {
 			length = 36
 		}
-		if !validPanelBox(p.Credentials[index], length) {
-			return false
+		for _, box := range p.Credentials[offset : offset+len(inbound.Users)] {
+			if !validPanelBox(box, length) {
+				return false
+			}
 		}
+		offset += len(inbound.Users)
 	}
-	if usesTLS != (p.TLS != nil) || (usesTLS && !p.TLS.valid()) {
+	if offset != len(p.Credentials) || usesTLS != (p.TLS != nil) || (usesTLS && !p.TLS.valid()) {
 		return false
 	}
 	ports := make(map[int]bool, len(routes))
@@ -62,8 +66,8 @@ func validPanelBox(sealed string, length int) bool {
 	return err == nil && len(box) == 32+16+length && base64.RawURLEncoding.EncodeToString(box) == sealed
 }
 
-func credentialContext(inbound Inbound) []byte {
-	return fmt.Appendf(nil, "MCUI-XRAY-PANEL-CREDENTIAL-V1\n%d\n%s\n%s", inbound.Port, inbound.Protocol, inbound.Users[0])
+func credentialContext(inbound Inbound, user string) []byte {
+	return fmt.Appendf(nil, "MCUI-XRAY-PANEL-CREDENTIAL-V1\n%d\n%s\n%s", inbound.Port, inbound.Protocol, user)
 }
 
 func validPanelCredential(inbound Inbound, credential string) bool {
@@ -79,7 +83,24 @@ func SealPanelCredential(public string, inbound Inbound, credential string) (str
 		!validPanelCredential(inbound, credential) {
 		return "", errors.New("invalid panel Xray credential")
 	}
-	return sealPanelSecret(public, credentialContext(inbound), []byte(credential))
+	return sealPanelSecret(public, credentialContext(inbound, inbound.Users[0]), []byte(credential))
+}
+
+// PanelCredentialIndex locates a credential by its inbound and username.
+func (c Configuration) PanelCredentialIndex(port int, username string) int {
+	if c.Panel == nil {
+		return -1
+	}
+	offset := 0
+	for _, inbound := range c.Inbounds {
+		for _, user := range inbound.Users {
+			if inbound.Port == port && user == username {
+				return offset
+			}
+			offset++
+		}
+	}
+	return -1
 }
 
 func sealPanelSecret(public string, info, secret []byte) (string, error) {
@@ -131,19 +152,31 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 	if len(c.Inbounds) != 0 {
 		port = c.Inbounds[0].Port
 	}
-	for index, inbound := range c.Inbounds {
-		secret, err := openPanelSecret(private, credentialContext(inbound), c.Panel.Credentials[index])
-		if err != nil || !validPanelCredential(inbound, string(secret)) {
-			return nil, Reference{}, errors.New("panel Xray credential cannot be opened")
-		}
+	offset := 0
+	for _, inbound := range c.Inbounds {
 		protocol := inbound.Protocol
 		if protocol == "" {
 			protocol = "socks"
 		}
-		user := inbound.Users[0]
+		credentials := make(map[string]string, len(inbound.Users))
+		for _, user := range inbound.Users {
+			secret, err := openPanelSecret(private, credentialContext(inbound, user), c.Panel.Credentials[offset])
+			if err != nil || !validPanelCredential(inbound, string(secret)) {
+				return nil, Reference{}, errors.New("panel Xray credential cannot be opened")
+			}
+			if UsesProtocolCredentials(protocol) {
+				for _, existing := range credentials {
+					if existing == string(secret) {
+						return nil, Reference{}, errors.New("duplicate panel Xray credential")
+					}
+				}
+			}
+			credentials[user] = string(secret)
+			offset++
+		}
 		catalog := LocalCatalog{
-			Credentials:         map[string]string{user: string(secret)},
-			ProtocolCredentials: map[string]map[string]string{protocol: {user: string(secret)}},
+			Credentials:         credentials,
+			ProtocolCredentials: map[string]map[string]string{protocol: credentials},
 		}
 		tag := fmt.Sprintf("%s-%d", protocol, inbound.Port)
 		listen := "127.0.0.1"

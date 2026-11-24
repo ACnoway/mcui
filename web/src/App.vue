@@ -44,7 +44,7 @@ type PanelXrayOptions = {
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
     catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
-    panel_trojan?: boolean; panel_addresses?: string[]
+    panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean
   }
   state: string; versions: string[]; catalog_version: number; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
@@ -1379,6 +1379,7 @@ onMounted(async () => {
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
           <p v-if="panelXray.panel_inbounds && draftTab === 'inbound' && xrayDraftDirty" class="feedback">编辑入站前，请保存或放弃未保存的路由和出站修改。</p>
           <XrayPanelInbounds v-if="panelXray.panel_inbounds && draftTab === 'inbound'" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
+            :multi-client="!!panelXray.current.panel_multi_client"
             :network="panelXray.draft_network ?? null" :busy="draftDisabled || xrayDraftDirty" :save="savePanelInbound"
             :managed-bindings="panelXray.managed_bindings ?? []"
             :trojan="!!panelXray.current.panel_trojan" :addresses="panelXray.current.panel_addresses ?? []"

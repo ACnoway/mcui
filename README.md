@@ -21,6 +21,8 @@ The panel opens on the node overview. Use the node list for Agent enrollment and
 
 Administrators can create an Xray client on the Master and bind it to both panel-defined and node-catalog inbounds on multiple nodes. The panel can issue one subscription for the client and a separate HTTPS share link for each applied inbound. For a panel-defined inbound, the administrator can rotate the credential and issue a 24-hour setup link that the recipient can use once the revision is applied. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
 
+Updated panel-defined nodes support multiple clients per inbound. An administrator can assign one client to several nodes and generate a separate credential and setup link for each selected inbound. Removing a binding keeps the other clients on that inbound active after the revised configuration is applied. [Multi-client inbounds](docs/phase-4-xray-inbound.md#从主控添加入站)
+
 ## Development checks
 
 For documentation changes, review the diff and check links. For feature changes, run the checks relevant to the change. Use `scripts/check-static.sh` for the full Linux checks.

@@ -41,6 +41,31 @@ func xrayCredentialEnvelope(token string) (cipher.AEAD, error) {
 	return cipher.NewGCMWithRandomNonce(block)
 }
 
+func issueXrayCredentialDelivery(username, publicKey string, inbound xrayconfig.Inbound, now time.Time) (string, store.CredentialDelivery, issuedClientShare, error) {
+	credential, err := newXrayClientCredential(inbound.Protocol)
+	if err != nil {
+		return "", store.CredentialDelivery{}, issuedClientShare{}, err
+	}
+	sealed, err := xrayconfig.SealPanelCredential(publicKey, inbound, credential)
+	if err != nil {
+		return "", store.CredentialDelivery{}, issuedClientShare{}, err
+	}
+	link, issued, err := issueClientShare(username, now)
+	if err != nil {
+		return "", store.CredentialDelivery{}, issuedClientShare{}, err
+	}
+	aead, err := xrayCredentialEnvelope(issued.Token)
+	if err != nil {
+		return "", store.CredentialDelivery{}, issuedClientShare{}, err
+	}
+	link.ExpiresAt = now.Add(xrayCredentialDeliveryLifetime).Unix()
+	issued.ExpiresAt = link.ExpiresAt
+	digest := hash(sealed)
+	return sealed, store.CredentialDelivery{
+		Link: link, CredentialHash: digest, Envelope: aead.Seal(nil, nil, []byte(credential), []byte(digest)),
+	}, issued, nil
+}
+
 func (s *Server) rotateXrayClientCredential(w http.ResponseWriter, r *http.Request) {
 	ctx, ok := s.xrayClientAuth(w, r)
 	if !ok {
@@ -96,37 +121,26 @@ func (s *Server) rotateXrayClientCredential(w http.ResponseWriter, r *http.Reque
 		}
 		position := inboundIndex(draft.Inbounds, in.Port)
 		inbound := draft.Inbounds[position]
-		credential, err := newXrayClientCredential(inbound.Protocol)
+		credentialName := client.Bindings[index].Credential
+		credentialIndex := draft.PanelCredentialIndex(in.Port, credentialName)
+		if credentialIndex < 0 {
+			return errClientCredential
+		}
+		inbound.Users = []string{credentialName}
+		sealed, delivery, link, err := issueXrayCredentialDelivery(username, inventory.Xray.PanelKey, inbound, now)
 		if err != nil {
 			return err
 		}
-		sealed, err := xrayconfig.SealPanelCredential(inventory.Xray.PanelKey, inbound, credential)
-		if err != nil {
-			return err
-		}
-		draft.Panel.Credentials[position] = sealed
+		draft.Panel.Credentials[credentialIndex] = sealed
 		node.XrayDraft = draft.Encode()
 		if len(node.XrayDraft) > xrayconfig.MaxConfigurationSize {
 			return errXrayInventory
 		}
-		link, delivery, err := issueClientShare(username, now)
-		if err != nil {
-			return err
-		}
-		aead, err := xrayCredentialEnvelope(delivery.Token)
-		if err != nil {
-			return err
-		}
-		link.ExpiresAt = now.Add(xrayCredentialDeliveryLifetime).Unix()
-		delivery.ExpiresAt = link.ExpiresAt
-		digest := hash(sealed)
-		client.Bindings[index].Delivery = store.CredentialDelivery{
-			Link: link, CredentialHash: digest, Envelope: aead.Seal(nil, nil, []byte(credential), []byte(digest)),
-		}
+		client.Bindings[index].Delivery = delivery
 		client.Revision++
 		st.XrayClients[username], st.Nodes[in.NodeID] = client, node
 		s.auditXrayClient(st, ctx.Admin.ID, username, "credential.rotate", now)
-		issued = delivery
+		issued = link
 		return nil
 	})
 	if err != nil {

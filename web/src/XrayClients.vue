@@ -5,13 +5,14 @@ import PanelDialog from './PanelDialog.vue'
 import { xrayProtocolName, type XrayProtocol } from './xraySubscription'
 
 type Binding = { node_id: string; port: number; credential: string }
+type DraftBinding = Binding & { generate?: boolean }
 type BindingView = Binding & {
   node_name: string; protocol: XrayProtocol | ''; applied: boolean; panel_inbound?: boolean
   share_expires_at?: number; share_id?: string; delivery_expires_at?: number; delivery_id?: string; delivery_ready?: boolean
 }
 type Client = { username: string; revision: number; bindings: BindingView[]; expires_at?: number; share_id?: string }
 type Port = { port: number; protocol: XrayProtocol | ''; credentials: string[] }
-type Node = { id: string; name: string; panel_inbounds?: boolean; inbounds: Port[] }
+type Node = { id: string; name: string; panel_inbounds?: boolean; panel_multi_client?: boolean; inbounds: Port[] }
 type Link = { id: string; token: string; expires_at: number }
 type LinkResponse = { subscription?: Link; inbounds: (Binding & Link)[] }
 
@@ -35,7 +36,7 @@ const sharing = ref('')
 const activeShare = computed(() => clients.value.find(client => client.username === sharing.value))
 const issued = ref(new Map<string, { subscription?: Link; inbounds: Map<string, Link> }>())
 const deliveries = ref(new Map<string, Link>())
-const draft = ref<Binding[]>([])
+const draft = ref<DraftBinding[]>([])
 const selectedNode = ref('')
 const selectedPort = ref<number | ''>('')
 const credential = ref('')
@@ -47,9 +48,17 @@ const availablePorts = computed(() => (selectedNodeOption.value?.inbounds ?? [])
   !draft.value.some(binding => binding.node_id === selectedNode.value && binding.port === port.port)))
 const localCredential = computed(() => selectedNodeOption.value?.panel_inbounds ? undefined
   : draft.value.find(binding => binding.node_id === selectedNode.value)?.credential)
-const credentials = computed(() => (availablePorts.value.find(port => port.port === selectedPort.value)?.credentials ?? []).filter(name =>
+const portCredentials = computed(() => availablePorts.value.find(port => port.port === selectedPort.value)?.credentials ?? [])
+const credentials = computed(() => portCredentials.value.filter(name =>
   (!localCredential.value || name === localCredential.value) && !clients.value.some(client => client.username !== editing.value?.username &&
     client.bindings.some(binding => binding.node_id === selectedNode.value && binding.credential === name))))
+const generateCredential = '@generate'
+const canGenerate = computed(() => {
+  const user = editing.value?.username
+  return !!user && !!selectedNodeOption.value?.panel_multi_client && selectedPort.value !== '' && portCredentials.value.length < 8 &&
+    !portCredentials.value.includes(user) && !clients.value.some(client => client.username !== user &&
+      client.bindings.some(binding => binding.node_id === selectedNode.value && binding.credential === user))
+})
 
 function bindingKey(binding: Binding) { return `${binding.node_id}:${binding.port}` }
 function protocolLabel(protocol: Port['protocol']) { return protocol ? xrayProtocolName[protocol] : 'SOCKS5 / HTTP' }
@@ -132,12 +141,17 @@ function editBindings(client: Client) {
 
 function choosePort() {
   const preferred = localCredential.value ?? editing.value?.username ?? ''
-  credential.value = credentials.value.length === 1 ? credentials.value[0] : credentials.value.includes(preferred) ? preferred : ''
+  if (credentials.value.includes(preferred)) credential.value = preferred
+  else if (canGenerate.value) credential.value = generateCredential
+  else credential.value = credentials.value.length === 1 ? credentials.value[0] : ''
 }
 
 function addBinding() {
-  if (!selectedNode.value || selectedPort.value === '' || !credentials.value.includes(credential.value) || draft.value.length >= 64) return
-  draft.value.push({ node_id: selectedNode.value, port: selectedPort.value, credential: credential.value })
+  if (!selectedNode.value || selectedPort.value === '' || draft.value.length >= 64) return
+  const generate = credential.value === generateCredential
+  const name = generate ? editing.value?.username : credential.value
+  if (!name || (generate ? !canGenerate.value : !credentials.value.includes(name))) return
+  draft.value.push({ node_id: selectedNode.value, port: selectedPort.value, credential: name, generate })
   selectedPort.value = ''
   credential.value = ''
 }
@@ -146,7 +160,13 @@ function saveBindings() {
   const client = editing.value
   if (!client) return
   return update(async () => {
-    await props.mutate(`${path}/${client.username}/bindings`, { revision: client.revision, bindings: draft.value }, 'PUT')
+    const bindings = draft.value.map(({ node_id, port, credential }) => ({ node_id, port, credential }))
+    const generate = bindings.filter((_, index) => draft.value[index].generate)
+    const result = await props.mutate<{ deliveries?: (Binding & Link)[] }>(`${path}/${client.username}/bindings`, {
+      revision: client.revision, bindings, ...(generate.length ? { generate } : {}),
+    }, 'PUT')
+    for (const link of result.deliveries ?? []) deliveries.value.set(deliveryKey(client, link), link)
+    if (result.deliveries?.length) sharing.value = client.username
     const previous = new Set(client.bindings.map(binding => `${bindingKey(binding)}:${binding.credential}`))
     const next = new Set(draft.value.map(binding => `${bindingKey(binding)}:${binding.credential}`))
     changedNodes.value = [...new Set([
@@ -236,7 +256,7 @@ onActivated(refresh)
     <p v-if="error" class="notice" role="alert">{{ error }}</p>
     <ul v-if="draft.length" class="page-stack">
       <li v-for="(binding, index) in draft" :key="bindingKey(binding)">
-        {{ nodeLabel(binding.node_id) }} · {{ binding.port }} · {{ binding.credential }}
+        {{ nodeLabel(binding.node_id) }} · {{ binding.port }} · {{ binding.credential }}{{ binding.generate ? ' · 生成凭据' : '' }}
         <button type="button" class="quiet" :disabled="busy" @click="draft.splice(index, 1)">解除绑定</button>
       </li>
     </ul>
@@ -250,14 +270,15 @@ onActivated(refresh)
         <option v-for="port in availablePorts" :key="port.port" :value="port.port">{{ port.port }} · {{ protocolLabel(port.protocol) }}</option>
       </select></label>
       <label>节点凭据名<select v-model="credential" required :disabled="busy || selectedPort === ''">
-        <option value="" disabled>{{ selectedPort !== '' && !credentials.length ? '当前入站无可用凭据' : '选择凭据' }}</option>
+        <option value="" disabled>{{ selectedPort !== '' && !credentials.length && !canGenerate ? '当前入站无可用凭据' : '选择凭据' }}</option>
+        <option v-if="canGenerate" :value="generateCredential">为 {{ editing.username }} 生成凭据</option>
         <option v-for="name in credentials" :key="name">{{ name }}</option>
       </select></label>
       <button type="submit" class="outline" :disabled="busy || !credential || draft.length >= 64">添加绑定</button>
     </form>
     <p v-else class="feedback">等待节点上报可用的入站和凭据。</p>
     <p v-if="editing.bindings.some(binding => !draft.some(item => bindingKey(item) === bindingKey(binding)))" class="feedback">
-      解除绑定立即撤销对应的入站分享。下发后，主控定义的入站会被移除，节点预配的入站会撤销该凭据的授权。
+      解除绑定立即撤销对应的入站分享。下发后撤销该客户端的授权，主控定义的入站在移除最后一个客户端时停止监听。
     </p>
     <p>保存后，在受影响节点的「代理配置」中预览并下发。</p>
     <div class="actions"><button type="button" :disabled="busy || loading" @click="saveBindings">保存绑定</button></div>

@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -741,6 +742,17 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		change.Public.Address = direct.PanelAddresses[0]
 		expect(write(client.csrf), http.StatusOK)
 		expect(write(client.csrf), http.StatusConflict)
+		change.State = options()
+		change.Username, change.Credential = "", ""
+		change.Clients = []panelInboundClient{
+			{Username: "bob", Credential: strings.Repeat("E", 43)},
+			{Username: "alice"},
+		}
+		expect(write(client.csrf), http.StatusConflict)
+		direct.PanelMultiClient = true
+		heartbeat(&direct)
+		change.State = options()
+		expect(write(client.csrf), http.StatusOK)
 		registered, err := s.store.NodeByID(t.Context(), client.nodeID)
 		if err != nil || registered.XrayPanelKey != direct.PanelKey || strings.Contains(registered.XrayDraft, credential) {
 			t.Fatalf("credential persisted or node key not pinned: %v", err)
@@ -832,7 +844,10 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1&xray_public=v1&xray_trojan_tls=v1&xray_panel_inbounds=v1", issued.Sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
-		expect(client.request(http.MethodGet, next+"&xray_panel_trojan=v1", nil, true), http.StatusOK)
+		expect(client.request(http.MethodGet, next+"&xray_panel_multi_client=v1", nil, true), http.StatusNoContent)
+		expect(client.request(http.MethodGet, next+"&xray_panel_trojan=v1", nil, true), http.StatusNoContent)
+		next += "&xray_panel_trojan=v1&xray_panel_multi_client=v1"
+		expect(client.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: newer.Version, SHA256: newer.SHA256})
 		if err != nil {
 			t.Fatal(err)
@@ -908,8 +923,9 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatal(err)
 		}
 		rotated, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
-		if err != nil || rotated.Panel.Credentials[0] == config.Panel.Credentials[0] {
-			t.Fatalf("rotation did not change the encrypted credential: %v", err)
+		if err != nil || rotated.Panel.Credentials[0] == config.Panel.Credentials[0] ||
+			rotated.Panel.Credentials[1] != config.Panel.Credentials[1] {
+			t.Fatalf("rotation did not change only the selected encrypted credential: %v", err)
 		}
 		rendered, candidate, err := rotated.RenderPanel(private)
 		if err != nil {
@@ -923,7 +939,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		expect(admin(http.MethodPost, applyRotated, client.csrf), http.StatusCreated)
 		sequence := issued.Sequence + 1
 		expect(client.request(http.MethodGet, strings.Replace(next, fmt.Sprintf("next_sequence=%d", issued.Sequence),
-			fmt.Sprintf("next_sequence=%d", sequence), 1)+"&xray_panel_trojan=v1", nil, true), http.StatusOK)
+			fmt.Sprintf("next_sequence=%d", sequence), 1), nil, true), http.StatusOK)
 		expect(client.request(http.MethodPost, "/api/v1/agent/tasks/ack", taskAckRequest{TaskID: applyRotated.TaskID, Sequence: sequence,
 			StatusVersion: 1, Status: "SUCCEEDED", Result: result}, true), http.StatusNoContent)
 		expect(fetch(aggregateURL, delivery.Token, ""), http.StatusNotFound)
@@ -970,9 +986,38 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatal(err)
 		}
 		revoked, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
-		if err != nil || revoked.Panel == nil || len(revoked.Inbounds) != 0 || revoked.Panel.TLS != nil ||
-			len(revoked.Network.Routes) != 0 || !reflect.DeepEqual(revoked.Network.Outbounds, network.Outbounds) {
-			t.Fatalf("unbind did not stage removal of the panel inbound and its unused TLS identity: %v", err)
+		if err != nil || revoked.Panel == nil || len(revoked.Inbounds) != 1 ||
+			!slices.Equal(revoked.Inbounds[0].Users, []string{"bob"}) ||
+			!slices.Equal(revoked.Panel.Credentials, rotated.Panel.Credentials[1:]) ||
+			!reflect.DeepEqual(revoked.Panel.TLS, rotated.Panel.TLS) || !reflect.DeepEqual(revoked.Network, network) {
+			t.Fatalf("unbind did not preserve the other client and inbound routing: %v", err)
+		}
+		expect(central(http.MethodPost, "", map[string]string{"username": "charlie"}), http.StatusCreated)
+		generated := store.XrayBinding{NodeID: client.nodeID, Port: 1080, Credential: "charlie"}
+		bindGenerated := map[string]any{"revision": 1, "bindings": []store.XrayBinding{generated}, "generate": []store.XrayBinding{generated}}
+		created := central(http.MethodPut, "/charlie/bindings", bindGenerated)
+		expect(created, http.StatusOK)
+		var added struct {
+			Deliveries []issuedBindingShare `json:"deliveries"`
+		}
+		if err := json.Unmarshal(created.Body.Bytes(), &added); err != nil || len(added.Deliveries) != 1 ||
+			added.Deliveries[0].XrayBinding != generated || created.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("missing initial credential delivery: %v", err)
+		}
+		replay := central(http.MethodPut, "/charlie/bindings", bindGenerated)
+		expect(replay, http.StatusOK)
+		if strings.Contains(replay.Body.String(), "deliveries") {
+			t.Fatal("replayed binding generated a second credential")
+		}
+		expect(fetch(aggregateURL, added.Deliveries[0].Token, ""), http.StatusNotFound)
+		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		extended, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil || !slices.Equal(extended.Inbounds[0].Users, []string{"bob", "charlie"}) ||
+			extended.Panel.Credentials[0] != revoked.Panel.Credentials[0] {
+			t.Fatalf("adding a client altered another credential: %v", err)
 		}
 	})
 	if err := s.ReconcileTaskRuntime(); err != nil {

@@ -16,21 +16,22 @@ type NodeInventory struct {
 }
 
 type XrayInventory struct {
-	Version        string                  `json:"version"`
-	SHA256         string                  `json:"sha256"`
-	Running        bool                    `json:"running"`
-	Candidate      xrayconfig.Reference    `json:"candidate,omitzero"`
-	Config         xrayconfig.Reference    `json:"config,omitzero"`
-	ConfigRevision int64                   `json:"config_revision,omitempty"`
-	Catalog        *xrayconfig.Catalog     `json:"catalog,omitempty"`
-	Preview        string                  `json:"preview,omitempty"`
-	Applied        *xrayconfig.Plan        `json:"applied,omitempty"`
-	AppliedNetwork *xrayconfig.Network     `json:"applied_network,omitempty"`
-	PlanSupported  bool                    `json:"plan_supported,omitempty"`
-	PanelKey       string                  `json:"panel_key,omitempty"`
-	PanelTrojan    bool                    `json:"panel_trojan,omitempty"`
-	PanelAddresses []string                `json:"panel_addresses,omitempty"`
-	PanelTLS       *xrayconfig.TrojanTrust `json:"panel_tls,omitempty"`
+	Version          string                  `json:"version"`
+	SHA256           string                  `json:"sha256"`
+	Running          bool                    `json:"running"`
+	Candidate        xrayconfig.Reference    `json:"candidate,omitzero"`
+	Config           xrayconfig.Reference    `json:"config,omitzero"`
+	ConfigRevision   int64                   `json:"config_revision,omitempty"`
+	Catalog          *xrayconfig.Catalog     `json:"catalog,omitempty"`
+	Preview          string                  `json:"preview,omitempty"`
+	Applied          *xrayconfig.Plan        `json:"applied,omitempty"`
+	AppliedNetwork   *xrayconfig.Network     `json:"applied_network,omitempty"`
+	PlanSupported    bool                    `json:"plan_supported,omitempty"`
+	PanelKey         string                  `json:"panel_key,omitempty"`
+	PanelMultiClient bool                    `json:"panel_multi_client,omitempty"`
+	PanelTrojan      bool                    `json:"panel_trojan,omitempty"`
+	PanelAddresses   []string                `json:"panel_addresses,omitempty"`
+	PanelTLS         *xrayconfig.TrojanTrust `json:"panel_tls,omitempty"`
 }
 
 func (i NodeInventory) Valid() bool {
@@ -49,7 +50,7 @@ func (x XrayInventory) Valid() bool {
 		(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview))) {
 		return false
 	}
-	if x.PanelTrojan && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
+	if (x.PanelTrojan || x.PanelMultiClient) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
 		len(x.PanelAddresses) > 16 || !slices.IsSorted(x.PanelAddresses) {
 		return false
 	}

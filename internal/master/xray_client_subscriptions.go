@@ -216,7 +216,7 @@ func (s *Server) fetchXrayClientSubscription(w http.ResponseWriter, r *http.Requ
 					continue
 				}
 				if delivery.CredentialHash != "" {
-					if grant.credentialHashes[binding.Port] != delivery.CredentialHash {
+					if grant.credentialHashes[binding.XrayBinding] != delivery.CredentialHash {
 						continue
 					}
 					aead, err := xrayCredentialEnvelope(token)

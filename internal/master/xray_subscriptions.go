@@ -26,7 +26,7 @@ type subscriptionGrant struct {
 	sha256           string
 	trojan           *xrayconfig.TrojanTrust
 	realityPublicKey string
-	credentialHashes map[int]string
+	credentialHashes map[store.XrayBinding]string
 }
 
 type subscriptionPorts struct {
@@ -107,9 +107,14 @@ func (s *Server) xraySubscriptionGrant(ctx context.Context, node store.Node, now
 	if err != nil || signed.Panel == nil {
 		return subscriptionGrant{}, errSubscriptionUnavailable
 	}
-	grant.credentialHashes = make(map[int]string, len(signed.Inbounds))
-	for index, inbound := range signed.Inbounds {
-		grant.credentialHashes[inbound.Port] = hash(signed.Panel.Credentials[index])
+	grant.credentialHashes = make(map[store.XrayBinding]string, len(signed.Panel.Credentials))
+	offset := 0
+	for _, inbound := range signed.Inbounds {
+		for _, user := range inbound.Users {
+			binding := store.XrayBinding{NodeID: node.ID, Port: inbound.Port, Credential: user}
+			grant.credentialHashes[binding] = hash(signed.Panel.Credentials[offset])
+			offset++
+		}
 	}
 	if signed.Panel.TLS != nil {
 		trust := signed.Panel.TLS.Trust
