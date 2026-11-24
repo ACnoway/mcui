@@ -32,8 +32,10 @@ MCUI_XRAY_RELEASE_PUBLIC_KEY=/etc/mcui-agent/release.pub
 MCUI_NODE_CLOCK_SOCKET=1
 EOF
   cp deploy/agent-xray-bootstrap.sh "$build/xray-bootstrap/install.sh"
+  cp deploy/xray-network.sh "$build/xray-bootstrap/xray-network.sh"
   cp deploy/systemd/mcui-helper-xray-install.conf deploy/systemd/mcui-xray*.service \
-    deploy/systemd/mcui-node-clock.socket deploy/systemd/mcui-node-clock@.service "$build/units/"
+    deploy/systemd/mcui-xray-panel-network.conf deploy/systemd/mcui-node-clock.socket \
+    deploy/systemd/mcui-node-clock@.service "$build/units/"
 fi
 for arch in amd64 arm64; do
   mkdir "$build/$arch"

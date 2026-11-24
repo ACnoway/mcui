@@ -61,18 +61,19 @@ type Delivery struct {
 }
 
 type XrayDeliveryCapabilities struct {
-	InstallMode string
-	Reconcile   bool
-	Control     bool
-	Change      bool
-	Config      bool
-	Plan        bool
-	HTTP        bool
-	Protocols   bool
-	TrojanTLS   bool
-	Reality     bool
-	Public      bool
-	Routing     bool
+	InstallMode   string
+	Reconcile     bool
+	Control       bool
+	Change        bool
+	Config        bool
+	Plan          bool
+	HTTP          bool
+	Protocols     bool
+	TrojanTLS     bool
+	Reality       bool
+	Public        bool
+	Routing       bool
+	PanelInbounds bool
 }
 
 func (c XrayDeliveryCapabilities) supports(operation string) bool {
@@ -101,7 +102,7 @@ func (c XrayDeliveryCapabilities) supportsTask(task lifecycleauth.InstallTask) b
 		return true
 	}
 	plan, err := xrayconfig.ParseConfiguration(task.Plan)
-	if err != nil || (plan.Network != nil && !c.Routing) {
+	if err != nil || (plan.Network != nil && !c.Routing) || (plan.Panel != nil && !c.PanelInbounds) {
 		return false
 	}
 	for _, inbound := range plan.Inbounds {

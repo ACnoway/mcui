@@ -4,6 +4,7 @@ package xrayruntime
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,16 +36,25 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 		Version: current.Release.Version, SHA256: current.Release.SHA256, Running: current.Running,
 		Config: current.Config, ConfigRevision: current.Revision, PlanSupported: managed,
 	}
-	catalog, err := readCatalog(inboundPolicyPath, current.Release)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		_, view.Candidate, _ = readInbound(inboundPolicyPath, current.Release)
-	case err == nil && managed:
-		public, _ := catalog.Public(current.Release.SHA256)
-		view.Catalog = &public
-		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil {
-			_, view.Candidate, _ = catalog.RenderConfiguration(current.Release.SHA256, plan)
+	key, keyErr := r.panelKey()
+	if keyErr == nil && managed && runtime.GOARCH == xrayconfig.Architecture {
+		view.PanelKey = base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
+		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil && plan.Panel != nil && checkPolicyDirectory(inboundPolicyPath, current.Release) == nil {
+			_, view.Candidate, _ = plan.RenderPanel(key)
 			view.Preview = xrayconfig.PlanDigest(encoded)
+		}
+	} else if errors.Is(keyErr, os.ErrNotExist) {
+		catalog, err := readCatalog(inboundPolicyPath, current.Release)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			_, view.Candidate, _ = readInbound(inboundPolicyPath, current.Release)
+		case err == nil && managed:
+			public, _ := catalog.Public(current.Release.SHA256)
+			view.Catalog = &public
+			if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil {
+				_, view.Candidate, _ = catalog.RenderConfiguration(current.Release.SHA256, plan)
+				view.Preview = xrayconfig.PlanDigest(encoded)
+			}
 		}
 	}
 	if !managed || current.Revision == 0 {
@@ -189,14 +199,14 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	if state.Current.Release != release || revision <= state.ConfigRevision {
 		return errors.New("Xray release or configuration revision changed")
 	}
-	data, candidate, err := readCandidate(path, release, encoded)
+	data, candidate, panel, err := r.renderCandidate(path, release, encoded)
 	if err != nil || candidate != ref {
 		return errors.New("local Xray configuration differs from the approved reference")
 	}
 	if err := r.verifyBundle(release); err != nil {
 		return err
 	}
-	if err := r.checkConfigUnits(ctx, data, true); err != nil {
+	if err := r.checkConfigUnits(ctx, data, true, panel, false); err != nil {
 		return err
 	}
 	if err := authorize(ctx); err != nil {
@@ -208,7 +218,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	if err := r.writeControl(configName(ref), data); err != nil {
 		return err
 	}
-	_, candidate, err = readCandidate(path, release, encoded)
+	_, candidate, _, err = r.renderCandidate(path, release, encoded)
 	if err != nil || candidate != ref {
 		return errors.New("local Xray configuration changed during preflight")
 	}
@@ -220,7 +230,7 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	return r.change(ctx, state, intent{Action: Configure, Next: next, ConfigHash: hash})
 }
 
-func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSockets bool) error {
+func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSockets, panel, activate bool) error {
 	svc, ok := r.service.(interface {
 		checkConfigUnits(context.Context, []string, []publishedInbound, bool) error
 	})
@@ -276,6 +286,23 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, checkSocket
 		}
 		published = append(published, publishedInbound{port: inbound.Port, endpoint: endpoint})
 	}
+	if panel {
+		if len(published) != 0 {
+			return errors.New("panel Xray configuration cannot publish host sockets")
+		}
+		if !activate {
+			return svc.checkConfigUnits(ctx, nil, nil, false)
+		}
+		controller, ok := r.service.(interface {
+			setPanelDestinations(context.Context, []string) error
+		})
+		if !ok {
+			return errors.New("Xray service cannot apply panel network policy")
+		}
+		if err := controller.setPanelDestinations(ctx, destinations); err != nil {
+			return err
+		}
+	}
 	return svc.checkConfigUnits(ctx, destinations, published, checkSockets)
 }
 
@@ -290,11 +317,29 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) erro
 			return err
 		}
 		if next.Running {
-			if err := r.checkConfigUnits(ctx, raw, false); err != nil {
+			_, keyErr := r.panelKey()
+			if keyErr != nil && !errors.Is(keyErr, os.ErrNotExist) {
+				return keyErr
+			}
+			if err := r.checkConfigUnits(ctx, raw, false, keyErr == nil, true); err != nil {
 				return err
 			}
 		}
 		data = raw
+	} else if next.Running {
+		if _, err := r.panelKey(); err == nil {
+			controller, ok := r.service.(interface {
+				setPanelDestinations(context.Context, []string) error
+			})
+			if !ok {
+				return errors.New("Xray service cannot apply panel network policy")
+			}
+			if err := controller.setPanelDestinations(ctx, nil); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return r.writeControl("runtime-config.json", data)
 }

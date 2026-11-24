@@ -31,7 +31,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: mcui-xray initialize|status|recover|install|upgrade|downgrade|start|stop|uninstall")
+		return errors.New("usage: mcui-xray initialize|initialize-panel-inbounds|status|recover|install|upgrade|downgrade|start|stop|uninstall")
 	}
 	command := os.Args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -49,7 +49,7 @@ func run() error {
 	case xrayruntime.Start, xrayruntime.Stop, xrayruntime.Uninstall:
 		flags.StringVar(&release.Version, "version", "", "exact Xray release version")
 		flags.StringVar(&release.SHA256, "sha256", "", "exact Xray archive SHA-256")
-	case "initialize", "recover", "status":
+	case "initialize", "initialize-panel-inbounds", "recover", "status":
 	default:
 		return fmt.Errorf("unknown Xray command %q", command)
 	}
@@ -78,6 +78,8 @@ func run() error {
 	defer runtime.Close()
 	switch action {
 	case "initialize", "status":
+	case "initialize-panel-inbounds":
+		err = runtime.InitializePanelInbounds()
 	case "recover":
 		err = runtime.Recover(ctx)
 	case xrayruntime.Install, xrayruntime.Upgrade, xrayruntime.Downgrade:

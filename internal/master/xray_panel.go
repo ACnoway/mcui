@@ -109,7 +109,7 @@ var errXrayInventory = errors.New("node Xray inventory is unavailable or has cha
 func panelInventory(node store.Node, now time.Time) (lifecycleauth.NodeInventory, string, error) {
 	i := node.Inventory
 	if node.LastSeen < now.Add(-90*time.Second).Unix() || node.LastSeen > now.Add(5*time.Second).Unix() ||
-		i == nil || !i.Valid() || i.Xray == nil {
+		i == nil || !i.Valid() || i.Xray == nil || (node.XrayPanelKey != "" && i.Xray.PanelKey != node.XrayPanelKey) {
 		return lifecycleauth.NodeInventory{}, "", errXrayInventory
 	}
 	raw, _ := json.Marshal(i)
@@ -117,12 +117,16 @@ func panelInventory(node store.Node, now time.Time) (lifecycleauth.NodeInventory
 }
 
 func xrayDraftPreviewed(i *lifecycleauth.XrayInventory, draft string) bool {
-	return i.Catalog != nil && draft != "" && i.Preview == xrayconfig.PlanDigest(draft)
+	return (i.Catalog != nil || i.PanelKey != "") && draft != "" && i.Preview == xrayconfig.PlanDigest(draft)
 }
 
 func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 	if !i.Candidate.Valid() || i.Candidate == i.Config {
 		return false
+	}
+	if i.PanelKey != "" {
+		plan, err := xrayconfig.ParseConfiguration(draft)
+		return err == nil && plan.Panel != nil && xrayDraftPreviewed(i, draft)
 	}
 	if i.Catalog == nil {
 		return true
@@ -276,6 +280,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 		"draft_network":    plan.Network,
 		"managed_bindings": bindings,
 		"draft_previewed":  xrayDraftPreviewed(inventory.Xray, draft),
+		"panel_inbounds":   inventory.Xray.PanelKey != "" && inventory.Xray.Version == xrayconfig.Version,
 		"usage": map[string]string{
 			"user_statistics": "UNSUPPORTED", "exact_quota": "UNSUPPORTED", "reason": usageReason,
 		},
@@ -471,7 +476,7 @@ func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest
 					return errXrayInventory
 				}
 				p.Config = i.Xray.Candidate
-				if i.Xray.Catalog != nil {
+				if i.Xray.Catalog != nil || i.Xray.PanelKey != "" {
 					p.Plan = node.XrayDraft
 				}
 			}

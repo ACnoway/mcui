@@ -107,6 +107,7 @@ func New(s *store.Store, bootstrapToken, webDir string) *Server {
 	x.mux.HandleFunc("GET /api/v1/admin/nodes/{node}/xray", x.panelXrayOptions)
 	x.mux.HandleFunc("POST /api/v1/admin/nodes/{node}/xray", x.panelXrayOperation)
 	x.mux.HandleFunc("PUT /api/v1/admin/nodes/{node}/xray/draft", x.savePanelXrayDraft)
+	x.mux.HandleFunc("PUT /api/v1/admin/nodes/{node}/xray/inbounds/{port}", x.savePanelXrayInbound)
 	x.handleAPI("GET /api/v1/admin/nodes/{node}/xray/subscriptions", x.listXraySubscriptions)
 	x.handleAPI("POST /api/v1/admin/nodes/{node}/xray/subscriptions", x.changeXraySubscription)
 	x.handleAPI("GET /api/v1/admin/xray/clients", x.listXrayClients)

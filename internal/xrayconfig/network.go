@@ -45,12 +45,16 @@ type Network struct {
 
 // Configuration preserves the signed array format for existing inbound-only drafts.
 type Configuration struct {
-	Inbounds Plan     `json:"inbounds"`
-	Network  *Network `json:"network"`
+	Inbounds Plan                `json:"inbounds"`
+	Network  *Network            `json:"network"`
+	Panel    *PanelConfiguration `json:"panel,omitempty"`
 }
 
 func (c Configuration) Valid() bool {
 	if !c.Inbounds.Valid() {
+		return false
+	}
+	if c.Panel != nil && (c.Network == nil || !c.Panel.valid(c.Inbounds, c.Network.Routes)) {
 		return false
 	}
 	if c.Network == nil {
@@ -108,7 +112,7 @@ func ParseConfiguration(encoded string) (Configuration, error) {
 }
 
 func (c Catalog) AllowsConfiguration(plan Configuration) bool {
-	if !plan.Valid() || !c.Allows(plan.Inbounds) {
+	if !plan.Valid() || plan.Panel != nil || !c.Allows(plan.Inbounds) {
 		return false
 	}
 	if plan.Network == nil {

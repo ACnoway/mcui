@@ -67,6 +67,8 @@ VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之�
 
 自定义网络草稿使用 `{"inbounds":[...],"network":{"outbounds":[...],"routes":[...]}}` 格式，最大 3072 字节。出站项绑定 `tag` 及 `destination`，目的含 `address` 和 `port`。路由条目按匹配顺序排列，各自绑定 `inbound_port` 和 `outbound_tag`。领取时须声明 `xray_routing=v1` 并具有草稿中入站的相应能力。心跳的 `catalog.routing_destinations` 携带节点批准的目的，`applied_network` 从已提交配置复原。旧入站草稿继续使用数组格式和原能力声明。
 
+主控定义的草稿在 `network` 后附加 `panel.credentials` 数组，元素按入站端口顺序排列，每项是接收节点的 HPKE 密文。每入站允许一个客户端和至多一个 TCP 目标。心跳用 `panel_key` 通告节点的 X25519 公钥，主控首次保存时绑定该公钥。新草稿仍在 3072 字节限制内，并额外要求领取方声明 `xray_panel_inbounds=v1`。 [主控入站流程](./phase-4-xray-inbound.md#从主控添加入站)
+
 **取消对象**字段：`schema_version`、`node_id`、`task_id`、`sequence`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`，使用任务用途密钥和取消域。取消须目标精确匹配；可独立于顺序任务领取并持久化。取消先于开始则任务消费为 CANCELED；已开始只在操作定义的安全点停止并回滚，无法安全中止时继续完成既有已授权步骤或安全恢复，返回 `CANCEL_TOO_LATE`，不能虚报取消成功。取消与开始由本地同一事务/锁线性化。
 
 **缺口跳过对象**字段：`schema_version`、`node_id`、`sequence`、`reason`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`；`reason` 仅 `VOID_UNISSUED`、`EXPIRED`、`CANCELED`。仅当前期望序号可消费，必须验签且有效；Master 必须证明该序号未签发或已有不可启动的终态，不能借 skip 替换已启动任务。为避免跳过未知已开始任务，节点存在该序号 RUNNING/未决记录时拒绝 skip 并进入对账。跳过是独立签名的空槽声明，不是新任务或任意跳号授权；其序号和不可变内容须持久化。签发 skip 后不得再签发该槽任务。

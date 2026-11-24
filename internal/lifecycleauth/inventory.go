@@ -2,6 +2,7 @@ package lifecycleauth
 
 import (
 	"github.com/ACnoway/mcui/internal/corecatalog"
+	"github.com/ACnoway/mcui/internal/security"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
@@ -24,6 +25,7 @@ type XrayInventory struct {
 	Applied        *xrayconfig.Plan     `json:"applied,omitempty"`
 	AppliedNetwork *xrayconfig.Network  `json:"applied_network,omitempty"`
 	PlanSupported  bool                 `json:"plan_supported,omitempty"`
+	PanelKey       string               `json:"panel_key,omitempty"`
 }
 
 func (i NodeInventory) Valid() bool {
@@ -34,10 +36,14 @@ func (i NodeInventory) Valid() bool {
 		return true
 	}
 	return i.Xray.Valid() && (i.Architecture == xrayconfig.Architecture ||
-		(i.Xray.Candidate == (xrayconfig.Reference{}) && i.Xray.Config == (xrayconfig.Reference{}) && i.Xray.Catalog == nil))
+		(i.Xray.Candidate == (xrayconfig.Reference{}) && i.Xray.Config == (xrayconfig.Reference{}) && i.Xray.Catalog == nil && i.Xray.PanelKey == ""))
 }
 
 func (x XrayInventory) Valid() bool {
+	if x.PanelKey != "" && (!x.PlanSupported || x.Catalog != nil || !security.ValidNodeSecret(x.PanelKey) ||
+		(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview))) {
+		return false
+	}
 	if !x.PlanSupported && (x.Catalog != nil || x.Preview != "" || x.Applied != nil) {
 		return false
 	}
@@ -47,7 +53,7 @@ func (x XrayInventory) Valid() bool {
 			return false
 		}
 	}
-	if x.Preview != "" && (x.Catalog == nil || !xrayconfig.ValidPlanDigest(x.Preview)) {
+	if x.Preview != "" && ((x.Catalog == nil && x.PanelKey == "") || !xrayconfig.ValidPlanDigest(x.Preview)) {
 		return false
 	}
 	if x.AppliedNetwork != nil && x.Applied == nil {

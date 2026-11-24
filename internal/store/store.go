@@ -107,6 +107,7 @@ type Node struct {
 	InstallCodeExpiresAt int64                        `json:"install_code_expires_at,omitempty"`
 	Inventory            *lifecycleauth.NodeInventory `json:"inventory,omitempty"`
 	XrayDraft            string                       `json:"xray_draft,omitempty"`
+	XrayPanelKey         string                       `json:"xray_panel_key,omitempty"`
 	XraySubscriptions    map[string]XraySubscription  `json:"xray_subscriptions,omitempty"`
 }
 

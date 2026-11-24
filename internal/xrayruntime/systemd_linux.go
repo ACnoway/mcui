@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -27,6 +28,37 @@ type systemdService struct{}
 type publishedInbound struct {
 	port     int
 	endpoint xrayconfig.PublicEndpoint
+}
+
+func (systemdService) setPanelDestinations(ctx context.Context, destinations []string) error {
+	local, err := net.InterfaceAddrs()
+	if err != nil {
+		return err
+	}
+	for _, addr := range local {
+		ip, _, _ := strings.Cut(addr.String(), "/")
+		if slices.Contains(destinations, ip+"/32") {
+			return errors.New("Xray panel route targets an address of this node")
+		}
+	}
+	if err := systemctl(ctx, 22*time.Second, "start", "mcui-xray-network.service"); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	allow := append([]string{"127.0.0.1/32"}, destinations...)
+	cmd := systemctlCommand(ctx, "set-property", "--runtime", serviceUnit, "IPAddressAllow=", "IPAddressAllow="+strings.Join(allow, " "))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("apply Xray service address policy: %w", err)
+	}
+	raw, err := systemctlCommand(ctx, "show", "--property=IPAddressAllow", "--value", serviceUnit).Output()
+	got := strings.Fields(string(raw))
+	slices.Sort(got)
+	slices.Sort(allow)
+	if err != nil || !slices.Equal(got, allow) {
+		return errors.New("Xray panel service address policy differs")
+	}
+	return nil
 }
 
 func (systemdService) checkConfigUnits(ctx context.Context, destinations []string, published []publishedInbound, checkSockets bool) error {

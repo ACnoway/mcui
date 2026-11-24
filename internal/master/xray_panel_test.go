@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -690,6 +691,69 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			node.Running = false
 		}
 	}
+	t.Run("panel defined inbound signs the encrypted draft", func(t *testing.T) {
+		private, err := ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.runWithTaskState(t.Context(), func() error {
+			return s.store.Update(func(st *store.State) error {
+				registered := st.Nodes[client.nodeID]
+				registered.XrayDraft = ""
+				st.Nodes[client.nodeID] = registered
+				return nil
+			})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		direct := lifecycleauth.XrayInventory{
+			Version: newer.Version, SHA256: newer.SHA256, Running: true, PlanSupported: true,
+			PanelKey: base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()),
+		}
+		heartbeat(&direct)
+		const credential = "00000000-0000-4000-8000-000000000001"
+		change := panelInboundChange{
+			State: options(), Protocol: xrayconfig.VLESS, Username: "alice", Credential: credential,
+			Destination: xrayconfig.Destination{Address: "93.184.216.34", Port: 443},
+		}
+		write := func(csrf string) *httptest.ResponseRecorder {
+			return requestAsAdmin(t, s.Handler(), http.MethodPut, "https://panel.example.test"+path+"/inbounds/1080", change,
+				"test-session-token", csrf)
+		}
+		expect(write("incorrect-csrf"), http.StatusForbidden)
+		expect(write(client.csrf), http.StatusOK)
+		expect(write(client.csrf), http.StatusConflict)
+		registered, err := s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil || registered.XrayPanelKey != direct.PanelKey || strings.Contains(registered.XrayDraft, credential) {
+			t.Fatalf("credential persisted or node key not pinned: %v", err)
+		}
+		config, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applyDirect := panelXrayRequest{TaskID: "panel-inbound-fixture-12345", Operation: xrayconfig.Operation, Confirm: xrayconfig.Operation,
+			Version: newer.Version, CatalogVersion: 2, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
+		expect(admin(http.MethodPost, applyDirect, client.csrf), http.StatusConflict)
+		_, direct.Candidate, err = config.RenderPanel(private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		direct.Preview = xrayconfig.PlanDigest(registered.XrayDraft)
+		heartbeat(&direct)
+		applyDirect.State = options()
+		expect(admin(http.MethodPost, applyDirect, client.csrf), http.StatusCreated)
+		stored, err := runtime.Store.GetRecord(applyDirect.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		issued, err := policy.InstallKey().Verify(stored.Raw)
+		if err != nil || issued.Plan != registered.XrayDraft || issued.Config != direct.Candidate {
+			t.Fatalf("signed task does not bind the preview and sealed draft: %v", err)
+		}
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1", issued.Sequence)
+		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
+		expect(client.request(http.MethodGet, next+"&xray_panel_inbounds=v1", nil, true), http.StatusOK)
+	})
 	if err := s.ReconcileTaskRuntime(); err != nil {
 		t.Fatal(err)
 	}
