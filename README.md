@@ -23,6 +23,8 @@ Administrators can create an Xray client on the Master and bind it to both panel
 
 Updated panel-defined nodes support multiple clients per inbound. An administrator can assign one client to several nodes and generate a separate credential and setup link for each selected inbound. Removing a binding keeps the other clients on that inbound active after the revised configuration is applied. [Multi-client inbounds](docs/phase-4-xray-inbound.md#从主控添加入站)
 
+Proxy Configuration shows sampled inbound, client, and outbound bytes for the node's applied revision. The client list combines available samples across nodes. [Xray traffic](docs/phase-4-xray-inbound.md#用户级统计与额度) · [3x-ui feature roadmap](docs/phased-development-workflow.md#阶段-4xray-完整业务闭环与最小演示)
+
 ## Development checks
 
 For documentation changes, review the diff and check links. For feature changes, run the checks relevant to the change. Use `scripts/check-static.sh` for the full Linux checks.

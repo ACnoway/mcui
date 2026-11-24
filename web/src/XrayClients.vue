@@ -10,7 +10,8 @@ type BindingView = Binding & {
   node_name: string; protocol: XrayProtocol | ''; applied: boolean; panel_inbound?: boolean
   share_expires_at?: number; share_id?: string; delivery_expires_at?: number; delivery_id?: string; delivery_ready?: boolean
 }
-type Client = { username: string; revision: number; bindings: BindingView[]; expires_at?: number; share_id?: string }
+type ClientTraffic = { up: number; down: number; observed: number; scopes: number; has_gap: boolean }
+type Client = { username: string; revision: number; bindings: BindingView[]; expires_at?: number; share_id?: string; traffic?: ClientTraffic }
 type Port = { port: number; protocol: XrayProtocol | ''; credentials: string[] }
 type Node = { id: string; name: string; panel_inbounds?: boolean; panel_multi_client?: boolean; inbounds: Port[] }
 type Link = { id: string; token: string; expires_at: number }
@@ -23,6 +24,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ configure: [nodeID: string] }>()
 const path = '/api/v1/admin/xray/clients'
+const byteFormat = new Intl.NumberFormat('zh-CN')
 const clients = ref<Client[]>([])
 const nodes = ref<Node[]>([])
 const search = ref('')
@@ -239,9 +241,19 @@ onActivated(refresh)
     </div>
     <div v-if="filtered.length" class="table-wrap">
       <table class="data-table" aria-label="主控客户端">
-        <thead><tr><th scope="col">客户端</th><th scope="col">入站</th><th scope="col">总订阅</th><th scope="col">操作</th></tr></thead>
+        <thead><tr><th scope="col">客户端</th><th scope="col">入站</th><th scope="col">当前修订流量</th><th scope="col">总订阅</th><th scope="col">操作</th></tr></thead>
         <tbody><tr v-for="client in filtered" :key="client.username">
           <th scope="row">{{ client.username }}</th><td>{{ client.bindings.filter(binding => binding.applied).length }} / {{ client.bindings.length }} 已生效</td>
+          <td>
+            <template v-if="client.traffic">
+              <span>↑ {{ byteFormat.format(client.traffic.up) }} B · ↓ {{ byteFormat.format(client.traffic.down) }} B</span>
+              <small v-if="client.traffic.observed < client.traffic.scopes || client.traffic.has_gap">
+                {{ client.traffic.observed }} / {{ client.traffic.scopes }} 项有样本
+                <template v-if="client.traffic.has_gap"> · 采样过期或有缺口</template>
+              </small>
+            </template>
+            <span v-else>暂无采样</span>
+          </td>
           <td>{{ formatExpiry(client.expires_at) }}</td><td><div class="actions">
             <button type="button" class="outline" :disabled="busy" @click="editBindings(client)">分配入站</button>
             <button type="button" class="outline" :disabled="busy" @click="openShares(client)">分享</button>

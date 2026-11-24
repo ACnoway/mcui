@@ -117,6 +117,15 @@
 
 第四阶段按分布式 3x-ui 推进，对齐节点、入站、跨节点客户端、流量与额度、出站和路由的操作。实现参照 [3x-ui 固定提交 `84d04c2d`](https://github.com/MHSanaei/3x-ui/tree/84d04c2d9201b259ddf612b0c03463d0793d6685)，通过 MCUI 的签名任务授权到具体节点。3x-ui 的代理协议和传输组合是后续对齐目标，按锁定制品和节点平台逐项验收。
 
+| 对齐范围 | 当前实现与待开发内容 |
+| --- | --- |
+| 入站及客户端 | 主控支持 SOCKS5、HTTP、VLESS、VMess 和 Trojan/TLS 模板。节点目录另支持 Shadowsocks 2022 和 VLESS/REALITY。后续补齐这些协议的上游配置选项，以及 Mixed、Tunnel、WireGuard、AmneziaWG、Hysteria2、TUIC v5、MTProto、MASQUE 和 TUN。部分协议涉及上游自带的运行时组件，须在节点上验收启动、关闭和计量。 |
+| 传输与安全 | 当前以 RAW TCP 和已验收的 TLS、REALITY 组合为基线。后续按上游配置模型补齐 WebSocket、gRPC、HTTPUpgrade、XHTTP、mKCP 等传输及其安全参数。 |
+| 流量与额度 | 当前支持节点采样及客户端跨节点合计。待补节点离线队列、跨修订历史、周期重置和额度执行。 |
+| 出站与路由 | 当前支持受控 Freedom、Blackhole 和有序的 IPv4 TCP 规则。待补代理出站、DNS、GeoIP/GeoSite、负载均衡、健康检查、链式代理和出站订阅。 |
+
+协议与配置目标以上游 [入站模型](https://github.com/MHSanaei/3x-ui/blob/84d04c2d9201b259ddf612b0c03463d0793d6685/internal/database/model/model.go) 和 [协议表单](https://github.com/MHSanaei/3x-ui/tree/84d04c2d9201b259ddf612b0c03463d0793d6685/frontend/src/schemas/protocols) 为准。当前可部署的组合见 [Core 兼容矩阵](./core-compatibility.md)。
+
 隔离环境已有固定版本的 Xray 和签名任务链后，即可开发配置、入站、用户和实际连接。最小演示串起远程安装、结果回报和配置验证。Agent/Helper 自身更新及生产发布可以独立推进。
 
 首个受控入站的验收记录已归档。阶段 4 从面板管理节点已批准的 SOCKS5 端口及用户授权继续推进。第三阶段生产发布准备独立跟踪。
@@ -131,7 +140,7 @@
 - [x] 同一主控定义入站可按顺序配置多条 IPv4 TCP 放行规则。未匹配的连接继续走默认拒绝。[主控入站与路由](./phase-4-xray-inbound.md#从主控添加入站)
 - [ ] 扩展通用入站、用户和凭据管理。已接入 VLESS、VMess、Shadowsocks 2022、Trojan/TLS 和 VLESS/REALITY 的受控入站、逐协议用户授权及客户端订阅。Trojan/TLS 与 VLESS/REALITY 可由节点配置受控公网 TCP 入口。独立凭据管理仍待开发。[协议模板](./phase-4-xray-inbound.md#vlessvmess-和-shadowsocks-2022) · [公网接入](./phase-4-xray-inbound.md#受控公网-tcp-接入)
 - [x] 验证受控 SOCKS5 的实际连接、用户映射和上下行计数。默认转发的连接中读数存在缺口，进程重启丢失计数。面板明示 `UNSUPPORTED` 并禁用精确额度。[统计实测](./phase-4-xray-inbound.md#计数实测)
-- [x] 主控定义模式接入入站、客户端和出站的当前修订采样，按节点写入主控数据库并显示计数与采样时间。[用户级统计与额度](./phase-4-xray-inbound.md#用户级统计与额度)
+- [x] 主控定义模式接入入站、客户端和出站的当前修订采样，按节点持久化并显示计数与采样时间。客户端页提供跨节点合计和样本覆盖情况。[用户级统计与额度](./phase-4-xray-inbound.md#用户级统计与额度)
 - [ ] 在能持续计量的配置组合上验证持久化上报、去重和离线补报。只有计量与补报可靠的组合才开放近实时额度。
 - [x] 交付受控 SOCKS5 基础订阅，按用户和已应用修订签发，支持令牌到期、撤销与轮换。验证授权变化、日志脱敏边界和 Xray 原生客户端输出。[客户端订阅](./phase-4-xray-inbound.md#客户端订阅)
 - [x] 从空 Agent 演示注册、安装 Xray、创建入站和用户、下发配置、客户端实际连接、查看任务和统计可用性、订阅及撤销，验证错误配置拒绝与回滚。[空 Agent 最小演示](./phase-4-xray-inbound.md#空-agent-最小演示2026-11-23)

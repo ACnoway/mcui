@@ -39,6 +39,7 @@ type xrayClientView struct {
 	Bindings  []clientBindingView `json:"bindings"`
 	ExpiresAt int64               `json:"expires_at,omitempty"`
 	ShareID   string              `json:"share_id,omitempty"`
+	Traffic   *xrayClientTraffic  `json:"traffic,omitempty"`
 }
 
 type clientNodeOption struct {
@@ -95,6 +96,7 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 		Clients []xrayClientView   `json:"clients"`
 		Nodes   []clientNodeOption `json:"nodes"`
 	}{Clients: []xrayClientView{}, Nodes: []clientNodeOption{}}
+	revisions := make(map[string]int64)
 	err = s.store.View(func(st store.State) error {
 		nodeOptions := make(map[string]clientNodeOption)
 		for id, node := range st.Nodes {
@@ -104,6 +106,9 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 			inventory, _, err := panelInventory(node, now)
 			if err != nil {
 				continue
+			}
+			if inventory.Xray.StatisticsActive {
+				revisions[id] = inventory.Xray.ConfigRevision
 			}
 			option := clientNodeOption{ID: id, Name: node.Name}
 			if catalog := inventory.Xray.Catalog; catalog != nil {
@@ -162,6 +167,9 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if err == nil && len(revisions) != 0 {
+		err = s.attachXrayClientTraffic(r.Context(), result.Clients, revisions, now)
+	}
 	if err != nil {
 		http.Error(w, "could not read Xray clients", http.StatusServiceUnavailable)
 		return
