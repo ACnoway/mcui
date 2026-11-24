@@ -339,9 +339,9 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 	assertStatus(report(acks[0]), http.StatusNoContent)
 	assertStatus(client.request(http.MethodPost, "/api/v1/helper/tasks/authorize", recovered, true), http.StatusForbidden)
 	assertStatus(client.request(http.MethodPost, "/api/v1/admin/tasks", status, false), http.StatusConflict)
-	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=1", nil, true), http.StatusConflict)
+	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=1", nil, true), http.StatusNoContent)
 	advance(11 * time.Minute)
-	const reconcilePath = "/api/v1/agent/tasks/next?install=xray-manifest-v1&install_reconciliation=v1&next_sequence="
+	const reconcilePath = "/api/v1/agent/tasks/next?install=xray-official-v1&install_reconciliation=v1&next_sequence="
 	getRecovery := func(expected string) {
 		t.Helper()
 		response := client.request(http.MethodGet, reconcilePath+expected, nil, true)
