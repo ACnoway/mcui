@@ -17,6 +17,7 @@ import (
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/security"
+	"github.com/ACnoway/mcui/internal/trustedtime"
 )
 
 func main() {
@@ -28,9 +29,16 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: mcui-manifest sign|verify|init-state|suspend [options]")
+		return errors.New("usage: mcui-manifest sign|verify|init-state|suspend|node-time [options]")
 	}
 	command := args[0]
+	if command == "node-time" && len(args) == 1 {
+		now, err := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource).Now()
+		if err == nil {
+			_, err = fmt.Fprintln(os.Stdout, now.Format(time.RFC3339Nano))
+		}
+		return err
+	}
 	flags := flag.NewFlagSet("mcui-manifest "+command, flag.ContinueOnError)
 	if command == "suspend" {
 		state := flags.String("state", "", "absolute path to the caller's private manifest state")
@@ -48,11 +56,16 @@ func run(args []string) error {
 	manifest := flags.String("manifest", "manifest.json", "release manifest")
 	signature := flags.String("signature", "manifest.json.sig", "raw detached Ed25519 signature")
 	var keyPath, stateDir string
+	var distinctKeys []string
 	switch command {
 	case "sign":
 		flags.StringVar(&keyPath, "private-key", "", "offline Ed25519 PKCS#8 PEM private key")
 	case "verify", "init-state":
 		flags.StringVar(&keyPath, "public-key", "", "trusted Ed25519 public key")
+		flags.Func("distinct-public-key", "other Ed25519 public key that must be valid and distinct (repeatable)", func(path string) error {
+			distinctKeys = append(distinctKeys, path)
+			return nil
+		})
 		if command == "init-state" {
 			flags.StringVar(&stateDir, "state", "", "absolute path to the caller's private manifest state")
 		}
@@ -94,6 +107,23 @@ func run(args []string) error {
 	key, err := security.ParseEd25519PublicKey(keyData)
 	if err != nil {
 		return err
+	}
+	keys := []ed25519.PublicKey{key}
+	for _, path := range distinctKeys {
+		data, err := readRegular(path, 4096, 0)
+		if err != nil {
+			return err
+		}
+		other, err := security.ParseEd25519PublicKey(data)
+		if err != nil {
+			return err
+		}
+		for _, prior := range keys {
+			if prior.Equal(other) {
+				return errors.New("release and task signing public keys must be distinct")
+			}
+		}
+		keys = append(keys, other)
 	}
 	sig, err := readRegular(*signature, ed25519.SignatureSize, 0)
 	if err != nil {

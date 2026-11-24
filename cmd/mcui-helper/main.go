@@ -101,7 +101,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure Master checkpoint: %v", err)
 	}
-	trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+	trustedNow := trustedtime.NodeNow()
 	installEnabled := *installKeyID != "" || *installKeyPath != "" || *releaseKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
 	signedManifest := *releaseKeyPath != ""
 	config := helper.Config{
@@ -110,7 +110,7 @@ func main() {
 		AllowedUID:         uint32(allowedUID),
 		Keys:               map[string]helper.TrustedKey{*taskKeyID: {PublicKey: publicKey, Purpose: "task"}},
 		Now:                time.Now,
-		TrustedTimeHealthy: trustedClock.Healthy,
+		TrustedTimeHealthy: func() bool { _, err := trustedNow(); return err == nil },
 		Checkpoint:         checkpoint,
 		ReadStatusAt: func(unit string, observedAt time.Time) (string, error) {
 			if installEnabled && unit == "xray.service" {
@@ -134,13 +134,13 @@ func main() {
 		}
 		var artifacts *artifacttrust.Client
 		if signedManifest {
-			artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(xrayruntime.StateDir, "control", "xray-manifest"), trustedClock.Now, publicKey, key)
+			artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(xrayruntime.StateDir, "control", "xray-manifest"), trustedNow, publicKey, key)
 			if err == nil {
 				err = artifacts.ConfigureMasterBackup(*masterURL, *masterCAPath)
 			}
 		} else {
 			artifacts, err = artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(*stateDir, "xray-tuf"), func() error {
-				_, err := trustedClock.Now()
+				_, err := trustedNow()
 				return err
 			})
 		}

@@ -182,6 +182,12 @@ if [[ $preserve == false ]]; then
 fi
 runuser -u mcui-agent -- env "MCUI_AGENT_STATE=$agent_state/identity.json" "$agent" "${agent_args[@]}" "${prepare_args[@]}"
 
+if [[ -d $stage/xray-bootstrap ]]; then
+  # This profile is part of the same SHA-256 verified installer archive.
+  source "$stage/xray-bootstrap/install.sh"
+  install_xray_bootstrap
+fi
+
 # Redeem only after local prerequisites and both ledgers have been checked.
 runuser -u mcui-agent -- env "MCUI_AGENT_STATE=$agent_state/identity.json" "$agent" "${agent_args[@]}" -enroll
 restart_agent=false

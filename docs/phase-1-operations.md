@@ -34,6 +34,19 @@ MCUI_AGENT_INSTALLER_MASTER_CA=/etc/mcui-master/agent-trust-ca.pem
 2. 安全管理员在「节点管理」创建待接入的节点，选择「生成安装命令」并完成 MFA 复验。在 10 分钟内把命令粘贴到该节点的可信终端。命令先核验下载文件的 SHA-256，再以 root 运行安装程序。
 3. 安装程序核对本地身份、Agent/Helper 账本和候选信任，再通过已验证的 HTTPS 兑换安装码。核对响应节点 ID 后，凭据原子写入 `/var/lib/mcui-agent/identity.json`（`0600`），安装程序补齐缺失的信任文件并启动服务。首次心跳使原记录上线，节点仍为空 Agent。
 
+### 构建包含 Xray 引导的安装包
+
+在构建机准备 Xray 安装任务公钥、制品发布公钥、已独立核对的生效清单 `manifest.json` 和原始签名 `manifest.json.sig`。安装任务、状态任务和发布使用各自的公钥。沿用原安装包地址与 SHA-256 审核流程，将生成的新包设置为主控批准的安装包。主控仍需启用已配置好的 Xray 签发及制品服务。
+
+```sh
+bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --xray-bootstrap \
+  xray-install-key-1 xray-install.pub release.pub manifest.json manifest.json.sig
+```
+
+这个安装包在 Debian/systemd 节点执行同一条接入命令时，安装 Xray 管理单元、初始化 Agent 与 Helper 的制品清单状态，并准备本地 chrony NTS 时钟。节点上的状态任务和制品授权经 systemd 创建的 Unix 套接字读取经验证的时间。节点仍经主控安装所选的 Xray 版本。上游 NTS 未同步时签名任务等待可信时间。
+
+沿用原命令构建的安装包只准备 Agent 和 Helper。Xray 入站目录、业务网络配置和远程运行时监督的准备步骤当前分别见[受控入站部署](./phase-4-xray-inbound.md#节点准备)和[成对更新](./phase-3-runtime-update.md#启用本地监督)。
+
 生成、替换和撤销只操作所选节点。安装命令包含一次性安装码，应通过可信途径交付，避免写入共享终端历史、工单和日志。长期 Token 只由 Agent 从 HTTPS 响应取得。安装码兑换响应丢失或凭据保存失败时，为原节点生成新命令。
 
 ### 一键接入验证

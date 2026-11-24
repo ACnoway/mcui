@@ -145,7 +145,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("configure Helper client: %v", err)
 		}
-		trustedClock := trustedtime.NewChrony(trustedtime.DefaultNTSSource)
+		trustedNow := trustedtime.NodeNow()
 		var installKey lifecycleauth.InstallKey
 		var artifacts *artifacttrust.Client
 		var installer agenttasks.InstallExecutor
@@ -165,13 +165,13 @@ func main() {
 			}
 			installKey = lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key}
 			if signedManifest {
-				artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(filepath.Dir(*taskLedgerPath), "xray-manifest"), trustedClock.Now, publicKey, key)
+				artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(filepath.Dir(*taskLedgerPath), "xray-manifest"), trustedNow, publicKey, key)
 				if err == nil {
 					err = artifacts.ConfigureMasterBackup(*masterURL, *serverCA)
 				}
 			} else {
 				artifacts, err = artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(filepath.Dir(*taskLedgerPath), "xray-tuf"), func() error {
-					_, err := trustedClock.Now()
+					_, err := trustedNow()
 					return err
 				})
 			}
@@ -199,7 +199,7 @@ func main() {
 			if e != nil {
 				return nil, e
 			}
-			if e = runner.SetTrustedClock(trustedClock.Now); e != nil {
+			if e = runner.SetTrustedClock(trustedNow); e != nil {
 				return nil, e
 			}
 			if installEnabled {
