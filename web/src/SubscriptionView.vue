@@ -11,6 +11,7 @@ const password = ref('')
 const proxyPort = ref<number>(0)
 const localPort = ref<number>(10808)
 let expiryTimer = 0
+let subscriptionRead: AbortController | undefined
 const credentialLabel = computed(() => {
   if (!subscription.value) return '节点提供的凭据'
   const protocol = subscriptionProtocol(subscription.value, proxyPort.value)
@@ -25,7 +26,17 @@ watch(proxyPort, () => {
   error.value = ''
 })
 
-onMounted(async () => {
+async function loadSubscription() {
+  subscriptionRead?.abort()
+  const request = new AbortController()
+  subscriptionRead = request
+  window.clearInterval(expiryTimer)
+  subscription.value = null
+  subscriptionURL.value = ''
+  password.value = ''
+  error.value = ''
+  localPort.value = 10808
+  status.value = '正在读取订阅…'
   const token = window.location.hash.slice(1)
   window.history.replaceState(null, '', window.location.pathname)
   if (window.location.protocol !== 'https:' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.[A-Za-z0-9_-]{43}$/.test(token)) {
@@ -35,8 +46,9 @@ onMounted(async () => {
   try {
     const response = await fetch('/api/v1/subscription', {
       headers: { Authorization: `Bearer ${token}` },
-      credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer',
+      credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', signal: request.signal,
     })
+    if (request.signal.aborted) return
     if (response.status === 429) {
       status.value = '读取过于频繁，请稍后重新打开订阅链接。'
       return
@@ -46,6 +58,7 @@ onMounted(async () => {
       return
     }
     const data: unknown = await response.json()
+    if (request.signal.aborted) return
     if (!validSubscription(data)) throw new Error()
     const link = new URL('/subscription', window.location.origin)
     link.hash = token
@@ -57,11 +70,20 @@ onMounted(async () => {
     updateExpiry()
     if (subscription.value) expiryTimer = window.setInterval(updateExpiry, 5000)
   } catch {
-    status.value = '无法读取订阅，请重新打开链接重试。'
+    if (!request.signal.aborted) status.value = '无法读取订阅，请重新打开链接重试。'
   }
+}
+
+onMounted(() => {
+  window.addEventListener('hashchange', loadSubscription)
+  void loadSubscription()
 })
 
-onUnmounted(() => window.clearInterval(expiryTimer))
+onUnmounted(() => {
+  window.removeEventListener('hashchange', loadSubscription)
+  subscriptionRead?.abort()
+  window.clearInterval(expiryTimer)
+})
 
 function updateExpiry() {
   if (!subscription.value || Date.now() < subscription.value.expires_at * 1000) return
