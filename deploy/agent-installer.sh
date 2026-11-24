@@ -8,6 +8,7 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 master=
 node_id=
 preserve=false
+enable_panel_inbounds=false
 provided_key_id=
 provided_key=
 provided_ca=
@@ -16,6 +17,7 @@ while (($#)); do
     --master) (($# >= 2)) || die 'Missing Master address'; master=$2; shift 2 ;;
     --node-id) (($# >= 2)) || die 'Missing node ID'; node_id=$2; shift 2 ;;
     --preserve-state) preserve=true; shift ;;
+    --enable-panel-inbounds) enable_panel_inbounds=true; shift ;;
     --task-key-id) (($# >= 2)) || die 'Missing task key ID'; provided_key_id=$2; shift 2 ;;
     --task-public-key) (($# >= 2)) || die 'Missing task public key'; provided_key=$2; shift 2 ;;
     --master-ca-base64) (($# >= 2)) || die 'Missing Master CA'; provided_ca=$2; shift 2 ;;
@@ -37,6 +39,9 @@ case "$(uname -m)" in
   aarch64) arch=arm64 ;;
   *) die 'Unsupported Linux architecture' ;;
 esac
+if [[ $enable_panel_inbounds == true && ( $preserve != true || $arch != amd64 ) ]]; then
+  die 'Panel inbound migration requires --preserve-state and an amd64 node'
+fi
 command -v systemctl >/dev/null || die 'A running systemd instance is required'
 systemctl show --property=Version --value >/dev/null || die 'A running systemd instance is required'
 
@@ -95,12 +100,15 @@ cleanup() {
 trap cleanup EXIT
 archive_line=$(awk '/^__MCUI_ARCHIVE__$/ { print NR + 1; exit }' "$0")
 [[ $archive_line ]] || die 'Installer archive is missing'
-tail -n "+$archive_line" "$0" | tar -xz -C "$stage"
+tail -n "+$archive_line" "$0" | tar --no-same-owner -xz -C "$stage"
 # The service account needs read/execute access to the staged Agent for preflight.
 chmod 0755 "$stage"
 agent=$stage/$arch/mcui-agent
 helper=$stage/$arch/mcui-helper
 [[ -x $agent && -x $helper ]] || die 'Installer is missing the required binaries'
+if [[ $enable_panel_inbounds == true && ! -d $stage/xray-bootstrap ]]; then
+  die 'Panel inbound migration requires an installer with the Xray bootstrap profile'
+fi
 chmod 0755 "$stage/$arch" "$agent"
 
 install_trust() {
@@ -187,6 +195,32 @@ if [[ -d $stage/xray-bootstrap ]]; then
   source "$stage/xray-bootstrap/install.sh"
   install_xray_bootstrap
 fi
+runtime_profile=
+runtime_config=/etc/mcui-runtime
+if [[ -d $stage/runtime-bootstrap && $preserve == false ]]; then
+  runtime_profile=$stage/runtime-bootstrap
+  runtime_binary=$stage/$arch/mcui-runtime
+  [[ -x $runtime_binary ]] || die 'Installer is missing the runtime supervisor'
+  if file_exists "$runtime_config"; then
+    [[ -d $runtime_config && ! -L $runtime_config && $(stat -c '%u:%a' -- "$runtime_config") == 0:700 ]] ||
+      die 'Insecure runtime trust directory'
+  fi
+  for key in release.pub update.pub; do
+    if file_exists "$runtime_config/$key"; then
+      check_config "$runtime_config/$key"
+      cmp -s -- "$runtime_profile/$key" "$runtime_config/$key" || die 'Existing runtime trust differs from the installer'
+    fi
+  done
+  runtime_trust=(-distinct-public-key "$effective_key")
+  for key in "$config/xray-install.pub" "$config/release.pub"; do
+    if file_exists "$key"; then
+      runtime_trust+=(-distinct-public-key "$key")
+    fi
+  done
+  "$runtime_binary" init -node-id "$node_id" -version "$(<"$runtime_profile/version")" \
+    -installer-source "$stage/$arch" -release-key "$runtime_profile/release.pub" \
+    -update-key "$runtime_profile/update.pub" "${runtime_trust[@]}"
+fi
 
 # Redeem only after local prerequisites and both ledgers have been checked.
 runuser -u mcui-agent -- env "MCUI_AGENT_STATE=$agent_state/identity.json" "$agent" "${agent_args[@]}" -enroll
@@ -209,6 +243,16 @@ printf 'MCUI_MASTER_URL=%s\nMCUI_NODE_ID=%s\nMCUI_SERVER_CA=%s\n' "$master" "$no
 printf 'MCUI_TASK_KEY_ID=%s\n' "$key_id" >"$stage/agent-task-runtime.env"
 cat "$stage/agent.env" "$stage/agent-task-runtime.env" >"$stage/helper.env"
 install -o root -g mcui-agent -m 0640 "$stage/agent.env" "$stage/agent-task-runtime.env" "$stage/helper.env" "$config/"
+if [[ $runtime_profile ]]; then
+  install -d -o root -g root -m 0700 "$runtime_config"
+  install -o root -g root -m 0644 "$runtime_profile/release.pub" "$runtime_profile/update.pub" "$runtime_config/"
+  install -o root -g root -m 0755 "$runtime_binary" /usr/local/bin/mcui-runtime
+  install -o root -g root -m 0644 "$stage/units/"mcui-runtime-{recover,update,remote}.service \
+    "$stage/units/mcui-runtime-remote.timer" /etc/systemd/system/
+  install -d -o root -g root -m 0755 /etc/systemd/system/mcui-helper.service.d
+  install -o root -g root -m 0644 "$stage/units/mcui-agent-paired-runtime.conf" /etc/systemd/system/mcui-agent.service.d/zz-paired-runtime.conf
+  install -o root -g root -m 0644 "$stage/units/mcui-helper-paired-runtime.conf" /etc/systemd/system/mcui-helper.service.d/zz-paired-runtime.conf
+fi
 systemctl daemon-reload
 systemctl enable mcui-helper.service mcui-agent.service
 systemctl restart mcui-helper.service mcui-agent.service

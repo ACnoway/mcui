@@ -5,6 +5,8 @@ package runtimeupdate
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -71,14 +73,58 @@ func (m *Manager) Bootstrap(ctx context.Context, node, version string, releaseKe
 }
 
 func (m *Manager) bootstrap(ctx context.Context, node, version string, releaseKey, authorizationKey ed25519.PublicKey, source string) error {
-	for _, name := range []string{"state.json", "current", runtimehealth.TrialFile} {
-		if _, err := os.Lstat(filepath.Join(m.dir, name)); !errors.Is(err, os.ErrNotExist) {
-			return errors.New("runtime state already exists or requires local recovery")
-		}
+	return m.bootstrapPair(ctx, node, version, releaseKey, authorizationKey, source, false)
+}
+
+// BootstrapInstaller imports an audited pair from a verified installer archive.
+// A retry may resume the exact initialized pair before any update has run.
+func (m *Manager) BootstrapInstaller(ctx context.Context, node, version string, releaseKey, authorizationKey ed25519.PublicKey, source string) error {
+	if !filepath.IsAbs(source) || filepath.Clean(source) != source {
+		return errors.New("invalid installer source directory")
 	}
+	return m.bootstrapPair(ctx, node, version, releaseKey, authorizationKey, source, true)
+}
+
+func (m *Manager) bootstrapPair(ctx context.Context, node, version string, releaseKey, authorizationKey ed25519.PublicKey, source string, retry bool) error {
 	if !security.ValidNodeID(node) || !versionPattern.MatchString(version) || len(releaseKey) != ed25519.PublicKeySize ||
 		len(authorizationKey) != ed25519.PublicKeySize || releaseKey.Equal(authorizationKey) {
 		return errors.New("invalid runtime version or independent trust keys")
+	}
+	if _, err := os.Lstat(filepath.Join(m.dir, runtimehealth.TrialFile)); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("runtime trial requires local recovery")
+	}
+	prior, err := m.Status()
+	if errors.Is(err, os.ErrNotExist) {
+		if _, linkErr := os.Lstat(filepath.Join(m.dir, "current")); !errors.Is(linkErr, os.ErrNotExist) {
+			return errors.New("runtime selection without state requires local recovery")
+		}
+	} else if err != nil || !retry || prior.NodeID != node || prior.Current.Version != version || prior.LastResult != "initialized" ||
+		prior.Sequence != 0 || prior.Pending != nil || prior.Previous != nil || prior.RemoteReceipt != nil ||
+		!releaseKey.Equal(ed25519.PublicKey(prior.ReleaseKey)) || !authorizationKey.Equal(ed25519.PublicKey(prior.AuthorizationKey)) {
+		return errors.New("runtime state already exists or requires local recovery")
+	} else {
+		link, err := os.Readlink(filepath.Join(m.dir, "current"))
+		if (err == nil && link != filepath.Join("releases", prior.Current.Digest())) || (err != nil && !errors.Is(err, os.ErrNotExist)) {
+			return errors.New("runtime selection differs from the initialized pair")
+		}
+		for index, digest := range []string{prior.Current.AgentSHA256, prior.Current.HelperSHA256} {
+			file, _, err := openTrusted(filepath.Join(source, binaries[index]), maxBinary)
+			if err != nil {
+				return err
+			}
+			hash := sha256.New()
+			_, err = io.Copy(hash, &contextReader{ctx, file})
+			if err = errors.Join(err, file.Close()); err != nil {
+				return err
+			}
+			if hex.EncodeToString(hash.Sum(nil)) != digest {
+				return errors.New("installer binaries differ from the initialized runtime pair")
+			}
+		}
+		if err := m.point(prior.Current); err != nil {
+			return err
+		}
+		return syncDir(filepath.Dir(m.dir))
 	}
 	pair, err := m.stagePair(ctx, version, func(name string) (io.ReadCloser, int64, error) {
 		file, size, err := openTrusted(filepath.Join(source, name), maxBinary)

@@ -189,7 +189,11 @@ function downloadClient() {
           <label v-if="!selection.credential">{{ credentialLabel }}
             <input v-model="password" type="password" required maxlength="89" autocomplete="off" />
           </label>
-          <p v-else>此链接已提供该入站的凭据。</p>
+          <details v-else-if="activeEntry">
+            <summary>查看本地 SOCKS5 凭据</summary>
+            <p>用户名 <code>{{ activeEntry.config.username }}</code></p>
+            <p>密码 <code>{{ selection.credential }}</code></p>
+          </details>
           <p v-if="activeEntry && activeEntry.config.username !== selection.username">节点凭据名 {{ activeEntry.config.username }}</p>
           <button type="submit">生成并下载 Xray 配置</button>
           <p v-if="error" class="error" role="alert">{{ error }}</p>

@@ -128,17 +128,24 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				(in.Public != (xrayconfig.PublicEndpoint{}) && (!in.Public.Valid() || !slices.Contains(inv.Xray.PanelAddresses, in.Public.Address)))) {
 				return lifecycleauth.ErrDenied
 			}
+			if node.XrayPanelKey == "" && (inv.Xray.ConfigRevision != 0 || len(clientBindingsForNode(st, nodeID)) != 0) {
+				return errXrayInventory
+			}
 			var entries []panelInbound
 			var identity *xrayconfig.PanelTLS
 			network := &xrayconfig.Network{Outbounds: []xrayconfig.Outbound{}, Routes: []xrayconfig.Route{}}
 			if node.XrayDraft != "" {
 				draft, err := xrayconfig.ParseConfiguration(node.XrayDraft)
-				if err != nil || draft.Panel == nil {
+				if err != nil {
 					return errXrayInventory
 				}
-				entries = panelInbounds(draft)
-				identity = draft.Panel.TLS
-				network = draft.Network
+				if draft.Panel != nil {
+					entries = panelInbounds(draft)
+					identity = draft.Panel.TLS
+					network = draft.Network
+				} else if node.XrayPanelKey != "" || len(draft.Inbounds) != 0 {
+					return errXrayInventory
+				}
 			}
 			index := slices.IndexFunc(entries, func(entry panelInbound) bool { return entry.Inbound.Port == port })
 			if index >= 0 && (in.Remove || in.Protocol != entries[index].Inbound.Protocol || in.Username != entries[index].Inbound.Users[0] || in.Credential != "") {

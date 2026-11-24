@@ -699,7 +699,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err := s.runWithTaskState(t.Context(), func() error {
 			return s.store.Update(func(st *store.State) error {
 				registered := st.Nodes[client.nodeID]
-				registered.XrayDraft = ""
+				registered.XrayDraft = "[]"
 				st.Nodes[client.nodeID] = registered
 				return nil
 			})

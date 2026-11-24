@@ -40,12 +40,19 @@ func run(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("mcui-runtime "+command, flag.ContinueOnError)
 	var node, version, releaseKey, updateKey, authorization, signature string
 	var master, ca, token string
+	var installerSource string
+	var distinctKeys []string
 	switch command {
 	case "init":
 		flags.StringVar(&node, "node-id", "", "expected enrolled node ID")
 		flags.StringVar(&version, "version", "", "version of the audited installed pair")
 		flags.StringVar(&releaseKey, "release-key", "/etc/mcui-runtime/release.pub", "independent runtime release public key")
 		flags.StringVar(&updateKey, "update-key", "/etc/mcui-runtime/update.pub", "independent node update authorization public key")
+		flags.StringVar(&installerSource, "installer-source", "", "root-owned verified installer directory containing the Agent and Helper")
+		flags.Func("distinct-public-key", "other trusted key that must differ from both runtime keys", func(path string) error {
+			distinctKeys = append(distinctKeys, path)
+			return nil
+		})
 	case "sign":
 		flags.StringVar(&updateKey, "private-key", "", "offline Ed25519 PKCS#8 update authorization key")
 		flags.StringVar(&authorization, "input", "authorization.json", "exact authorization JSON to sign")
@@ -87,6 +94,18 @@ func run(ctx context.Context, args []string) error {
 		update, err := runtimeupdate.ReadPublicKey(updateKey)
 		if err != nil {
 			return err
+		}
+		for _, path := range distinctKeys {
+			other, err := runtimeupdate.ReadPublicKey(path)
+			if err != nil {
+				return err
+			}
+			if release.Equal(other) || update.Equal(other) {
+				return errors.New("runtime trust keys must differ from task and Core keys")
+			}
+		}
+		if installerSource != "" {
+			return manager.BootstrapInstaller(ctx, node, version, release, update, installerSource)
 		}
 		return manager.Bootstrap(ctx, node, version, release, update)
 	case "status":

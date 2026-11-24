@@ -45,9 +45,20 @@ bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --xray-bootstra
 
 这个安装包在 Debian/systemd 节点执行同一条接入命令时，安装 Xray 管理单元、初始化 Agent 与 Helper 的制品清单状态，并准备本地 chrony NTS 时钟。节点上的状态任务和制品授权经 systemd 创建的 Unix 套接字读取经验证的时间。节点仍经主控安装所选的 Xray 版本。上游 NTS 未同步时签名任务等待可信时间。
 
-在全新 amd64 节点上，该包还准备 iproute2、slirp4netns、入站凭据密钥和隔离网络服务。节点需支持 TUN、网络命名空间和 systemd 的地址过滤。保留状态的重新接入沿用原有配置模式。 [主控添加入站](./phase-4-xray-inbound.md#从主控添加入站)
+在全新 amd64 节点上，该包还准备 iproute2、slirp4netns、入站凭据密钥和隔离网络服务。节点需支持 TUN、网络命名空间和 systemd 的地址过滤。保留状态的重新接入默认沿用原有配置模式。可按维护流程显式迁移旧节点。 [主控添加入站](./phase-4-xray-inbound.md#从主控添加入站) · [旧节点迁移](./phase-4-xray-inbound.md#将旧节点迁移到主控定义模式)
 
 已启用 Xray 生命周期的节点重新接入时，需要保留 Agent 和 Helper 已接受的清单状态。状态丢失时接入命令会在兑换安装码前停止，按[制品信任恢复](./phase-3-release.md)核对并恢复原有状态。
+
+### 首次接入时初始化成对更新
+
+构建可信安装包时可同时传入 `--runtime-bootstrap` 和 `--xray-bootstrap`。前者使用已审核的 Agent/Helper 基线版本，以及彼此独立并区别于任务和 Core 签名的两个运行时公钥。
+
+```sh
+bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --runtime-bootstrap \
+  v1.0.0 runtime-release.pub runtime-authorization.pub
+```
+
+首次接入时，安装器在兑换前校验公钥并初始化该节点的成对运行时，接入完成后由 systemd 启动同一版本指针下的 Agent 和 Helper。若接入中断，可使用同一安装包重试，监督器只接受与已初始化版本完全相同的二进制和信任。可用 `mcui-runtime status` 核对基线。远程领取需另行配置令牌并启用定时器。保留状态的重新接入沿用既有监督器配置。 [成对更新](./phase-3-runtime-update.md)
 
 沿用原命令构建的安装包只准备 Agent 和 Helper。Xray 入站目录、业务网络配置和远程运行时监督的准备步骤当前分别见[受控入站部署](./phase-4-xray-inbound.md#节点准备)和[成对更新](./phase-3-runtime-update.md#启用本地监督)。
 

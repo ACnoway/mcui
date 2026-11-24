@@ -14,9 +14,13 @@ import (
 
 const panelKeyFile = "panel-inbound-key.json"
 
-// InitializePanelInbounds provisions the key before the node accepts panel
-// inbounds. Existing node-owned configurations keep their policy mode.
+// InitializePanelInbounds provisions the key for new nodes or nodes whose previous
+// installation was explicitly uninstalled. The revision watermark is retained.
 func (r *Runtime) InitializePanelInbounds() error {
+	return r.initializePanelInbounds(inboundPolicyPath)
+}
+
+func (r *Runtime) initializePanelInbounds(policyPath string) error {
 	if _, err := r.panelKey(); !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -24,10 +28,11 @@ func (r *Runtime) InitializePanelInbounds() error {
 	if err != nil {
 		return err
 	}
-	if state.Current.Revision != 0 || state.ConfigRevision != 0 || state.Pending != nil {
-		return errors.New("existing Xray configuration requires migration")
+	if state.Current != (selection{}) || state.Pending != nil ||
+		(state.ConfigRevision != 0 && (state.LastAction != Uninstall || state.LastResult != "committed")) {
+		return errors.New("uninstall Xray and finish lifecycle reconciliation before enabling panel inbounds")
 	}
-	for _, path := range []string{inboundPolicyPath, filepath.Join(filepath.Dir(inboundPolicyPath), catalogFilename)} {
+	for _, path := range []string{policyPath, filepath.Join(filepath.Dir(policyPath), catalogFilename)} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			return errors.New("existing node-owned Xray policy requires migration")
 		}

@@ -142,6 +142,36 @@ func TestRuntimeRollbackWithFullFilesystem(t *testing.T) {
 
 func (f updateFixture) clock() (time.Time, error) { return f.now, nil }
 
+func TestInstallerBootstrapRetryUsesExactInitialPair(t *testing.T) {
+	fixture := newUpdateFixture(t)
+	state := requireStatus(t, fixture.manager, "v1.0.0", "initialized", 0, 0)
+	source := t.TempDir()
+	for _, name := range binaries {
+		writeTestFile(t, filepath.Join(source, name), executableFixture("old-"+name))
+	}
+	release := fixture.release.Public().(ed25519.PublicKey)
+	approve := fixture.approve.Public().(ed25519.PublicKey)
+	retry := func() error {
+		return fixture.manager.BootstrapInstaller(t.Context(), state.NodeID, state.Current.Version, release, approve, source)
+	}
+	if err := os.Remove(filepath.Join(fixture.manager.dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := retry(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := fixture.manager.available()
+	if err != nil || recovered.Current != state.Current {
+		t.Fatalf("installer retry did not recover the exact baseline: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(source, binaries[0]), executableFixture("other"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retry(); err == nil {
+		t.Fatal("installer retry accepted a different binary")
+	}
+}
+
 func TestBootstrapUnderPrivateUmask(t *testing.T) {
 	mask := unix.Umask(0077)
 	defer unix.Umask(mask)

@@ -18,7 +18,7 @@ install_xray_bootstrap() {
   fi
   [[ -f /etc/debian_version ]] && command -v apt-get >/dev/null ||
     die 'Automatic Xray bootstrap requires Debian with APT'
-  if [[ $arch == amd64 && $preserve == false ]]; then
+  if [[ $arch == amd64 && ( $preserve == false || $enable_panel_inbounds == true ) ]]; then
     panel_inbounds=true
     if [[ ! -x /usr/sbin/ip || ! -x /usr/bin/slirp4netns || ! -x /usr/sbin/modprobe ]]; then
       apt-get update </dev/null

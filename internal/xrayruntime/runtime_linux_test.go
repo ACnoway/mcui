@@ -93,6 +93,49 @@ func TestXrayArchiveRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestEnablePanelInboundsAfterUninstallRetainsRevisionWatermark(t *testing.T) {
+	svc := &fakeService{}
+	r := newRuntime(t, svc)
+	svc.dir = r.dir
+	policyDir := t.TempDir()
+	policy := filepath.Join(policyDir, "controlled-inbound.json")
+	release := stageFixture(t, r, xrayconfig.Version)
+	applyFixture(t, r, Install, selection{Release: release, Running: true})
+	state := readState(t, r)
+	state.ConfigRevision = 7
+	if err := r.save(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.initializePanelInbounds(policy); err == nil {
+		t.Fatal("migration accepted an installed Xray")
+	}
+	applyFixture(t, r, Uninstall, selection{})
+	catalog := filepath.Join(policyDir, catalogFilename)
+	if err := os.WriteFile(catalog, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.initializePanelInbounds(policy); err == nil {
+		t.Fatal("migration accepted an existing node catalog")
+	}
+	if err := os.Rename(catalog, catalog+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.initializePanelInbounds(policy); err != nil {
+		t.Fatal(err)
+	}
+	key, err := r.panelKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.initializePanelInbounds(policy); err != nil {
+		t.Fatal(err)
+	}
+	retryKey, err := r.panelKey()
+	if err != nil || !key.Equal(retryKey) || readState(t, r).ConfigRevision != 7 {
+		t.Fatalf("migration changed the key or revision watermark: %v", err)
+	}
+}
+
 func TestLifecycleRollsBackAndRecoversPendingIntent(t *testing.T) {
 	ctx := context.Background()
 	svc := &fakeService{}
