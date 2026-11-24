@@ -32,9 +32,9 @@
 |---|---|---|---|
 | 安装/启停/升级/降级/卸载及回滚 | amd64 已通过隔离生命周期、系统服务及远程投递测试。远程安装使用官方 `v26.10.31`，升级、降级和卸载的 systemd 测试使用合成制品。生产部署待验收。[检查记录](./phase-3-progress.md#已执行检查) | 待验证 | 待验证 |
 | 配置预检、安全应用、恢复 | `v26.10.31` Debian 13 amd64 受控模板的低权限预检、签名投递、启动失败回滚和对账通过隔离验收。[实测记录](./phase-4-xray-inbound.md#隔离验收记录) | 待验证 | 待验证；内部状态特别验证 |
-| 入站/用户管理 | `v26.10.31` Debian 13 amd64 已验证受控 VLESS、VLESS/REALITY、VMess、Shadowsocks 2022、Trojan/TLS、SOCKS5 和 HTTP 的真实连接及授权隔离。节点 root 可为 Trojan/TLS 和 VLESS/REALITY 配置受控 IPv4 TCP 公网入口。REALITY 的握手目标固定在专用命名空间内。面板管理使用节点预配类型、端口和凭据。[公网 TCP 隔离验收](./phase-4-xray-inbound.md#公网-tcp-入口隔离验收) · [REALITY 隔离验收](./phase-4-xray-inbound.md#vless-reality-隔离验收) · [Trojan TLS 隔离验收](./phase-4-xray-inbound.md#trojan-tls-隔离验收) · [三种协议的隔离验收](./phase-4-xray-inbound.md#三种协议的隔离验收) · [混合端口验收](./phase-4-xray-inbound.md#http-专用入站验收) | 待验证 | 待验证；独立用户模型 |
+| 入站/用户管理 | `v26.10.31` Debian 13 amd64 已验证受控 VLESS、VLESS/REALITY、VMess、Shadowsocks 2022、Trojan/TLS、SOCKS5 和 HTTP 的真实连接及授权隔离。节点 root 可为 Trojan/TLS 和 VLESS/REALITY 配置受控 IPv4 TCP 公网入口。REALITY 的握手目标固定在专用命名空间内。主控定义模式可新建回环 SOCKS5、HTTP、VLESS、VMess 和 Trojan/TLS，并开通 Trojan/TLS 公网入口。[主控定义入站](./phase-4-xray-inbound.md#从主控添加入站) · [节点目录公网 TCP 验收](./phase-4-xray-inbound.md#公网-tcp-入口隔离验收) · [REALITY 验收](./phase-4-xray-inbound.md#vless-reality-隔离验收) · [三种协议的隔离验收](./phase-4-xray-inbound.md#三种协议的隔离验收) · [HTTP 验收](./phase-4-xray-inbound.md#http-专用入站验收) | 待验证 | 待验证；独立用户模型 |
 | 用户级统计/精确额度 | `v26.10.31` Debian 13 amd64 实测默认 SOCKS5 转发的下行计数延后至连接关闭，重启后计数消失。受控端口显示 `UNSUPPORTED`，精确额度禁用。[统计证据](./phase-4-xray-inbound.md#计数实测) | 待验证，禁用 | 待验证，禁用 |
-| 客户端订阅 | 受控 VLESS、VLESS/REALITY、VMess、Shadowsocks 2022、Trojan/TLS、SOCKS5 和 HTTP 按用户、配置修订签发。浏览器按端口类型生成 Xray 原生客户端配置。Trojan 订阅绑定获准证书，REALITY 订阅绑定获准公钥。含获准公网入口的订阅使用第 4 版并携带签名绑定的 IPv4 和 TCP 端口。已在 Debian amd64 验证真实连接。[订阅操作](./phase-4-xray-inbound.md#客户端订阅) | 待验证 | 待验证 |
+| 客户端订阅 | 按用户和已应用配置签发。浏览器按端口类型生成 Xray 原生客户端配置。总订阅可包含主控定义及节点预配的多个入站。Trojan 订阅绑定获准证书，REALITY 订阅绑定获准公钥。含获准公网入口的订阅使用第 4 版并携带签名绑定的 IPv4 和 TCP 端口。已在 Debian amd64 验证真实连接。主控定义入站的短期领取链接绑定当前已应用凭据。[订阅操作](./phase-4-xray-inbound.md#客户端订阅) | 待验证 | 待验证 |
 | 热重载 | 待验证，禁用 | 待验证，禁用 | 待验证，禁用 |
 | 同类多实例 | V1 不支持 | V1 不支持 | V1 不支持 |
 
