@@ -12,6 +12,8 @@ enable_panel_inbounds=false
 provided_key_id=
 provided_key=
 provided_ca=
+provided_core_id=
+provided_core_key=
 while (($#)); do
   case "$1" in
     --master) (($# >= 2)) || die 'Missing Master address'; master=$2; shift 2 ;;
@@ -20,6 +22,8 @@ while (($#)); do
     --enable-panel-inbounds) enable_panel_inbounds=true; shift ;;
     --task-key-id) (($# >= 2)) || die 'Missing task key ID'; provided_key_id=$2; shift 2 ;;
     --task-public-key) (($# >= 2)) || die 'Missing task public key'; provided_key=$2; shift 2 ;;
+    --core-key-id) (($# >= 2)) || die 'Missing Core key ID'; provided_core_id=$2; shift 2 ;;
+    --core-public-key) (($# >= 2)) || die 'Missing Core public key'; provided_core_key=$2; shift 2 ;;
     --master-ca-base64) (($# >= 2)) || die 'Missing Master CA'; provided_ca=$2; shift 2 ;;
     *) die 'Unknown installer option' ;;
   esac
@@ -32,6 +36,11 @@ if [[ $provided_key_id || $provided_key || $provided_ca ]]; then
   [[ $provided_key_id =~ ^[A-Za-z0-9._:-]{1,128}$ && $provided_key =~ ^[A-Za-z0-9+/]{43}=$ ]] ||
     die 'Automatic trust setup requires a valid task key ID and Base64 Ed25519 public key'
   (( ${#provided_ca} <= 21848 )) || die 'Master CA exceeds the enrollment limit'
+fi
+if [[ $provided_core_id || $provided_core_key ]]; then
+  [[ $provided_key_id && $provided_core_id =~ ^[A-Za-z0-9._:-]{1,128}$ &&
+     $provided_core_key =~ ^[A-Za-z0-9+/]{43}=$ && $provided_core_id != "$provided_key_id" ]] ||
+    die 'Core trust requires distinct task and Core key IDs and Base64 Ed25519 public keys'
 fi
 [[ $(uname -s) == Linux ]] || die 'Linux with systemd is required'
 case "$(uname -m)" in
@@ -110,6 +119,11 @@ if [[ $enable_panel_inbounds == true && ! -d $stage/xray-bootstrap ]]; then
   die 'Panel inbound migration requires an installer with the Xray bootstrap profile'
 fi
 chmod 0755 "$stage/$arch" "$agent"
+if [[ -f $stage/xray-bootstrap/managed ]]; then
+  [[ $provided_core_id ]] || die 'The managed installer requires the Core management public key from the panel'
+elif [[ $provided_core_id ]]; then
+  die 'This installer does not accept the Core management public key'
+fi
 
 install_trust() {
   pending_trust=$(mktemp "$config/.mcui-trust.XXXXXXXX")

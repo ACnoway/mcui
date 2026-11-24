@@ -65,19 +65,70 @@ func OpenSignedCore(keyPath, stateDir string, now func() (time.Time, error), oth
 		timeHealthy:     func() error { _, err := now(); return err },
 		requireCoreRole: true,
 		artifactHTTP:    &http.Client{Timeout: artifactTimeout, Transport: transport, CheckRedirect: checkArtifactRedirect},
-		signed: &manifestClient{
-			stateDir: dir, key: key, now: now,
-			api: &http.Client{
-				Timeout:       metadataTimeout,
-				Transport:     newPublicTransport(func(host string) bool { return host == "api.github.com" }),
-				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-			},
-			assets: &http.Client{Timeout: metadataTimeout, Transport: transport, CheckRedirect: checkArtifactRedirect},
-		},
+		signed:          newManifestClient(dir, key, now, transport),
 	}, nil
 }
 
+// OpenPublishedManifest bootstraps a deployment from the signed GitHub release
+// stream using an independently packaged release public key. Subsequent reads
+// apply the same durable rollback checks as node artifact downloads.
+func OpenPublishedManifest(keyPath, stateDir string, now func() (time.Time, error), otherKeys ...ed25519.PublicKey) (func(context.Context) (Manifest, error), error) {
+	m, err := openPublishedManifest(keyPath, stateDir, now, otherKeys)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) (Manifest, error) { return m.refreshState(ctx, true, false) }, nil
+}
+
+// InitializePublishedManifest provisions a new node's rollback state. An
+// already provisioned node can re-enroll without refreshing the release.
+func InitializePublishedManifest(ctx context.Context, keyPath, stateDir string, now func() (time.Time, error), otherKeys ...ed25519.PublicKey) error {
+	m, err := openPublishedManifest(keyPath, stateDir, now, otherKeys)
+	if err != nil {
+		return err
+	}
+	_, err = m.refreshState(ctx, true, true)
+	return err
+}
+
+func openPublishedManifest(keyPath, stateDir string, now func() (time.Time, error), otherKeys []ed25519.PublicKey) (*manifestClient, error) {
+	if !filepath.IsAbs(stateDir) || now == nil {
+		return nil, ErrUnavailable
+	}
+	key, err := readProvisionedManifestKey(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range otherKeys {
+		if key.Equal(other) {
+			return nil, errors.New("release and task signing keys must be different")
+		}
+	}
+	dir, err := preparePrivateDirectory(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	m := newManifestClient(dir, key, now, newPublicTransport(allowedArtifactHost))
+	return m, nil
+}
+
+func newManifestClient(dir string, key ed25519.PublicKey, now func() (time.Time, error), transport *http.Transport) *manifestClient {
+	return &manifestClient{
+		stateDir: dir, key: key, now: now,
+		api: &http.Client{
+			Timeout:       metadataTimeout,
+			Transport:     newPublicTransport(func(host string) bool { return host == "api.github.com" }),
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		assets: &http.Client{Timeout: metadataTimeout, Transport: transport, CheckRedirect: checkArtifactRedirect},
+	}
+}
+
 func (m *manifestClient) refresh(ctx context.Context) (Manifest, error) {
+	return m.refreshState(ctx, false, false)
+}
+
+func (m *manifestClient) refreshState(ctx context.Context, bootstrap, initializeOnly bool) (Manifest, error) {
 	unlock, err := lockManifestState(m.stateDir)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%w: lock release manifest state: %w", ErrUnavailable, err)
@@ -87,8 +138,12 @@ func (m *manifestClient) refresh(ctx context.Context) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("%w: release manifest state requires recovery", ErrUnavailable)
 	}
 	prior, err := readManifestState(m.stateDir)
-	if err != nil {
+	initial := bootstrap && errors.Is(err, errManifestNotInitialized)
+	if err != nil && !initial {
 		return Manifest{}, err
+	}
+	if initializeOnly && !initial {
+		return Manifest{}, nil
 	}
 	if now, err := m.now(); err != nil || now.IsZero() {
 		return Manifest{}, fmt.Errorf("%w: authenticated time is unavailable", ErrUnavailable)
@@ -125,7 +180,16 @@ func (m *manifestClient) refresh(ctx context.Context) (Manifest, error) {
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	if err = advanceManifestState(m.stateDir, prior, stateOf(verified, raw)); err != nil {
+	next := stateOf(verified, raw)
+	if initial {
+		err = writeManifestState(m.stateDir, next)
+		if err == nil {
+			err = syncDirectory(filepath.Dir(m.stateDir))
+		}
+	} else {
+		err = advanceManifestState(m.stateDir, prior, next)
+	}
+	if err != nil {
 		return Manifest{}, err
 	}
 	return verified, nil

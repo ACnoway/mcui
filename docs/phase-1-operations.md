@@ -6,6 +6,8 @@ Agent 主动连接主控的 TLS 1.3 API，通过一次性安装码换取节点 T
 
 ## 主控和批准的安装包
 
+发布版 Compose 使用与镜像同版本的 GitHub 安装器，自动准备两类签发公钥。以下是自行配置主控和安装器的步骤。[Compose 部署](./master-deployment.md#compose-安装)
+
 1. 为主控启用直连 TLS 或可信的 HTTPS 反代，确保节点可以访问配置的外部 HTTPS 地址。[HTTPS 接入](./master-deployment.md#https-接入)
 2. 从经审核的提交构建安装程序，再通过批准的发布渠道发布。构建脚本输出安装程序的 SHA-256。通过独立可信渠道审核并取得发布清单中的 HTTPS 地址和摘要。
 3. 将以下内容写入原生部署的 `/etc/mcui-master/panel.env`，然后重启面板。手工部署使用其现有环境文件。Compose 通过部署环境传入变量，用覆盖文件将公钥和可选 CA 只读挂载到容器中，变量中的路径须为容器内路径。
@@ -30,11 +32,13 @@ MCUI_AGENT_INSTALLER_MASTER_CA=/etc/mcui-master/agent-trust-ca.pem
 
 ## 节点首次接入
 
-1. 目标为运行 systemd 的 Linux amd64 或 arm64 节点。以 root 或有 sudo 权限的账号执行。在有 APT 的 Debian 系节点上，命令按需安装 curl、系统 CA 和缺失的基础工具。其他发行版使用本地包管理器准备依赖。使用任务查询前按阶段 2 说明配置 chrony。
+1. 通用 GitHub 安装器适用于运行 systemd 的 Debian amd64 和 arm64 节点。以 root 或有 sudo 权限的账号执行。安装器按需补齐基础工具、配置 chrony，并用预置的项目发布公钥核验 GitHub 的 Core 清单。自建基础安装包的系统依赖和时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
 2. 安全管理员在「节点管理」创建待接入的节点，选择「生成安装命令」并完成 MFA 复验。在 10 分钟内把命令粘贴到该节点的可信终端。命令先核验下载文件的 SHA-256，再以 root 运行安装程序。
 3. 安装程序核对本地身份、Agent/Helper 账本和候选信任，再通过已验证的 HTTPS 兑换安装码。核对响应节点 ID 后，凭据原子写入 `/var/lib/mcui-agent/identity.json`（`0600`），安装程序补齐缺失的信任文件并启动服务。首次心跳使原记录上线，节点仍为空 Agent。
 
 ### 构建包含 Xray 引导的安装包
+
+维护者用 `--managed-core release.pub` 构建通用安装器。面板命令传入状态任务和 Core 管理公钥及对应 key ID。安装器保留已接入节点的身份、签发信任与清单状态。已经使用其他签发公钥的节点需要先按本地信任轮换流程迁移。[部署制品发布](./phase-3-release.md#发布-compose-和通用-agent)
 
 在构建机准备 Xray 安装任务公钥、制品发布公钥、已独立核对的生效清单 `manifest.json` 和原始签名 `manifest.json.sig`。安装任务、状态任务和发布使用各自的公钥。沿用原安装包地址与 SHA-256 审核流程，将生成的新包设置为主控批准的安装包。主控仍需启用已配置好的 Xray 签发及制品服务。
 

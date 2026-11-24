@@ -4,11 +4,63 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/artifacttrust"
 )
+
+func NewSingleAdminPolicy(keyID string, publicKey ed25519.PublicKey) (*Policy, error) {
+	raw, err := json.Marshal(policyDocument{
+		SchemaVersion: 1, SigningKeyID: keyID, SigningPublicKey: base64.StdEncoding.EncodeToString(publicKey),
+		Panel: &PanelScope{AllNodes: true},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ParsePolicy(raw)
+}
+
+type PanelSigner struct {
+	policy  *Policy
+	ledger  *Ledger
+	key     ed25519.PrivateKey
+	now     func() (time.Time, error)
+	current func(context.Context) (artifacttrust.Manifest, error)
+}
+
+func NewPanelSigner(policy *Policy, ledger *Ledger, key ed25519.PrivateKey, now func() (time.Time, error), current func(context.Context) (artifacttrust.Manifest, error)) (*PanelSigner, error) {
+	if !policy.HasPanelScope() || ledger == nil || !matchesPrivate(key, policy.signingKey) || now == nil || current == nil {
+		return nil, errors.New("incomplete panel Xray signer configuration")
+	}
+	return &PanelSigner{policy: policy, ledger: ledger, key: key, now: now, current: current}, nil
+}
+
+func (s *PanelSigner) Manifest(ctx context.Context) (artifacttrust.Manifest, error) {
+	return s.current(ctx)
+}
+
+func (s *PanelSigner) Issue(ctx context.Context, proposal Proposal) ([]byte, error) {
+	if _, _, err := s.policy.PanelEvidence(proposal); err != nil {
+		return nil, err
+	}
+	var manifest artifacttrust.Manifest
+	if !IsControlOperation(proposal.Operation) {
+		var err error
+		manifest, err = s.Manifest(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	now, err := s.now()
+	if err != nil {
+		return nil, err
+	}
+	return s.policy.IssuePanel(ctx, s.ledger, proposal, s.key, now, manifest)
+}
 
 func (p *Policy) HasPanelScope() bool { return p != nil && p.panel != nil }
 

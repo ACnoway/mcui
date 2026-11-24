@@ -53,6 +53,45 @@ func TestAgentInstallCommandIncludesExplicitTaskTrust(t *testing.T) {
 	}
 }
 
+func TestGitHubInstallCommandUsesDeploymentKeys(t *testing.T) {
+	s, st := testServer(t)
+	task, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfigureGitHubAgentInstaller("", "v2.1.3", strings.Repeat("b", 64), "status-test", task, "core-test", core, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedAdminSession(t, st, store.Admin{Role: "security_admin", AllNodes: true}, "session", "csrf", time.Now().Unix())
+	handler := s.Handler()
+	const nodesURL = "https://panel.example.com/api/v1/admin/nodes"
+	response := requestAsAdmin(t, handler, http.MethodPost, nodesURL, map[string]string{"name": "Test node", "node_group": "test"}, "session", "csrf")
+	var node NodeView
+	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &node) != nil {
+		t.Fatalf("create node: HTTP %d", response.Code)
+	}
+	response = requestAsAdmin(t, handler, http.MethodPost, nodesURL+"/"+node.ID+"/install-command", map[string]string{}, "session", "csrf")
+	var result map[string]any
+	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+		t.Fatalf("create install command: HTTP %d", response.Code)
+	}
+	command, _ := result["command"].(string)
+	for _, want := range []string{
+		"https://github.com/ACnoway/mcui/releases/download/v2.1.3/install-mcui-agent.sh",
+		"--master 'https://panel.example.com'",
+		"--task-key-id 'status-test' --task-public-key '" + base64.StdEncoding.EncodeToString(task) + "'",
+		"--core-key-id 'core-test' --core-public-key '" + base64.StdEncoding.EncodeToString(core) + "'",
+	} {
+		if !strings.Contains(command, want) {
+			t.Errorf("installation command is missing %q", want)
+		}
+	}
+}
+
 func TestNodeInstallationCodeLifecycle(t *testing.T) {
 	s, st := testServer(t)
 	if err := s.ConfigureAgentInstaller("https://master.example.com", "https://releases.example.com/install.sh", strings.Repeat("a", 64)); err != nil {

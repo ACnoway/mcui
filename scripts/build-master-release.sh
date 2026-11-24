@@ -11,7 +11,8 @@ cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 mkdir -- "$output"
-mkdir "$work/image"
+mkdir -p "$work/image/release"
+cp deploy/master/chrony.conf deploy/master/container-entrypoint.sh "$work/image/"
 for arch in amd64 arm64; do
   mkdir "$work/image/$arch"
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "$work/image/$arch/mcui-panel" ./cmd/panel

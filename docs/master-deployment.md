@@ -1,6 +1,6 @@
 # 单管理员 Master 部署
 
-本文覆盖当前源码的 Linux systemd 安装包、Compose 镜像、首次登录与 HTTPS。旧部署仍按[阶段 1 运维手册](./phase-1-operations.md)维护。节点任务和远程 Xray 的剩余集成见[阶段 3 进度](./phase-3-progress.md)。
+新部署使用 Compose。系统生成首次登录凭据、状态任务签发密钥和 Core 管理签发密钥。远程 Agent 接入需要一个可从节点访问的 HTTPS 地址。
 
 ## 构建安装包和镜像
 
@@ -12,7 +12,7 @@ docker buildx build --load -f deploy/master/Dockerfile \
   -t mcui-master:local /tmp/mcui-master-release/image
 ```
 
-发布时将版本化安装程序和校验材料放到项目 GitHub Releases，将同一构建产物生成的镜像以版本及镜像摘要标识。安装前从可信发布渠道核对摘要。生产发布状态见[阶段 3 发布手册](./phase-3-release.md#生产发布验收)。
+源码构建的本地镜像可以验证面板和启动流程。包含 GitHub Agent 安装元数据的镜像由[部署制品发布流程](./phase-3-release.md#发布-compose-和通用-agent)构建。
 
 ## systemd 安装
 
@@ -37,13 +37,18 @@ sudo systemctl start mcui-master
 
 ## Compose 安装
 
+从项目 GitHub Release 下载 `compose.yaml`。在文件所在目录启动主控并查看首次凭据。
+
 ```sh
-export MCUI_MASTER_IMAGE=mcui-master:local
 docker compose up -d
 docker compose logs master
 ```
 
-首次启动的容器日志包含初始凭据。宿主机端口默认仅绑定 `127.0.0.1:8080`；可用 `MCUI_MASTER_PORT` 调整端口。容器使用非 root UID 和只读根文件系统，`master-data` 卷保存 SQLite 和缓存。更新 `MCUI_MASTER_IMAGE` 后重新执行 `docker compose up -d`，沿用同一数据卷。上线使用已核验的版本化镜像。
+默认镜像是 `ghcr.io/acnoway/mcui-master:latest`。本机打开 `http://127.0.0.1:8080`，首次登录时设置自己的密码并绑定 TOTP MFA。可通过 `MCUI_MASTER_PORT` 调整本机端口，通过 `MCUI_MASTER_IMAGE` 固定镜像版本或摘要。使用默认标签更新时，先执行 `docker compose pull`，再执行 `docker compose up -d`。
+
+`master-data` 卷保存面板数据库、任务和签发账本、发布清单验收状态以及两套签发私钥。升级保留该卷。备份时停止主控并备份整个卷，恢复时保留一致的数据库与密钥。Compose 默认由同一进程使用两套密钥，独立签发进程的部署方式见[高级签发配置](./phase-3-approval.md)。
+
+容器内的 chrony 通过 Cloudflare NTS 检查宿主机时间，需要出站 TCP 4460 和 UDP 123。宿主机应保持时钟同步。通过认证和时钟误差检查后，主控才签发任务。
 
 若初始密码丢失且尚未绑定 MFA，使用当前镜像对同一个卷运行恢复命令。
 
@@ -55,6 +60,20 @@ docker compose up -d
 ```
 
 ## HTTPS 接入
+
+### Compose 自带 HTTPS
+
+下载同一 Release 的 `compose.https.yaml`。让域名指向主控，并开放 TCP 80 和 443。Caddy 自动申请和续期证书，面板通过该域名生成 Agent 安装命令。将以下变量加入部署目录的 `.env`。
+
+```dotenv
+MCUI_DOMAIN=panel.example.net
+```
+
+```sh
+docker compose -f compose.yaml -f compose.https.yaml up -d
+```
+
+通过该域名访问面板，添加节点后复制安装命令，在 Debian amd64 或 arm64 的 systemd 节点执行。安装命令从 GitHub 下载同版本的 `install-mcui-agent.sh`，核验镜像内配套的 SHA-256，再传入该部署的公钥并完成注册。
 
 ### 反向代理
 
@@ -77,7 +96,7 @@ Master 核对连接 IP、Host 和协议头，按配置的外部 HTTPS 地址校�
 
 将完整证书链和服务账号可读的私钥路径分别配置为 `MCUI_TLS_CERT` 和 `MCUI_TLS_KEY`，并用 `MCUI_LISTEN` 显式选择监听地址。私钥仅授予服务账号读权限。原生部署重启服务后生效。Compose 直连 TLS 通过部署覆盖文件将证书只读挂载进容器，设置这两个变量，并按需要显式配置宿主机监听地址。直连与反代各选一个。
 
-配置经核验的 Agent 安装程序 URL 和 SHA-256，以及要分发的任务公钥、key ID 和可选私有 CA。原生部署通过 `panel.env` 配置，Compose 通过只读文件挂载和环境变量配置。配置完成后，面板生成的命令可在节点上安装空 Agent 并配置所需信任材料。[Agent 安装与迁移](./phase-1-operations.md)
+使用私有 PKI 时，通过 `MCUI_AGENT_INSTALLER_MASTER_CA` 指定供 Agent 使用的 CA PEM 路径。Compose 使用只读文件挂载。已有独立签发服务的部署可继续沿用原有启动参数和密钥，迁移前先核对节点信任配置。[Agent 安装与迁移](./phase-1-operations.md)
 
 ## 验证记录
 

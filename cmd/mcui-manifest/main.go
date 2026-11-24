@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
@@ -28,8 +29,9 @@ func main() {
 }
 
 func run(args []string) error {
+	const usage = "usage: mcui-manifest sign|verify|init-state|init-published-state|suspend|node-time [options]"
 	if len(args) == 0 {
-		return errors.New("usage: mcui-manifest sign|verify|init-state|suspend|node-time [options]")
+		return errors.New(usage)
 	}
 	command := args[0]
 	if command == "node-time" && len(args) == 1 {
@@ -60,17 +62,17 @@ func run(args []string) error {
 	switch command {
 	case "sign":
 		flags.StringVar(&keyPath, "private-key", "", "offline Ed25519 PKCS#8 PEM private key")
-	case "verify", "init-state":
+	case "verify", "init-state", "init-published-state":
 		flags.StringVar(&keyPath, "public-key", "", "trusted Ed25519 public key")
 		flags.Func("distinct-public-key", "other Ed25519 public key that must be valid and distinct (repeatable)", func(path string) error {
 			distinctKeys = append(distinctKeys, path)
 			return nil
 		})
-		if command == "init-state" {
+		if command != "verify" {
 			flags.StringVar(&stateDir, "state", "", "absolute path to the caller's private manifest state")
 		}
 	default:
-		return errors.New("usage: mcui-manifest sign|verify|init-state|suspend [options]")
+		return errors.New(usage)
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -78,15 +80,15 @@ func run(args []string) error {
 		}
 		return err
 	}
-	if flags.NArg() != 0 || keyPath == "" || (command == "init-state" && stateDir == "") {
+	if flags.NArg() != 0 || keyPath == "" || (command == "init-state" || command == "init-published-state") && stateDir == "" {
 		return errors.New("invalid release manifest options")
-	}
-	raw, err := readRegular(*manifest, artifacttrust.MaxManifestBytes, 0)
-	if err != nil {
-		return err
 	}
 	now := time.Now().UTC()
 	if command == "sign" {
+		raw, err := readRegular(*manifest, artifacttrust.MaxManifestBytes, 0)
+		if err != nil {
+			return err
+		}
 		m, err := artifacttrust.ParseManifest(raw)
 		if err != nil {
 			return err
@@ -124,6 +126,15 @@ func run(args []string) error {
 			}
 		}
 		keys = append(keys, other)
+	}
+	if command == "init-published-state" {
+		return artifacttrust.InitializePublishedManifest(context.Background(), keyPath, stateDir, func() (time.Time, error) {
+			return time.Now().UTC(), nil
+		}, keys[1:]...)
+	}
+	raw, err := readRegular(*manifest, artifacttrust.MaxManifestBytes, 0)
+	if err != nil {
+		return err
 	}
 	sig, err := readRegular(*signature, ed25519.SignatureSize, 0)
 	if err != nil {

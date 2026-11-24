@@ -1,0 +1,102 @@
+name: Publish MCUI deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable draft Release tag with signed manifest attachments
+        required: true
+        type: string
+
+concurrency:
+  group: publish-mcui-deployment
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+  IMAGE: ghcr.io/acnoway/mcui-master
+
+jobs:
+  publish:
+    if: github.repository == 'ACnoway/mcui' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check release inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PUBLIC_KEY: ${{ vars.MCUI_RELEASE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n $RELEASE_PUBLIC_KEY ]]
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName |
+            jq -e --arg tag "$RELEASE_TAG" '.isDraft and (.isPrerelease | not) and .tagName == $tag'
+          mkdir "$RUNNER_TEMP/mcui-signatures"
+          printf '%s\n' "$RELEASE_PUBLIC_KEY" >"$RUNNER_TEMP/mcui-signatures/release.pub"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/mcui-signatures" --pattern manifest.json --pattern manifest.json.sig
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.4
+          cache: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c4 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Check and build deployment assets
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.17.0
+          bash scripts/check-static.sh
+          signed="$RUNNER_TEMP/mcui-signatures"
+          bash scripts/build-compose-release.sh "$RUNNER_TEMP/mcui-release" "$RELEASE_TAG" \
+            "$signed/release.pub" "$signed/manifest.json" "$signed/manifest.json.sig"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Push versioned Master image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker buildx create --driver docker-container --use
+          docker buildx build --platform linux/amd64,linux/arm64 --push \
+            --tag "$IMAGE:$RELEASE_TAG" --file deploy/master/Dockerfile "$RUNNER_TEMP/mcui-release/image"
+
+      - name: Publish GitHub Release with installers and Compose files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ runner.temp }}/mcui-release
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            install-mcui-agent.sh install-mcui-master.sh compose.yaml compose.https.yaml SHA256SUMS
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  promote-image:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - name: Update default image tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE:$RELEASE_TAG"

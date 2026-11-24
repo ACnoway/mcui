@@ -28,6 +28,8 @@ type agentInstaller struct {
 	sha256    string
 	taskKeyID string
 	taskKey   ed25519.PublicKey
+	coreKeyID string
+	coreKey   ed25519.PublicKey
 	caPEM     []byte
 }
 
@@ -37,6 +39,10 @@ func (s *Server) ConfigureAgentInstaller(masterURL, installerURL, digest string)
 	if err != nil {
 		return err
 	}
+	return s.configureAgentInstaller(origin, installerURL, digest)
+}
+
+func (s *Server) configureAgentInstaller(origin, installerURL, digest string) error {
 	u, err := url.Parse(installerURL)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path == "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(installerURL, "#") {
 		return errors.New("Agent installer must have an HTTPS download URL")
@@ -50,6 +56,33 @@ func (s *Server) ConfigureAgentInstaller(masterURL, installerURL, digest string)
 }
 
 var installerKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+var installerReleaseTag = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func (s *Server) ConfigureGitHubAgentInstaller(masterURL, tag, digest, taskID string, taskKey ed25519.PublicKey, coreID string, coreKey ed25519.PublicKey, ca []byte) error {
+	if !installerReleaseTag.MatchString(tag) || !installerKeyIDPattern.MatchString(coreID) ||
+		len(coreKey) != ed25519.PublicKeySize || coreID == taskID || bytes.Equal(coreKey, taskKey) {
+		return errors.New("invalid GitHub Agent release tag or Core management key")
+	}
+	origin := ""
+	if masterURL != "" {
+		var err error
+		origin, err = security.MasterOrigin(masterURL)
+		if err != nil {
+			return err
+		}
+	}
+	releaseURL := "https://github.com/ACnoway/mcui/releases/download/" + tag + "/install-mcui-agent.sh"
+	if err := s.configureAgentInstaller(origin, releaseURL, digest); err != nil {
+		return err
+	}
+	if err := s.ConfigureAgentInstallerTrust(taskID, taskKey, ca); err != nil {
+		s.installer = nil
+		return err
+	}
+	s.installer.coreKeyID = coreID
+	s.installer.coreKey = bytes.Clone(coreKey)
+	return nil
+}
 
 func (s *Server) ConfigureAgentInstallerTrust(keyID string, key ed25519.PublicKey, caPEM []byte) error {
 	if s.installer == nil || !installerKeyIDPattern.MatchString(keyID) || len(key) != ed25519.PublicKeySize {
@@ -86,6 +119,9 @@ func (i agentInstaller) command(nodeID, installCode string, preserve bool) strin
 		if len(i.caPEM) > 0 {
 			trustFlags += " --master-ca-base64 " + shellQuote(base64.StdEncoding.EncodeToString(i.caPEM))
 		}
+	}
+	if i.coreKeyID != "" {
+		trustFlags += " --core-key-id " + shellQuote(i.coreKeyID) + " --core-public-key " + shellQuote(base64.StdEncoding.EncodeToString(i.coreKey))
 	}
 	return fmt.Sprintf(`(
   set +x
@@ -173,6 +209,20 @@ func (s *Server) createInstallCommand(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent installer unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	installer := *s.installer
+	if installer.masterURL == "" {
+		// Use the origin that passed the authenticated request's CSRF check.
+		origin := "https://" + r.Host
+		if proxy, ok := proxyRequest(r); ok {
+			origin = proxy.origin
+		}
+		var err error
+		installer.masterURL, err = security.MasterOrigin(origin)
+		if err != nil {
+			http.Error(w, "Agent installer unavailable", http.StatusServiceUnavailable)
+			return
+		}
+	}
 	var in struct {
 		MFACode string `json:"mfa_code"`
 	}
@@ -213,7 +263,7 @@ func (s *Server) createInstallCommand(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent installer unavailable", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"command": s.installer.command(id, code, preserve), "expires_at": expires})
+	writeJSON(w, http.StatusCreated, map[string]any{"command": installer.command(id, code, preserve), "expires_at": expires})
 }
 
 func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {

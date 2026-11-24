@@ -5,7 +5,7 @@
 ## 1. 发布位置和密钥
 
 - Xray、sing-box 和 mita 使用各自官方 GitHub Releases 上的原始二进制包。MCUI 的安装器仅选择已核验并登记进有效签名清单的版本与架构。
-- V1 通过 `ACnoway/mcui` 的 GitHub Releases 分发预构建的主控安装程序、Agent 首次安装程序和 Agent/Helper 双架构更新 ZIP。现有脚本可生成这些制品，Agent 安装程序可接入面板配置的信任材料。发布工作流和公开安装入口仍待接通。Compose 从镜像仓库拉取配套版本镜像，发布说明记录镜像版本和摘要。[主控打包](./master-deployment.md) · [Agent 接入](./phase-1-operations.md#节点首次接入)
+- V1 在 `ACnoway/mcui` 的 GitHub Releases 发布 Compose 配置、预构建的主控安装程序和通用 Agent 安装器，通过 GitHub Container Registry 分发配套主控镜像。安装器包含 amd64 和 arm64 二进制。Agent/Helper 成对更新 ZIP 使用独立的更新流程。[主控打包](./master-deployment.md) · [Agent 接入](./phase-1-operations.md#节点首次接入)
 - 先以草稿上传 `manifest.json` 和 `manifest.json.sig`，再将包含两个附件的 Release 发布为 Latest。客户端通过固定仓库的 `releases/latest` 取得标签，再从该标签取两个文件。给已发布的 Latest Release 更换附件会导致同版本内容冲突。每次变更发新标签和更高版本，保留清单引用的制品版本。可以单独发布清单更新，复用已发布的 ZIP。每个设为 Latest 的 Release 都需带这两个文件。
 - 维护者在离线签发环境保管一把 Ed25519 发布私钥。通过可信安装包或带外配置为节点预置对应公钥并核对指纹。发布私钥与任务签发、SSH 和 GitHub 上传凭据分开。更换或撤销公钥通过节点本地管理完成。
 
@@ -68,13 +68,16 @@ gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes \
 gh release edit "$RELEASE_TAG" --draft=false --latest
 ```
 
-标签只标识 Git 中的提交。当前仓库只有静态检查工作流，推送标签后要通过 GitHub 页面或 CLI 创建 Release。[现有工作流](../.github/workflows/static-checks.yml) · [创建 Release](https://cli.github.com/manual/gh_release_create) · [发布草稿](https://cli.github.com/manual/gh_release_edit)
+标签只标识 Git 中的提交。推送标签后，通过 GitHub 页面或 CLI 创建 Release 草稿。[创建 Release](https://cli.github.com/manual/gh_release_create)
 
-### 使用 GitHub Actions 自动发布
+### 发布 Compose 和通用 Agent
 
-可以为 `v*` 标签配置独立工作流，校验标签指向的提交，运行静态检查并用上述脚本构建。发布任务用具备 `contents: write` 的 `GITHUB_TOKEN` 创建草稿并上传构建产物和摘要。镜像如由工作流推送至 GHCR，可在镜像发布任务单独授予 `packages: write`。[标签触发与权限](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax) · [GitHub Packages](https://docs.github.com/en/packages/managing-github-packages-using-github-actions-workflows/publishing-and-installing-a-package-with-github-actions)
+1. 维护者审核制品并离线签发清单。把项目发布公钥写入仓库 Actions 变量 `MCUI_RELEASE_PUBLIC_KEY`。部署者无需配置此变量。
+2. 推送 `vX.Y.Z` 标签，为其创建稳定 Release 草稿，并上传 `manifest.json` 和 `manifest.json.sig`。
+3. 在 `master` 上手动运行 **Publish MCUI deployment**，输入该标签。工作流从标签构建并核验清单，推送两架构的版本化主控镜像，上传安装器、Compose 配置和摘要，然后发布 GitHub Release 并更新镜像的 `latest` 标签。
+4. 首次发布后，将 GHCR 的 `mcui-master` 包设为公开。检查镜像可匿名拉取，Release 安装器摘要与配套镜像中 `/opt/mcui/release/agent-release` 的摘要一致。
 
-维护者负责选定版本、审核制品并离线签名。工作流可以在取得已签名附件后，使用预置的生产公钥核验签名、清单有效期和版本，检查本次附件与审核记录的摘要，然后发布已批准的草稿并设为 Latest。发布私钥始终由维护者离线保管，工作流只接收公钥和已签名附件。首发可由 Actions 构建和上传，维护者签名后在 GitHub 发布草稿。
+可用 `bash scripts/build-compose-release.sh NEW_DIRECTORY vX.Y.Z release.pub manifest.json manifest.json.sig` 在隔离环境构建同样的制品。通用安装器内含项目发布公钥，面板在生成安装命令时传入部署的任务签发公钥。独立发布的清单更新可保留原版本 Agent 安装器，镜像中固定的下载版本继续可用。[发布工作流](../.github/workflows/release-deployment.yml)
 
 ### 生产发布验收
 

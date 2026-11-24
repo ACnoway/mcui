@@ -10,7 +10,14 @@ install_xray_bootstrap() {
   local helper_manifest=$xray_state/control/xray-manifest
   local agent_manifest=$agent_state/xray-manifest
   local chrony_source=$source_dir/mcui-nts.sources
-  local file panel_inbounds=false
+  local file panel_inbounds=false managed=false
+  if [[ -f $profile/managed ]]; then
+    managed=true
+    printf '%s\n' "$provided_core_key" >"$profile/xray-install.pub"
+    chmod 0644 "$profile/xray-install.pub"
+    printf 'MCUI_XRAY_INSTALL_KEY_ID=%s\n' "$provided_core_id" >"$profile/xray-install.env"
+    cat "$profile/xray-install.defaults" >>"$profile/xray-install.env"
+  fi
   if file_exists "$config/xray-install.env" || file_exists "$xray_state/current"; then
     for file in "$helper_manifest/accepted.json" "$agent_manifest/accepted.json"; do
       [[ -f $file && ! -L $file ]] || die 'Restore accepted Xray manifest state before enrolling this node'
@@ -37,9 +44,11 @@ install_xray_bootstrap() {
     die 'Debian chrony with sources.d is required'
 
   chmod 0755 -- "$profile" "$manifest_tool"
-  "$manifest_tool" verify -public-key "$profile/release.pub" -manifest "$profile/manifest.json" \
-    -signature "$profile/manifest.json.sig" -distinct-public-key "$profile/xray-install.pub" \
-    -distinct-public-key "$effective_key"
+  if [[ $managed == false ]]; then
+    "$manifest_tool" verify -public-key "$profile/release.pub" -manifest "$profile/manifest.json" \
+      -signature "$profile/manifest.json.sig" -distinct-public-key "$profile/xray-install.pub" \
+      -distinct-public-key "$effective_key"
+  fi
   for file in xray-install.pub release.pub xray-install.env; do
     if file_exists "$config/$file"; then
       check_config "$config/$file"
@@ -66,11 +75,17 @@ install_xray_bootstrap() {
     install -o root -g root -m 0755 -- "$profile/xray-network.sh" /usr/local/libexec/mcui-xray-network
     install -o root -g root -m 0644 -- "$stage/units/mcui-xray-panel-network.conf" "$units/mcui-xray.service.d/panel-network.conf"
   fi
-  if ! file_exists "$helper_manifest/accepted.json"; then
+  if [[ $managed == true ]]; then
+    local release_key=$config/release.pub
+    file_exists "$release_key" || install_trust "$profile/release.pub" "$release_key"
+    local args=(-public-key "$release_key" -distinct-public-key "$profile/xray-install.pub" -distinct-public-key "$effective_key")
+    "$manifest_tool" init-published-state -state "$helper_manifest" "${args[@]}"
+    runuser -u mcui-agent -- "$manifest_tool" init-published-state -state "$agent_manifest" "${args[@]}"
+  elif ! file_exists "$helper_manifest/accepted.json"; then
     "$manifest_tool" init-state -state "$helper_manifest" -public-key "$profile/release.pub" \
       -manifest "$profile/manifest.json" -signature "$profile/manifest.json.sig"
   fi
-  if ! file_exists "$agent_manifest/accepted.json"; then
+  if [[ $managed == false ]] && ! file_exists "$agent_manifest/accepted.json"; then
     runuser -u mcui-agent -- "$manifest_tool" init-state -state "$agent_manifest" -public-key "$profile/release.pub" \
       -manifest "$profile/manifest.json" -signature "$profile/manifest.json.sig"
   fi

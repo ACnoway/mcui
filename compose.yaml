@@ -1,21 +1,19 @@
 services:
   master:
-    image: ${MCUI_MASTER_IMAGE:?Set MCUI_MASTER_IMAGE to a versioned MCUI Master image}
+    image: ${MCUI_MASTER_IMAGE:-ghcr.io/acnoway/mcui-master:latest}
+    init: true
     ports:
       - "127.0.0.1:${MCUI_MASTER_PORT:-8080}:8080"
     environment:
       MCUI_PUBLIC_URL: ${MCUI_PUBLIC_URL:-}
       MCUI_HTTPS_PROXY_PEER: ${MCUI_HTTPS_PROXY_PEER:-}
-      MCUI_AGENT_INSTALLER_URL: ${MCUI_AGENT_INSTALLER_URL:-}
-      MCUI_AGENT_INSTALLER_SHA256: ${MCUI_AGENT_INSTALLER_SHA256:-}
-      MCUI_AGENT_INSTALLER_TASK_KEY_ID: ${MCUI_AGENT_INSTALLER_TASK_KEY_ID:-}
-      MCUI_AGENT_INSTALLER_TASK_PUBLIC_KEY: ${MCUI_AGENT_INSTALLER_TASK_PUBLIC_KEY:-}
       MCUI_AGENT_INSTALLER_MASTER_CA: ${MCUI_AGENT_INSTALLER_MASTER_CA:-}
     volumes:
       - master-data:/var/lib/mcui-master
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev
+      - /run/chrony:rw,noexec,nosuid,nodev,mode=0700,uid=65532,gid=65532
     security_opt:
       - no-new-privileges:true
     cap_drop:

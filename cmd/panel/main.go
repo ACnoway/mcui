@@ -36,6 +36,8 @@ func main() {
 	publicURL := flag.String("public-url", os.Getenv("MCUI_PUBLIC_URL"), "public HTTPS Master origin for the proxy and Agent install commands")
 	proxyPeer := flag.String("https-proxy-peer", os.Getenv("MCUI_HTTPS_PROXY_PEER"), "exact IP of the trusted HTTPS reverse proxy")
 	containerHTTP := flag.Bool("container-http", false, "allow HTTP on the isolated Compose network")
+	managed := flag.Bool("managed", false, "initialize signing and use the packaged GitHub release for this single-admin deployment")
+	releaseDir := flag.String("release-dir", envOr("MCUI_RELEASE_DIR", "/opt/mcui/release"), "directory containing packaged GitHub release metadata")
 	singleAdmin := flag.Bool("single-admin", false, "enable single-admin deployment and initialize a fresh database")
 	initAdminOnly := flag.Bool("init-admin-only", false, "prepare a single administrator locally and exit")
 	recoverAdmin := flag.Bool("recover-initial-admin", false, "rotate the initial password of a pending administrator locally and exit")
@@ -74,6 +76,12 @@ func main() {
 		log.Fatal("plain HTTP must listen on loopback outside the isolated Compose network")
 	}
 	secureTransport := usingTLS || usingProxy
+	if *managed && (!*singleAdmin || *taskDBPath != "" || *taskKeyID != "" || *taskPublicKeyPath != "" ||
+		*taskSignerURL != "" || *taskSignerTokenPath != "" || checkpointConfig.enabled() ||
+		*installerURL != "" || *installerDigest != "" || *installerKeyID != "" || *installerKeyPath != "" ||
+		*xrayInstallPolicyPath != "" || *xrayPanelURL != "" || *xrayPanelToken != "" || *runtimeUpdatePolicyPath != "") {
+		log.Fatal("managed deployment requires single-admin mode and its own signing and installer configuration")
+	}
 	if (*xrayInstallPolicyPath != "" || *runtimeUpdatePolicyPath != "") && (!secureTransport || *taskDBPath == "") {
 		log.Fatal("remote Xray and runtime updates require Master HTTPS and -task-db")
 	}
@@ -150,10 +158,17 @@ func main() {
 			log.Fatalf("configure Agent installer: %v", err)
 		}
 	}
-	if *installerKeyID != "" || *installerKeyPath != "" || *installerCAPath != "" {
+	if !*managed && (*installerKeyID != "" || *installerKeyPath != "" || *installerCAPath != "") {
 		if err := configureAgentInstallerTrust(srv, *installerKeyID, *installerKeyPath, *installerCAPath); err != nil {
 			log.Fatalf("configure Agent installer trust: %v", err)
 		}
+	}
+	if *managed {
+		closeRuntime, err := configureManagedRuntime(srv, filepath.Dir(*dbPath), *releaseDir, *publicURL, *installerCAPath, secureTransport)
+		if err != nil {
+			log.Fatalf("configure managed deployment: %v", err)
+		}
+		defer closeRuntime()
 	}
 	catalog := corecatalog.NewClient()
 	srv.ConfigureCoreCatalog(catalog)
