@@ -179,11 +179,14 @@ async function remove(port: number) {
       <label>监听端口 <input v-model.number="form.port" type="number" min="1024" max="65535" required :disabled="form.editing" /></label>
       <label>客户端用户名 <input v-model="form.username" pattern="[a-z][a-z0-9_\-]{0,23}" autocomplete="off"
         :disabled="form.editing && centrallyBound(form.port)" required /></label>
-      <label>{{ form.protocol === 'vless' || form.protocol === 'vmess' ? 'UUID' : '密码' }}
-        <input v-model="form.credential" autocomplete="off" :required="needsCredential" :placeholder="needsCredential ? '' : '留空保留原凭据'" />
-      </label>
-      <div class="actions"><button type="button" class="outline" :disabled="busy" @click="generateCredential">生成凭据</button></div>
-      <p class="feedback">请在保存前复制客户端凭据。</p>
+      <template v-if="!form.editing || !centrallyBound(form.port)">
+        <label>{{ form.protocol === 'vless' || form.protocol === 'vmess' ? 'UUID' : '密码' }}
+          <input v-model="form.credential" autocomplete="off" :required="needsCredential" :placeholder="needsCredential ? '' : '留空保留原凭据'" />
+        </label>
+        <div class="actions"><button type="button" class="outline" :disabled="busy" @click="generateCredential">生成凭据</button></div>
+        <p class="feedback">请在保存前复制客户端凭据。</p>
+      </template>
+      <p v-else class="feedback">可在「客户端」的分享面板轮换凭据。</p>
       <template v-if="form.protocol === 'trojan'">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
         <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>

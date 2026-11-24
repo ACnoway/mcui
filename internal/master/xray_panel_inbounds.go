@@ -128,7 +128,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				identity = draft.Panel.TLS
 			}
 			index := slices.IndexFunc(entries, func(entry panelInbound) bool { return entry.Inbound.Port == port })
-			if index >= 0 && (in.Remove || in.Protocol != entries[index].Inbound.Protocol || in.Username != entries[index].Inbound.Users[0]) {
+			if index >= 0 && (in.Remove || in.Protocol != entries[index].Inbound.Protocol || in.Username != entries[index].Inbound.Users[0] || in.Credential != "") {
 				for _, binding := range clientBindingsForNode(st, nodeID) {
 					if binding.Port == port && binding.Credential == entries[index].Inbound.Users[0] {
 						return errManagedClientBinding

@@ -22,11 +22,15 @@ var errClientExists = errors.New("client username already exists")
 
 type clientBindingView struct {
 	store.XrayBinding
-	NodeName       string `json:"node_name"`
-	Protocol       string `json:"protocol"`
-	Applied        bool   `json:"applied"`
-	ShareExpiresAt int64  `json:"share_expires_at,omitempty"`
-	ShareID        string `json:"share_id,omitempty"`
+	NodeName          string `json:"node_name"`
+	Protocol          string `json:"protocol"`
+	Applied           bool   `json:"applied"`
+	PanelInbound      bool   `json:"panel_inbound,omitempty"`
+	DeliveryExpiresAt int64  `json:"delivery_expires_at,omitempty"`
+	DeliveryID        string `json:"delivery_id,omitempty"`
+	DeliveryReady     bool   `json:"delivery_ready,omitempty"`
+	ShareExpiresAt    int64  `json:"share_expires_at,omitempty"`
+	ShareID           string `json:"share_id,omitempty"`
 }
 
 type xrayClientView struct {
@@ -140,6 +144,10 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 				}
 				row.Bindings = append(row.Bindings, clientBindingView{
 					XrayBinding: binding.XrayBinding, NodeName: node.Name, Protocol: protocol, Applied: applied,
+					PanelInbound:      node.XrayPanelKey != "",
+					DeliveryExpiresAt: binding.Delivery.Link.ExpiresAt, DeliveryID: clientShareID(binding.Delivery.Link),
+					DeliveryReady: applied && binding.Delivery.Link.ExpiresAt > now.Unix() &&
+						binding.Delivery.CredentialHash == grant.credentialHashes[binding.Port],
 					ShareExpiresAt: binding.Share.ExpiresAt, ShareID: clientShareID(binding.Share),
 				})
 			}

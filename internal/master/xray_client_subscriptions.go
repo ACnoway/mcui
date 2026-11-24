@@ -113,6 +113,7 @@ func (s *Server) changeXrayClientShare(w http.ResponseWriter, r *http.Request) {
 		if in.Action == "revoke" {
 			for _, index := range indexes {
 				client.Bindings[index].Share = store.ClientShare{}
+				client.Bindings[index].Delivery = store.CredentialDelivery{}
 			}
 			if in.NodeID == "" {
 				client.Subscription = store.ClientShare{}
@@ -184,6 +185,7 @@ func (s *Server) fetchXrayClientSubscription(w http.ResponseWriter, r *http.Requ
 		}
 		digest := hash(token)
 		var expiresAt int64
+		var credential string
 		var entries []clientSubscriptionEntry
 		err = s.store.View(func(st store.State) error {
 			client, ok := st.XrayClients[username]
@@ -191,8 +193,15 @@ func (s *Server) fetchXrayClientSubscription(w http.ResponseWriter, r *http.Requ
 				return nil
 			}
 			bindings, expiry := matchClientShare(client, digest, now)
+			var delivery store.CredentialDelivery
 			if expiry == 0 {
-				return nil
+				for _, binding := range client.Bindings {
+					link := binding.Delivery.Link
+					if link.ExpiresAt > now.Unix() && subtle.ConstantTimeCompare([]byte(link.TokenHash), []byte(digest)) == 1 {
+						bindings, expiry, delivery = []store.XrayClientBinding{binding}, link.ExpiresAt, binding.Delivery
+						break
+					}
+				}
 			}
 			expiresAt = expiry
 			grants := make(map[string]subscriptionGrant)
@@ -203,11 +212,26 @@ func (s *Server) fetchXrayClientSubscription(w http.ResponseWriter, r *http.Requ
 					return err
 				}
 				ports := grant.allowedPorts(binding.Credential, binding.Port)
-				if len(ports.ports) == 1 {
-					entries = append(entries, clientSubscriptionEntry{
-						NodeID: node.ID, NodeName: node.Name, Config: grant.payload(binding.Credential, ports, expiresAt),
-					})
+				if len(ports.ports) != 1 {
+					continue
 				}
+				if delivery.CredentialHash != "" {
+					if grant.credentialHashes[binding.Port] != delivery.CredentialHash {
+						continue
+					}
+					aead, err := xrayCredentialEnvelope(token)
+					if err != nil {
+						return err
+					}
+					clear, err := aead.Open(nil, nil, delivery.Envelope, []byte(delivery.CredentialHash))
+					if err != nil {
+						return err
+					}
+					credential = string(clear)
+				}
+				entries = append(entries, clientSubscriptionEntry{
+					NodeID: node.ID, NodeName: node.Name, Config: grant.payload(binding.Credential, ports, expiresAt),
+				})
 			}
 			return nil
 		})
@@ -219,9 +243,13 @@ func (s *Server) fetchXrayClientSubscription(w http.ResponseWriter, r *http.Requ
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		response := map[string]any{
 			"schema_version": 1, "username": username, "expires_at": expiresAt, "entries": entries,
-		})
+		}
+		if credential != "" {
+			response["credential"] = credential
+		}
+		writeJSON(w, http.StatusOK, response)
 	})
 }
 

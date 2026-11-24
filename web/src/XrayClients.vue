@@ -5,7 +5,10 @@ import PanelDialog from './PanelDialog.vue'
 import { xrayProtocolName, type XrayProtocol } from './xraySubscription'
 
 type Binding = { node_id: string; port: number; credential: string }
-type BindingView = Binding & { node_name: string; protocol: XrayProtocol | ''; applied: boolean; share_expires_at?: number; share_id?: string }
+type BindingView = Binding & {
+  node_name: string; protocol: XrayProtocol | ''; applied: boolean; panel_inbound?: boolean
+  share_expires_at?: number; share_id?: string; delivery_expires_at?: number; delivery_id?: string; delivery_ready?: boolean
+}
 type Client = { username: string; revision: number; bindings: BindingView[]; expires_at?: number; share_id?: string }
 type Port = { port: number; protocol: XrayProtocol | ''; credentials: string[] }
 type Node = { id: string; name: string; panel_inbounds?: boolean; inbounds: Port[] }
@@ -31,6 +34,7 @@ const editing = ref<Client | null>(null)
 const sharing = ref('')
 const activeShare = computed(() => clients.value.find(client => client.username === sharing.value))
 const issued = ref(new Map<string, { subscription?: Link; inbounds: Map<string, Link> }>())
+const deliveries = ref(new Map<string, Link>())
 const draft = ref<Binding[]>([])
 const selectedNode = ref('')
 const selectedPort = ref<number | ''>('')
@@ -57,10 +61,20 @@ function currentLink(client: Client, binding?: BindingView) {
   const links = issued.value.get(client.username)
   const link = binding ? links?.inbounds.get(bindingKey(binding)) : links?.subscription
   const id = binding ? binding.share_id : client.share_id
+  return linkURL(link, id)
+}
+
+function linkURL(link: Link | undefined, id: string | undefined) {
   if (!link || id !== link.id || link.expires_at * 1000 <= Date.now()) return ''
   const url = new URL('/subscription/client', window.location.origin)
   url.hash = link.token
   return url.href
+}
+
+function deliveryKey(client: Client, binding: Binding) { return `${client.username}:${bindingKey(binding)}` }
+
+function deliveryURL(client: Client, binding: BindingView) {
+  return linkURL(deliveries.value.get(deliveryKey(client, binding)), binding.delivery_id)
 }
 
 function formatExpiry(expiry?: number) {
@@ -150,7 +164,7 @@ function openShares(client: Client) {
 }
 
 function setLink(client: Client, action: 'issue' | 'revoke', binding?: BindingView) {
-  if (action === 'revoke' && !confirm(binding ? '撤销此入站的分享链接？' : '撤销总订阅和所有入站分享链接？')) return
+  if (action === 'revoke' && !confirm(binding ? '撤销此入站的分享和凭据领取链接？' : '撤销总订阅及所有入站的分享和凭据领取链接？')) return
   if (action === 'issue' && (binding ? binding.share_expires_at : client.expires_at) &&
     !confirm(binding ? '轮换此入站的分享链接？原链接会立即失效。' : '轮换总订阅和所有入站分享链接？原链接会立即失效。')) return
   return update(async () => {
@@ -160,8 +174,21 @@ function setLink(client: Client, action: 'issue' | 'revoke', binding?: BindingVi
     const links = binding ? issued.value.get(client.username) ?? { inbounds: new Map<string, Link>() }
       : { inbounds: new Map<string, Link>(), subscription: result.subscription }
     if (binding && action === 'revoke') links.inbounds.delete(bindingKey(binding))
+    if (action === 'revoke') {
+      for (const entry of binding ? [binding] : client.bindings) deliveries.value.delete(deliveryKey(client, entry))
+    }
     for (const entry of result.inbounds) links.inbounds.set(bindingKey(entry), entry)
     issued.value.set(client.username, links)
+  })
+}
+
+function rotateCredential(client: Client, binding: BindingView) {
+  if (!confirm('生成新凭据和领取链接？节点应用新配置后，旧凭据将失效。')) return
+  return update(async () => {
+    const link = await props.mutate<Link>(`${path}/${client.username}/credential`, {
+      node_id: binding.node_id, port: binding.port, revision: client.revision,
+    })
+    deliveries.value.set(deliveryKey(client, binding), link)
   })
 }
 
@@ -246,7 +273,8 @@ onActivated(refresh)
         <div class="actions">
           <button type="button" :disabled="busy || loading || !activeShare.bindings.some(binding => binding.applied)" @click="setLink(activeShare, 'issue')">
             {{ activeShare.expires_at ? '轮换总订阅和分享链接' : '签发总订阅和分享链接' }}</button>
-          <button v-if="activeShare.expires_at || activeShare.bindings.some(binding => binding.share_expires_at)" type="button" class="danger" :disabled="busy || loading" @click="setLink(activeShare, 'revoke')">撤销全部链接</button>
+          <button v-if="activeShare.expires_at || activeShare.bindings.some(binding => binding.share_expires_at || binding.delivery_expires_at)"
+            type="button" class="danger" :disabled="busy || loading" @click="setLink(activeShare, 'revoke')">撤销全部链接</button>
           <button type="button" class="outline" :disabled="busy || loading" @click="refresh">刷新状态</button>
         </div>
       </section>
@@ -257,10 +285,18 @@ onActivated(refresh)
           <strong>{{ binding.node_name || binding.node_id }} · {{ binding.port }} · {{ protocolLabel(binding.protocol) }}</strong>
           <span>{{ binding.applied ? formatExpiry(binding.share_expires_at) : '等待生效或节点暂不可用' }}</span>
           <LinkActions v-if="binding.applied && currentLink(activeShare, binding)" :url="currentLink(activeShare, binding)" label="入站分享链接" />
+          <template v-if="binding.delivery_expires_at">
+            <span>凭据领取链接 · {{ formatExpiry(binding.delivery_expires_at) }}</span>
+            <p v-if="binding.delivery_expires_at * 1000 > Date.now() && !binding.delivery_ready">领取前请预览并下发，等节点确认生效。</p>
+            <LinkActions v-if="deliveryURL(activeShare, binding)" :url="deliveryURL(activeShare, binding)" label="凭据领取链接" />
+          </template>
           <div class="actions">
-            <button v-if="!binding.applied" type="button" class="outline" @click="configureNode(binding.node_id)">查看节点配置</button>
-            <button v-else type="button" class="outline" :disabled="busy || loading" @click="setLink(activeShare, 'issue', binding)">{{ binding.share_expires_at ? '轮换入站链接' : '签发入站链接' }}</button>
-            <button v-if="binding.share_expires_at" type="button" class="danger" :disabled="busy || loading" @click="setLink(activeShare, 'revoke', binding)">撤销入站链接</button>
+            <button v-if="!binding.applied || (binding.delivery_expires_at && !binding.delivery_ready)" type="button"
+              class="outline" :disabled="busy || loading" @click="configureNode(binding.node_id)">查看节点配置</button>
+            <button v-if="binding.applied" type="button" class="outline" :disabled="busy || loading" @click="setLink(activeShare, 'issue', binding)">{{ binding.share_expires_at ? '轮换入站链接' : '签发入站链接' }}</button>
+            <button v-if="binding.panel_inbound" type="button" class="outline" :disabled="busy || loading" @click="rotateCredential(activeShare, binding)">轮换凭据并生成领取链接</button>
+            <button v-if="binding.share_expires_at || binding.delivery_expires_at" type="button" class="danger"
+              :disabled="busy || loading" @click="setLink(activeShare, 'revoke', binding)">撤销入站链接</button>
           </div>
         </div>
       </section>

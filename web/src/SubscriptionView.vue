@@ -4,7 +4,7 @@ import LinkActions from './LinkActions.vue'
 import { buildXrayClient, subscriptionEndpoint, subscriptionProtocol, validSubscription, xrayProtocolName, type XraySubscription } from './xraySubscription'
 
 type Entry = { key: string; node: string; port: number; config: XraySubscription }
-type Selection = { username: string; expiresAt: number; entries: Entry[] }
+type Selection = { username: string; expiresAt: number; entries: Entry[]; credential?: string }
 const selection = ref<Selection | null>(null)
 const endpointKey = ref('')
 const activeEntry = computed(() => selection.value?.entries.find(entry => entry.key === endpointKey.value))
@@ -44,7 +44,7 @@ function parseSelection(data: unknown, clientPage: boolean): Selection | null {
     }
   }
   if (!data || typeof data !== 'object') return null
-  const payload = data as { schema_version?: number; username?: string; expires_at?: number; entries?: unknown[] }
+  const payload = data as { schema_version?: number; username?: string; expires_at?: number; entries?: unknown[]; credential?: unknown }
   if (payload.schema_version !== 1 || typeof payload.username !== 'string' || !/^[a-z][a-z0-9_-]{0,23}$/.test(payload.username) ||
     typeof payload.expires_at !== 'number' || !Number.isSafeInteger(payload.expires_at) || payload.expires_at <= 0 ||
     !Array.isArray(payload.entries) || !payload.entries.length || payload.entries.length > 64) return null
@@ -61,7 +61,10 @@ function parseSelection(data: unknown, clientPage: boolean): Selection | null {
     keys.add(key)
     entries.push({ key, node: entry.node_name || entry.node_id, port, config: entry.config })
   }
-  return { username: payload.username, expiresAt: payload.expires_at, entries }
+  const credential = payload.credential
+  if (credential !== undefined && (entries.length !== 1 || typeof credential !== 'string' ||
+    !/^(?:[A-Za-z0-9_-]{43}|[0-9a-f-]{36})$/.test(credential))) return null
+  return { username: payload.username, expiresAt: payload.expires_at, entries, credential }
 }
 
 async function loadSubscription() {
@@ -141,7 +144,7 @@ function downloadClient() {
   if (!entry) return
   error.value = ''
   try {
-    const config = buildXrayClient(entry.config, entry.port, localPort.value, password.value)
+    const config = buildXrayClient(entry.config, entry.port, localPort.value, selection.value?.credential ?? password.value)
     const url = URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' }))
     const download = document.createElement('a')
     download.href = url
@@ -183,22 +186,23 @@ function downloadClient() {
           <label>客户端 SOCKS5 监听端口
             <input v-model.number="localPort" type="number" required min="1024" max="65535" />
           </label>
-          <label>{{ credentialLabel }}
+          <label v-if="!selection.credential">{{ credentialLabel }}
             <input v-model="password" type="password" required maxlength="89" autocomplete="off" />
           </label>
+          <p v-else>此链接已提供该入站的凭据。</p>
           <p v-if="activeEntry && activeEntry.config.username !== selection.username">节点凭据名 {{ activeEntry.config.username }}</p>
           <button type="submit">生成并下载 Xray 配置</button>
           <p v-if="error" class="error" role="alert">{{ error }}</p>
         </form>
       </section>
-      <section class="card">
+      <section v-if="!selection.credential" class="card">
         <h2>订阅链接</h2>
         <LinkActions :url="subscriptionURL" />
       </section>
       <section class="card">
         <h2>使用帮助</h2>
         <ol class="subscription-help">
-          <li>选择入站，输入节点管理员交付的凭据并下载 <code>xray-client.json</code>。</li>
+          <li v-if="!selection.credential">选择入站，输入管理员交付的凭据并下载 <code>xray-client.json</code>。</li>
           <li>妥善保存配置文件，在客户端运行 <code>xray run -config xray-client.json</code>。</li>
           <li>使用回环端点时，请在能访问节点回环地址的环境中连接。</li>
         </ol>

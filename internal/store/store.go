@@ -132,7 +132,14 @@ type XrayBinding struct {
 
 type XrayClientBinding struct {
 	XrayBinding
-	Share ClientShare `json:"share,omitzero"`
+	Share    ClientShare        `json:"share,omitzero"`
+	Delivery CredentialDelivery `json:"delivery,omitzero"`
+}
+
+type CredentialDelivery struct {
+	Link           ClientShare `json:"link"`
+	CredentialHash string      `json:"credential_hash"`
+	Envelope       []byte      `json:"envelope"`
 }
 
 type ClientShare struct {

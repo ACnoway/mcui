@@ -866,8 +866,75 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		expect(fetch(aggregateURL, panelLink, ""), http.StatusNotFound)
 		direct.PanelTLS, direct.Applied = &config.Panel.TLS.Trust, &config.Inbounds
 		heartbeat(&direct)
-		expect(bind(4, legacy), http.StatusOK)
+		rotationRequest := map[string]any{"node_id": client.nodeID, "port": 1080, "revision": 4}
+		const rotationPath = "/customer/credential"
+		expect(subscriptionAdmin(http.MethodPost, clientsURL+rotationPath, "", rotationRequest), http.StatusForbidden)
+		rotate := central(http.MethodPost, rotationPath, rotationRequest)
+		expect(rotate, http.StatusOK)
+		var delivery issuedClientShare
+		if err := json.Unmarshal(rotate.Body.Bytes(), &delivery); err != nil || delivery.Token == "" ||
+			delivery.ExpiresAt > time.Now().Add(xrayCredentialDeliveryLifetime).Unix() {
+			t.Fatalf("invalid credential delivery link: %v", err)
+		}
+		expect(central(http.MethodPost, rotationPath, rotationRequest), http.StatusConflict)
+		expect(fetch(aggregateURL, delivery.Token, ""), http.StatusNotFound)
+		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rotated, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil || rotated.Panel.Credentials[0] == config.Panel.Credentials[0] {
+			t.Fatalf("rotation did not change the encrypted credential: %v", err)
+		}
+		rendered, candidate, err := rotated.RenderPanel(private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		direct.Candidate, direct.Preview = candidate, xrayconfig.PlanDigest(registered.XrayDraft)
+		heartbeat(&direct)
+		applyRotated := applyDirect
+		applyRotated.TaskID, applyRotated.State = "panel-credential-fixture-12345", options()
+		applyRotated.MFACode = fmtCode(totpAt(totpKey, time.Now().Unix()/30))
+		expect(admin(http.MethodPost, applyRotated, client.csrf), http.StatusCreated)
+		sequence := issued.Sequence + 1
+		expect(client.request(http.MethodGet, strings.Replace(next, fmt.Sprintf("next_sequence=%d", issued.Sequence),
+			fmt.Sprintf("next_sequence=%d", sequence), 1)+"&xray_panel_trojan=v1", nil, true), http.StatusOK)
+		expect(client.request(http.MethodPost, "/api/v1/agent/tasks/ack", taskAckRequest{TaskID: applyRotated.TaskID, Sequence: sequence,
+			StatusVersion: 1, Status: "SUCCEEDED", Result: result}, true), http.StatusNoContent)
+		expect(fetch(aggregateURL, delivery.Token, ""), http.StatusNotFound)
+		direct.Applied, direct.AppliedNetwork, direct.Config, direct.ConfigRevision = &rotated.Inbounds, rotated.Network, candidate, sequence
+		heartbeat(&direct)
+		redeemed := fetch(aggregateURL, delivery.Token, "")
+		expect(redeemed, http.StatusOK)
+		var delivered struct {
+			Credential string                    `json:"credential"`
+			Entries    []clientSubscriptionEntry `json:"entries"`
+		}
+		if err := json.Unmarshal(redeemed.Body.Bytes(), &delivered); err != nil || len(delivered.Entries) != 1 ||
+			delivered.Entries[0].NodeID != client.nodeID || delivered.Credential == credential || delivered.Credential == "" ||
+			!strings.Contains(string(rendered), delivered.Credential) || redeemed.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("delivery did not return the credential in the exact applied inbound: %v", err)
+		}
+		ordinaryShare := fetch(aggregateURL, panelLink, "")
+		expect(ordinaryShare, http.StatusOK)
+		if strings.Contains(ordinaryShare.Body.String(), delivered.Credential) || strings.Contains(rotate.Body.String(), delivered.Credential) {
+			t.Fatal("credential leaked into a regular share or the admin response")
+		}
+		if err := s.store.View(func(st store.State) error {
+			raw, err := json.Marshal(st)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(string(raw), delivered.Credential) || strings.Contains(string(raw), delivery.Token) {
+				return fmt.Errorf("plaintext credential or delivery token persisted")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		expect(bind(5, legacy), http.StatusOK)
 		expect(fetch(aggregateURL, panelLink, ""), http.StatusNotFound)
+		expect(fetch(aggregateURL, delivery.Token, ""), http.StatusNotFound)
 		entries = fetch(aggregateURL, activeShare.Subscription.Token, "")
 		expect(entries, http.StatusOK)
 		if strings.Contains(entries.Body.String(), `"public_endpoints"`) {
