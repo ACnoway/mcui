@@ -54,7 +54,7 @@ fi
 command -v systemctl >/dev/null || die 'A running systemd instance is required'
 systemctl show --property=Version --value >/dev/null || die 'A running systemd instance is required'
 
-required_tools=(runuser groupadd useradd getent install flock stat awk tar tail gzip base64 ln mktemp)
+required_tools=(runuser groupadd useradd getent install flock stat awk sed tar tail gzip base64 ln mktemp)
 missing=()
 for tool in "${required_tools[@]}"; do
   command -v "$tool" >/dev/null || missing+=("$tool")

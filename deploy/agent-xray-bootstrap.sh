@@ -2,27 +2,31 @@
 
 install_xray_bootstrap() {
   local profile=$stage/xray-bootstrap
-  local manifest_tool=$stage/$arch/mcui-manifest
   local units=/etc/systemd/system
   local source_dir=/etc/chrony/sources.d
   local xray_config=/etc/mcui-xray
-  local xray_state=/var/lib/mcui-xray
-  local helper_manifest=$xray_state/control/xray-manifest
-  local agent_manifest=$agent_state/xray-manifest
   local chrony_source=$source_dir/mcui-nts.sources
-  local file panel_inbounds=false managed=false
+  local expected_id
+  local panel_inbounds=false
   if [[ -f $profile/managed ]]; then
-    managed=true
     printf '%s\n' "$provided_core_key" >"$profile/xray-install.pub"
     chmod 0644 "$profile/xray-install.pub"
     printf 'MCUI_XRAY_INSTALL_KEY_ID=%s\n' "$provided_core_id" >"$profile/xray-install.env"
     cat "$profile/xray-install.defaults" >>"$profile/xray-install.env"
   fi
-  if file_exists "$config/xray-install.env" || file_exists "$xray_state/current"; then
-    for file in "$helper_manifest/accepted.json" "$agent_manifest/accepted.json"; do
-      [[ -f $file && ! -L $file ]] || die 'Restore accepted Xray manifest state before enrolling this node'
-    done
+  [[ -f $profile/xray-install.pub && -f $profile/xray-install.env ]] || die 'Xray bootstrap is missing install-task trust'
+  expected_id=$(sed -n 's/^MCUI_XRAY_INSTALL_KEY_ID=//p' "$profile/xray-install.env")
+  [[ $expected_id =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || die 'Invalid Xray install-task key ID'
+  if file_exists "$config/xray-install.pub"; then
+    check_config "$config/xray-install.pub"
+    cmp -s -- "$profile/xray-install.pub" "$config/xray-install.pub" || die 'Existing Xray install key differs'
   fi
+  if file_exists "$config/xray-install.env"; then
+    check_config "$config/xray-install.env"
+    [[ $(sed -n 's/^MCUI_XRAY_INSTALL_KEY_ID=//p' "$config/xray-install.env") == "$expected_id" ]] ||
+      die 'Existing Xray install key ID differs'
+  fi
+
   [[ -f /etc/debian_version ]] && command -v apt-get >/dev/null ||
     die 'Automatic Xray bootstrap requires Debian with APT'
   if [[ $arch == amd64 && ( $preserve == false || $enable_panel_inbounds == true ) ]]; then
@@ -43,29 +47,12 @@ install_xray_bootstrap() {
   id _chrony >/dev/null 2>&1 && [[ -d $source_dir && ! -L $source_dir ]] ||
     die 'Debian chrony with sources.d is required'
 
-  chmod 0755 -- "$profile" "$manifest_tool"
-  if [[ $managed == false ]]; then
-    "$manifest_tool" verify -public-key "$profile/release.pub" -manifest "$profile/manifest.json" \
-      -signature "$profile/manifest.json.sig" -distinct-public-key "$profile/xray-install.pub" \
-      -distinct-public-key "$effective_key"
-  fi
-  for file in xray-install.pub release.pub xray-install.env; do
-    if file_exists "$config/$file"; then
-      check_config "$config/$file"
-      cmp -s -- "$profile/$file" "$config/$file" || die "Existing Xray bootstrap differs: $config/$file"
-    fi
-  done
+  chmod 0755 "$profile"
   if ! file_exists "$xray_config"; then
     install -d -o root -g root -m 0700 "$xray_config"
   fi
   [[ -d $xray_config && ! -L $xray_config && $(stat -c '%u:%a' -- "$xray_config") == 0:700 ]] ||
     die 'Insecure Xray configuration directory'
-  if file_exists "$xray_config/release.pub"; then
-    [[ -f $xray_config/release.pub && ! -L $xray_config/release.pub && $(stat -c '%u:%a' -- "$xray_config/release.pub") == 0:444 ]] &&
-      cmp -s -- "$profile/release.pub" "$xray_config/release.pub" || die 'Existing local Xray release key differs'
-  else
-    install -o root -g root -m 0444 -- "$profile/release.pub" "$xray_config/release.pub"
-  fi
 
   "$stage/$arch/mcui-xray" initialize >/dev/null
   getent group mcui-xray-stats >/dev/null || groupadd --system mcui-xray-stats
@@ -74,20 +61,6 @@ install_xray_bootstrap() {
     install -d -o root -g root -m 0755 /usr/local/libexec "$units/mcui-xray.service.d"
     install -o root -g root -m 0755 -- "$profile/xray-network.sh" /usr/local/libexec/mcui-xray-network
     install -o root -g root -m 0644 -- "$stage/units/mcui-xray-panel-network.conf" "$units/mcui-xray.service.d/panel-network.conf"
-  fi
-  if [[ $managed == true ]]; then
-    local release_key=$config/release.pub
-    file_exists "$release_key" || install_trust "$profile/release.pub" "$release_key"
-    local args=(-public-key "$release_key" -distinct-public-key "$profile/xray-install.pub" -distinct-public-key "$effective_key")
-    "$manifest_tool" init-published-state -state "$helper_manifest" "${args[@]}"
-    runuser -u mcui-agent -- "$manifest_tool" init-published-state -state "$agent_manifest" "${args[@]}"
-  elif ! file_exists "$helper_manifest/accepted.json"; then
-    "$manifest_tool" init-state -state "$helper_manifest" -public-key "$profile/release.pub" \
-      -manifest "$profile/manifest.json" -signature "$profile/manifest.json.sig"
-  fi
-  if [[ $managed == false ]] && ! file_exists "$agent_manifest/accepted.json"; then
-    runuser -u mcui-agent -- "$manifest_tool" init-state -state "$agent_manifest" -public-key "$profile/release.pub" \
-      -manifest "$profile/manifest.json" -signature "$profile/manifest.json.sig"
   fi
 
   if ! /usr/sbin/chronyd -p | awk -v sources="$source_dir" '
@@ -103,14 +76,14 @@ install_xray_bootstrap() {
   else
     install -o root -g root -m 0644 -- "$profile/mcui-nts.sources" "$chrony_source"
   fi
-  install -o root -g root -m 0755 -- "$stage/$arch/mcui-xray" "$manifest_tool" /usr/local/bin/
+
+  install -o root -g root -m 0755 -- "$stage/$arch/mcui-xray" /usr/local/bin/mcui-xray
   install -o root -g root -m 0644 -- "$stage/units/"mcui-xray*.service \
     "$stage/units/mcui-node-clock.socket" "$stage/units/mcui-node-clock@.service" "$units/"
   install -d -o root -g root -m 0755 "$units/mcui-helper.service.d"
   install -o root -g root -m 0644 -- "$stage/units/mcui-helper-xray-install.conf" "$units/mcui-helper.service.d/xray-install.conf"
-  for file in xray-install.pub release.pub xray-install.env; do
-    file_exists "$config/$file" || install_trust "$profile/$file" "$config/$file"
-  done
+  install -o root -g root -m 0644 -- "$profile/xray-install.pub" "$config/xray-install.pub"
+  install -o root -g root -m 0644 -- "$profile/xray-install.env" "$config/xray-install.env"
   systemctl daemon-reload
   systemctl enable --now chrony.service mcui-node-clock.socket
   /usr/bin/chronyc reload sources

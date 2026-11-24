@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -33,6 +34,7 @@ const (
 var (
 	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	digestPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	xrayArtifactID    = regexp.MustCompile(`^xray-(?:manifest-)?(?:amd64|arm64)-[0-9a-f]{64}$`)
 )
 
 func Domain(kind Kind) ([]byte, error) {
@@ -314,7 +316,11 @@ func validCore(object map[string]any, name string) error {
 }
 
 func validInteger(object map[string]any, name string, min, max uint64) error {
-	value, ok := object[name].(json.Number)
+	return validIntegerValue(object[name], name, min, max)
+}
+
+func validIntegerValue(raw any, name string, min, max uint64) error {
+	value, ok := raw.(json.Number)
 	if !ok {
 		return fmt.Errorf("invalid integer field %q", name)
 	}
@@ -356,13 +362,19 @@ func validateTaskPayload(operation string, value any) error {
 	switch operation {
 	case "core.status", "core.start", "core.stop", "core.restart", "core.uninstall":
 	case "core.install", "core.upgrade", "core.downgrade":
-		expected = append(expected, "version", "artifact_id", "manifest_version")
+		expected = append(expected, "version", "artifact_id")
+		if _, present := payload["manifest_version"]; present {
+			expected = append(expected, "manifest_version")
+		}
 		if releaseChange {
 			expected = append(expected, "current_version", "current_sha256")
 		}
 	case "config.apply":
 		if localConfig {
-			expected = append(expected, "version", "architecture", "sha256", "manifest_version", "port", "config")
+			expected = append(expected, "version", "architecture", "sha256", "port", "config")
+			if _, present := payload["manifest_version"]; present {
+				expected = append(expected, "manifest_version")
+			}
 			if _, present := payload["plan"]; present {
 				expected = append(expected, "plan")
 			}
@@ -403,7 +415,18 @@ func validateTaskPayload(operation string, value any) error {
 		if err := validIdentifier(payload, "artifact_id"); err != nil {
 			return err
 		}
-		return validInteger(payload, "manifest_version", 1, maxSafeInteger)
+		artifactID := payload["artifact_id"].(string)
+		manifestVersion, hasManifestVersion := payload["manifest_version"]
+		if !xrayArtifactID.MatchString(artifactID) || payload["core"] != "xray" {
+			return errors.New("invalid Xray artifact identity")
+		}
+		if strings.HasPrefix(artifactID, "xray-manifest-") && !hasManifestVersion {
+			return errors.New("signed-manifest Xray artifact requires a manifest version")
+		}
+		if hasManifestVersion {
+			return validIntegerValue(manifestVersion, "manifest_version", 1, maxSafeInteger)
+		}
+		return nil
 	case "config.apply":
 		if localConfig {
 			if value, present := payload["plan"]; present {
@@ -422,8 +445,10 @@ func validateTaskPayload(operation string, value any) error {
 			if err := validIdentifier(payload, "version"); err != nil {
 				return err
 			}
-			if err := validInteger(payload, "manifest_version", 1, maxSafeInteger); err != nil {
-				return err
+			if manifestVersion, present := payload["manifest_version"]; present {
+				if err := validIntegerValue(manifestVersion, "manifest_version", 1, maxSafeInteger); err != nil {
+					return err
+				}
 			}
 			if err := validInteger(payload, "port", 1024, 65535); err != nil {
 				return err

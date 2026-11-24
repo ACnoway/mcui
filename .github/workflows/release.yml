@@ -68,7 +68,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_CHANNEL: ${{ steps.version.outputs.channel }}
-          HAS_RELEASE_PUBLIC_KEY: ${{ vars.MCUI_RELEASE_PUBLIC_KEY != '' }}
         run: |
           set -euo pipefail
           assets="$RUNNER_TEMP/mcui-binaries"
@@ -94,11 +93,8 @@ jobs:
             "$assets"/mcui-master-linux-*.tar.gz "$assets"/mcui-agent-linux-*.zip "$assets/SHA256SUMS-binaries"
           if [[ "$preview" == true ]]; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --prerelease --latest=false
-          elif [[ "$HAS_RELEASE_PUBLIC_KEY" == true ]] &&
-            "${release_view[@]}" | jq -e '[.assets[].name] | index("manifest.json") != null and index("manifest.json.sig") != null' >/dev/null; then
-            echo 'deployment_ready=true' >> "$GITHUB_OUTPUT"
           else
-            echo "Stable draft $RELEASE_TAG has the binaries. Add the signed manifest and configure MCUI_RELEASE_PUBLIC_KEY to publish." >> "$GITHUB_STEP_SUMMARY"
+            echo 'deployment_ready=true' >> "$GITHUB_OUTPUT"
           fi
 
   deployment:

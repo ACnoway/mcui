@@ -2,6 +2,8 @@ package corecatalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,6 +170,83 @@ func TestListRejectsOversizeSourceResponse(t *testing.T) {
 	})}
 	if _, err := client.List(context.Background()); err == nil {
 		t.Fatal("oversize release response was accepted")
+	}
+}
+
+func TestResolveOfficialXrayReleaseUsesExactOfficialAsset(t *testing.T) {
+	version, architecture := "v26.11.9", "amd64"
+	filename, err := ExpectedAssetName("xray", version, architecture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadURL := "https://github.com/XTLS/Xray-core/releases/download/" + version + "/" + filename
+	assetBytes := []byte("official-xray-archive")
+	digest := sha256.Sum256(assetBytes)
+	assetDigest := hex.EncodeToString(digest[:])
+	apiCalls := 0
+	client := NewClient()
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		apiCalls++
+		if req.URL.Host != "api.github.com" || req.URL.Path != "/repos/XTLS/Xray-core/releases/tags/"+version ||
+			req.Header.Get("Accept") != "application/vnd.github+json" {
+			return nil, fmt.Errorf("unexpected release lookup: %s", req.URL)
+		}
+		release := upstreamRelease{TagName: version, HTMLURL: "https://github.com/XTLS/Xray-core/releases/tag/" + version,
+			Assets: []upstreamAsset{{Name: filename, Size: int64(len(assetBytes)), BrowserDownloadURL: downloadURL, Digest: "sha256:" + assetDigest}}}
+		body, err := json.Marshal(release)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+	})}
+	resolved, err := client.ResolveRelease(context.Background(), "xray", version, architecture, assetDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiCalls != 1 || resolved.Version != version || resolved.Architecture != architecture || resolved.Filename != filename ||
+		resolved.Size != int64(len(assetBytes)) || resolved.SHA256 != assetDigest || resolved.DownloadURL != downloadURL {
+		t.Fatalf("unexpected official release: %+v, calls=%d", resolved, apiCalls)
+	}
+	if _, err := client.ResolveRelease(context.Background(), "xray", version, architecture, strings.Repeat("b", 64)); err == nil {
+		t.Fatal("mismatched signed task digest was accepted")
+	}
+}
+
+func TestResolveReleaseComputesDigestWhenGitHubOmitsIt(t *testing.T) {
+	version, architecture := "v26.11.9", "arm64"
+	filename, err := ExpectedAssetName("xray", version, architecture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadURL := "https://github.com/XTLS/Xray-core/releases/download/" + version + "/" + filename
+	assetBytes := []byte("release-without-upstream-digest")
+	digest := sha256.Sum256(assetBytes)
+	client := NewClient()
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/repos/XTLS/Xray-core/releases/tags/"+version {
+			return nil, fmt.Errorf("unexpected release lookup: %s", req.URL)
+		}
+		release := upstreamRelease{TagName: version,
+			Assets: []upstreamAsset{{Name: filename, Size: int64(len(assetBytes)), BrowserDownloadURL: downloadURL}}}
+		body, err := json.Marshal(release)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body))), Request: req}, nil
+	})}
+	client.assetHTTP = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != downloadURL || req.Header.Get("Accept-Encoding") != "identity" {
+			return nil, fmt.Errorf("unexpected official asset request: %s", req.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(assetBytes))),
+			ContentLength: int64(len(assetBytes)), Request: req}, nil
+	})}
+	resolved, err := client.ResolveRelease(context.Background(), "xray", version, architecture, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.SHA256 != hex.EncodeToString(digest[:]) || resolved.Size != int64(len(assetBytes)) {
+		t.Fatalf("missing upstream digest was not replaced with computed digest: %+v", resolved)
 	}
 }
 

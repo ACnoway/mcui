@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -123,4 +124,47 @@ func TestV1RejectsInvalidUTF8AndLoneSurrogateStrings(t *testing.T) {
 	if _, err := CanonicalSignedBytes(Task, []byte(input)); err == nil {
 		t.Fatal("lone surrogate was accepted")
 	}
+}
+
+func TestOfficialXrayReleaseTasksOmitManifestVersion(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for _, operation := range []string{"core.install", "core.upgrade", "core.downgrade"} {
+		payload := map[string]any{
+			"core": "xray", "version": "v26.10.31", "artifact_id": "xray-amd64-" + digest,
+		}
+		if operation != "core.install" {
+			payload["current_version"] = "v26.11.9"
+			payload["current_sha256"] = strings.Repeat("b", 64)
+		}
+		if err := validateTaskPayload(operation, payload); err != nil {
+			t.Errorf("%s without manifest_version was rejected: %v", operation, err)
+		}
+	}
+
+	if err := validateTaskPayload("core.install", map[string]any{
+		"core": "xray", "version": "v26.10.31", "artifact_id": "xray-manifest-amd64-" + digest,
+	}); err == nil {
+		t.Fatal("legacy signed-manifest artifact without its manifest version was accepted")
+	}
+
+	for _, vector := range readVectorSet(t).Vectors {
+		if vector.Kind != Task {
+			continue
+		}
+		decoded, err := decodeStrict([]byte(vector.InputJSON))
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := decoded.(map[string]any)
+		if message["operation"] != "config.apply" {
+			continue
+		}
+		payload := message["payload"].(map[string]any)
+		delete(payload, "manifest_version")
+		if err := validateTaskPayload("config.apply", payload); err != nil {
+			t.Fatalf("official Xray configuration without manifest_version was rejected: %v", err)
+		}
+		return
+	}
+	t.Fatal("protocol vectors did not include an Xray configuration task")
 }

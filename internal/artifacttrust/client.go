@@ -88,8 +88,31 @@ type Client struct {
 	artifactHTTP    *http.Client
 	requireCoreRole bool
 	signed          *manifestClient
+	officialCatalog *corecatalog.Client
 	backup          *masterBackup
 	mu              sync.Mutex
+}
+
+// OpenOfficialCore prepares a content-addressed cache for Core archives from
+// their fixed upstream GitHub Release repositories. The signed management
+// task supplies the expected digest; GitHub's API digest is checked when set.
+func OpenOfficialCore(stateDir string) (*Client, error) {
+	if !filepath.IsAbs(stateDir) {
+		return nil, ErrUnavailable
+	}
+	dir, err := preparePrivateDirectory(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	cache, err := preparePrivateDirectory(filepath.Join(dir, "artifacts"))
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		targetCacheDir:  cache,
+		artifactHTTP:    &http.Client{Timeout: artifactTimeout, Transport: newPublicTransport(allowedArtifactHost), CheckRedirect: checkArtifactRedirect},
+		officialCatalog: corecatalog.NewClient(),
+	}, nil
 }
 
 type targetCustom struct {
@@ -173,6 +196,32 @@ func (c *Client) Lookup(ctx context.Context, core, version string) (Target, erro
 	return c.lookupLocked(ctx, core, version)
 }
 
+// LookupOfficialRelease resolves an exact official release asset and binds it
+// to the SHA-256 carried by the purpose-specific signed management task.
+func (c *Client) LookupOfficialRelease(ctx context.Context, core, version, architecture, expectedSHA256 string) (Target, error) {
+	if c == nil || ctx == nil || c.officialCatalog == nil || !lowercaseDigest.MatchString(expectedSHA256) {
+		return Target{}, ErrUntrustedTarget
+	}
+	if runtime.GOOS != "linux" || (architecture != "amd64" && architecture != "arm64") || runtime.GOARCH != architecture {
+		return Target{}, ErrUntrustedTarget
+	}
+	asset, err := c.officialCatalog.ResolveRelease(ctx, core, version, architecture, expectedSHA256)
+	if err != nil {
+		return Target{}, fmt.Errorf("%w: %v", ErrUntrustedTarget, err)
+	}
+	sourceID, err := corecatalog.OfficialSourceID(core)
+	if err != nil {
+		return Target{}, ErrUntrustedTarget
+	}
+	return Target{
+		ArtifactID: core + "-" + architecture + "-" + asset.SHA256,
+		Core:       core, Version: version, OS: "linux", Architecture: architecture,
+		Filename: asset.Filename, ArchiveFormat: "zip", BuildOptions: "upstream-prebuilt",
+		SourceID: sourceID, Size: asset.Size,
+		SHA256: asset.SHA256, SourceURL: asset.DownloadURL, owner: c,
+	}, nil
+}
+
 // LookupCoreManifest requires exact authorization from the requested
 // core-targets version. Download and activation must retain that authorization.
 func (c *Client) LookupCoreManifest(ctx context.Context, core, version string, manifestVersion int64) (Target, error) {
@@ -199,15 +248,23 @@ func (c *Client) Download(ctx context.Context, target Target) (string, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	current, err := c.lookupLocked(ctx, target.Core, target.Version)
+	var current Target
+	var err error
+	if c.officialCatalog != nil {
+		current, err = c.LookupOfficialRelease(ctx, target.Core, target.Version, target.Architecture, target.SHA256)
+	} else {
+		current, err = c.lookupLocked(ctx, target.Core, target.Version)
+	}
 	if err != nil {
 		return "", err
 	}
 	if !sameTarget(target, current) {
 		return "", ErrChangedTarget
 	}
-	if err = c.checkTime(); err != nil {
-		return "", err
+	if c.officialCatalog == nil {
+		if err = c.checkTime(); err != nil {
+			return "", err
+		}
 	}
 	return c.downloadLocked(ctx, current)
 }
@@ -219,14 +276,23 @@ func (c *Client) Revalidate(ctx context.Context, target Target) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	current, err := c.lookupLocked(ctx, target.Core, target.Version)
+	var current Target
+	var err error
+	if c.officialCatalog != nil {
+		current, err = c.LookupOfficialRelease(ctx, target.Core, target.Version, target.Architecture, target.SHA256)
+	} else {
+		current, err = c.lookupLocked(ctx, target.Core, target.Version)
+	}
 	if err != nil {
 		return err
 	}
 	if !sameTarget(target, current) {
 		return ErrChangedTarget
 	}
-	return c.checkTime()
+	if c.officialCatalog == nil {
+		return c.checkTime()
+	}
+	return nil
 }
 
 func (c *Client) lookupLocked(ctx context.Context, core, version string) (Target, error) {

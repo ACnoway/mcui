@@ -2,14 +2,12 @@ package main
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"errors"
 	"flag"
 	"net"
 	"net/http"
 	"time"
 
-	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 )
 
@@ -19,10 +17,6 @@ func servePanelSigner(flags *flag.FlagSet, args []string, now func() (time.Time,
 	keyPath := flags.String("key", "", "dedicated Ed25519 lifecycle signing key in PKCS#8 PEM")
 	ledgerPath := flags.String("ledger", "", "existing private lifecycle issuance ledger")
 	tokenPath := flags.String("token-file", "", "shared API bearer token file")
-	releaseKey := flags.String("release-key", "", "protected release public key file")
-	state := flags.String("manifest-state", "", "initialized private manifest rollback state")
-	manifest := flags.String("manifest", "", "signed release manifest file")
-	signature := flags.String("manifest-signature", "", "detached release manifest signature file")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -51,13 +45,7 @@ func servePanelSigner(flags *flag.FlagSet, args []string, now func() (time.Time,
 		return err
 	}
 	defer ledger.Close()
-	source, err := artifacttrust.OpenLocalManifest(*state, *releaseKey, *manifest, *signature, now, func(key ed25519.PublicKey) bool {
-		return !policy.UsesPublicKey(key)
-	})
-	if err != nil {
-		return err
-	}
-	handler, err := lifecycleauth.NewPanelSignerHandler(policy, ledger, privateKey, bytes.TrimSpace(token), now, source)
+	handler, err := lifecycleauth.NewPanelSignerHandler(policy, ledger, privateKey, bytes.TrimSpace(token), now)
 	if err != nil {
 		return err
 	}

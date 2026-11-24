@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/ACnoway/mcui/internal/artifacttrust"
 )
 
 func NewSingleAdminPolicy(keyID string, publicKey ed25519.PublicKey) (*Policy, error) {
@@ -25,41 +23,28 @@ func NewSingleAdminPolicy(keyID string, publicKey ed25519.PublicKey) (*Policy, e
 }
 
 type PanelSigner struct {
-	policy  *Policy
-	ledger  *Ledger
-	key     ed25519.PrivateKey
-	now     func() (time.Time, error)
-	current func(context.Context) (artifacttrust.Manifest, error)
+	policy *Policy
+	ledger *Ledger
+	key    ed25519.PrivateKey
+	now    func() (time.Time, error)
 }
 
-func NewPanelSigner(policy *Policy, ledger *Ledger, key ed25519.PrivateKey, now func() (time.Time, error), current func(context.Context) (artifacttrust.Manifest, error)) (*PanelSigner, error) {
-	if !policy.HasPanelScope() || ledger == nil || !matchesPrivate(key, policy.signingKey) || now == nil || current == nil {
+func NewPanelSigner(policy *Policy, ledger *Ledger, key ed25519.PrivateKey, now func() (time.Time, error)) (*PanelSigner, error) {
+	if !policy.HasPanelScope() || ledger == nil || !matchesPrivate(key, policy.signingKey) || now == nil {
 		return nil, errors.New("incomplete panel Xray signer configuration")
 	}
-	return &PanelSigner{policy: policy, ledger: ledger, key: key, now: now, current: current}, nil
-}
-
-func (s *PanelSigner) Manifest(ctx context.Context) (artifacttrust.Manifest, error) {
-	return s.current(ctx)
+	return &PanelSigner{policy: policy, ledger: ledger, key: key, now: now}, nil
 }
 
 func (s *PanelSigner) Issue(ctx context.Context, proposal Proposal) ([]byte, error) {
 	if _, _, err := s.policy.PanelEvidence(proposal); err != nil {
 		return nil, err
 	}
-	var manifest artifacttrust.Manifest
-	if !IsControlOperation(proposal.Operation) {
-		var err error
-		manifest, err = s.Manifest(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
 	now, err := s.now()
 	if err != nil {
 		return nil, err
 	}
-	return s.policy.IssuePanel(ctx, s.ledger, proposal, s.key, now, manifest)
+	return s.policy.IssuePanel(ctx, s.ledger, proposal, s.key, now)
 }
 
 func (p *Policy) HasPanelScope() bool { return p != nil && p.panel != nil }
@@ -111,26 +96,14 @@ func (policy *Policy) VerifyPanelTask(p Proposal, raw []byte) (InstallTask, erro
 	return task, nil
 }
 
-// IssuePanel binds a reserved proposal to the latest approved manifest and
-// consumes the same durable task/sequence constraints as offline issuance.
-func (policy *Policy) IssuePanel(ctx context.Context, ledger *Ledger, p Proposal, key ed25519.PrivateKey, now time.Time, manifest artifacttrust.Manifest) ([]byte, error) {
+// IssuePanel consumes a panel-authenticated proposal and signs its exact
+// release version and digest with the purpose-specific Core task key.
+func (policy *Policy) IssuePanel(ctx context.Context, ledger *Ledger, p Proposal, key ed25519.PrivateKey, now time.Time) ([]byte, error) {
 	id, evidence, err := policy.PanelEvidence(p)
 	request := Request{Proposal: p, RequestedAt: p.CreatedAt}
 	if err != nil || ledger == nil || ledger.db == nil || !matchesPrivate(key, policy.signingKey) ||
 		now.Unix() < p.CreatedAt || now.Unix() >= request.taskExpiry() {
 		return nil, ErrDenied
-	}
-	if !IsControlOperation(p.Operation) {
-		var approved bool
-		for _, entry := range manifest.Artifacts {
-			if entry.Component == "xray" && entry.Architecture == p.Architecture && entry.Version == p.Version && entry.SHA256 == p.SHA256 {
-				approved = true
-				break
-			}
-		}
-		if !approved || manifest.ManifestVersion != p.ManifestVersion || !now.Before(manifest.ExpiresAt) {
-			return nil, ErrDenied
-		}
 	}
 	task, err := signInstallTask(request, id, key, policy.signingKey)
 	if err != nil {

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/store"
@@ -19,8 +18,12 @@ import (
 )
 
 type panelXraySigner interface {
-	Manifest(context.Context) (artifacttrust.Manifest, error)
 	Issue(context.Context, lifecycleauth.Proposal) ([]byte, error)
+}
+
+type xrayReleaseCatalog interface {
+	ListXrayReleases(context.Context) (corecatalog.Snapshot, error)
+	ResolveRelease(context.Context, string, string, string, string) (corecatalog.ReleaseArtifact, error)
 }
 
 func (s *Server) ConfigurePanelXray(client panelXraySigner) error {
@@ -44,13 +47,12 @@ func (s *Server) panelXrayScope(st *store.State, p lifecycleauth.Proposal) bool 
 }
 
 type panelXrayRequest struct {
-	TaskID         string `json:"task_id"`
-	Operation      string `json:"operation"`
-	Version        string `json:"version"`
-	State          string `json:"state"`
-	CatalogVersion int64  `json:"catalog_version"`
-	Confirm        string `json:"confirm_operation"`
-	MFACode        string `json:"mfa_code"`
+	TaskID    string `json:"task_id"`
+	Operation string `json:"operation"`
+	Version   string `json:"version"`
+	State     string `json:"state"`
+	Confirm   string `json:"confirm_operation"`
+	MFACode   string `json:"mfa_code"`
 }
 
 func (in panelXrayRequest) intent() string {
@@ -62,10 +64,12 @@ func (in panelXrayRequest) intent() string {
 func (in panelXrayRequest) schema() int {
 	switch in.Operation {
 	case "core.install":
-		return lifecycleauth.SignedManifestProposalVersion
+		return lifecycleauth.OfficialReleaseProposalVersion
 	case "core.start", "core.stop":
 		return lifecycleauth.ControlProposalVersion
-	case "core.upgrade", "core.downgrade", "core.uninstall":
+	case "core.upgrade", "core.downgrade":
+		return lifecycleauth.OfficialReleaseProposalVersion
+	case "core.uninstall":
 		return lifecycleauth.ChangeProposalVersion
 	case xrayconfig.Operation:
 		return lifecycleauth.ConfigProposalVersion
@@ -283,20 +287,36 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	}) || fingerprint == "" {
 		return
 	}
-	manifest, err := s.xrayPanel.Manifest(r.Context())
+	catalog, ok := s.coreCatalog.(xrayReleaseCatalog)
 	versions := []string{}
 	configReady := false
-	if err == nil {
-		for _, a := range manifest.Artifacts {
-			if a.Component == "xray" && a.Architecture == inventory.Architecture {
-				versions = append(versions, a.Version)
-				if a.Version == inventory.Xray.Version && a.SHA256 == inventory.Xray.SHA256 && xrayCandidate(inventory.Xray, draft) {
-					configReady = true
+	if ok {
+		snapshot, catalogErr := catalog.ListXrayReleases(r.Context())
+		if catalogErr == nil && !snapshot.Stale {
+			for _, core := range snapshot.Cores {
+				if core.ID != "xray" {
+					continue
+				}
+				for _, release := range core.Releases {
+					if release.Prerelease || !corecatalog.ValidXrayVersion(release.Version) {
+						continue
+					}
+					filename, err := corecatalog.ExpectedAssetName("xray", release.Version, inventory.Architecture)
+					if err != nil {
+						continue
+					}
+					for _, asset := range release.Assets {
+						if asset.Name == filename {
+							versions = append(versions, release.Version)
+							break
+						}
+					}
 				}
 			}
 		}
-		sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
 	}
+	configReady = inventory.Xray.Version != "" && corecatalog.ValidXrayRelease(inventory.Xray.Version, inventory.Xray.SHA256) && xrayCandidate(inventory.Xray, draft)
+	sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
 	plan, _ := xrayconfig.ParseConfiguration(draft)
 	usageReason := "capability_unverified"
 	if inventory.Architecture == xrayconfig.Architecture && inventory.Xray.Version == xrayconfig.Version &&
@@ -308,7 +328,7 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	result := map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
-		"versions": versions, "catalog_version": manifest.ManifestVersion,
+		"versions":         versions,
 		"config_ready":     configReady,
 		"draft":            plan.Inbounds,
 		"draft_network":    plan.Network,
@@ -344,10 +364,10 @@ func (s *Server) panelXrayOperation(w http.ResponseWriter, r *http.Request) {
 	var in panelXrayRequest
 	err := readJSON(r, &in)
 	control := lifecycleauth.IsControlOperation(in.Operation)
+	artifact := in.Operation == "core.install" || lifecycleauth.IsVersionChange(in.Operation)
 	if err != nil || !validRequestID(in.TaskID) || len(in.State) != 64 || in.schema() == 0 ||
 		(in.dangerous() && in.Confirm != in.Operation) ||
-		(control && (in.Version != "" || in.CatalogVersion != 0)) ||
-		(!control && (in.Version == "" || in.CatalogVersion < 1)) {
+		(control && in.Version != "") || (artifact && in.Version == "") || (!control && !artifact && in.Version == "") {
 		http.Error(w, "invalid or unconfirmed Xray request", http.StatusBadRequest)
 		return
 	}
@@ -402,11 +422,11 @@ func (s *Server) panelXrayOperation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(prior.Proposal) == 0 {
-		var manifest artifacttrust.Manifest
-		if !control {
-			manifest, err = s.xrayPanel.Manifest(r.Context())
-			if err != nil || manifest.ManifestVersion != in.CatalogVersion {
-				http.Error(w, "verified release list changed or is unavailable", http.StatusConflict)
+		var release *corecatalog.ReleaseArtifact
+		if artifact {
+			release, err = s.resolvePanelXrayRelease(r.Context(), p.NodeID, p.RequesterID, in.State, in.Version)
+			if err != nil {
+				http.Error(w, "selected official Xray release is unavailable for this node architecture", http.StatusConflict)
 				return
 			}
 		}
@@ -420,7 +440,7 @@ func (s *Server) panelXrayOperation(w http.ResponseWriter, r *http.Request) {
 				http.NotFound(w, r)
 				return
 			}
-			if err := s.reservePanelXray(&p, in, manifest); err != nil {
+			if err := s.reservePanelXray(&p, in, release); err != nil {
 				writePanelXrayError(w, r, err)
 				return
 			}
@@ -456,7 +476,39 @@ func (s *Server) panelXrayOperation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest, manifest artifacttrust.Manifest) error {
+func (s *Server) resolvePanelXrayRelease(ctx context.Context, nodeID, requesterID, expectedState, version string) (*corecatalog.ReleaseArtifact, error) {
+	now, err := s.taskRuntime.currentTime()
+	if err != nil {
+		return nil, err
+	}
+	var architecture string
+	err = s.store.View(func(st store.State) error {
+		proposal := lifecycleauth.Proposal{NodeID: nodeID, RequesterID: requesterID}
+		if !s.panelXrayScope(&st, proposal) {
+			return errXrayInstallScope
+		}
+		inventory, fingerprint, err := panelInventory(st.Nodes[nodeID], now)
+		if err != nil || fingerprint != expectedState {
+			return errXrayInventory
+		}
+		architecture = inventory.Architecture
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	catalog, ok := s.coreCatalog.(xrayReleaseCatalog)
+	if !ok {
+		return nil, errors.New("official Core release catalog is unavailable")
+	}
+	asset, err := catalog.ResolveRelease(ctx, "xray", version, architecture, "")
+	if err != nil {
+		return nil, err
+	}
+	return &asset, nil
+}
+
+func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest, release *corecatalog.ReleaseArtifact) error {
 	now, err := s.taskRuntime.currentTime()
 	if err != nil {
 		return err
@@ -510,21 +562,19 @@ func (s *Server) reservePanelXray(p *lifecycleauth.Proposal, in panelXrayRequest
 		}
 		if lifecycleauth.IsControlOperation(p.Operation) {
 			p.Version, p.SHA256 = i.Xray.Version, i.Xray.SHA256
-		} else {
-			if !now.Before(manifest.ExpiresAt) {
+		} else if lifecycleauth.IsVersionChange(p.Operation) || p.Operation == "core.install" {
+			if release == nil || release.Core != "xray" || release.Version != in.Version || release.Architecture != i.Architecture || release.SHA256 == "" {
 				return lifecycleauth.ErrDenied
 			}
-			for _, a := range manifest.Artifacts {
-				if a.Component == "xray" && a.Architecture == i.Architecture && a.Version == in.Version {
-					p.Version, p.SHA256, p.ManifestVersion = a.Version, a.SHA256, manifest.ManifestVersion
-					break
-				}
-			}
+			p.Version, p.SHA256 = release.Version, release.SHA256
+			p.ManifestVersion = 0
 			if lifecycleauth.IsVersionChange(p.Operation) {
 				p.CurrentVersion, p.CurrentSHA256 = i.Xray.Version, i.Xray.SHA256
 			}
+		} else {
 			if p.Operation == xrayconfig.Operation {
-				if p.Version != i.Xray.Version || p.SHA256 != i.Xray.SHA256 || !xrayCandidate(i.Xray, node.XrayDraft) ||
+				p.Version, p.SHA256 = i.Xray.Version, i.Xray.SHA256
+				if in.Version != i.Xray.Version || p.Version != i.Xray.Version || p.SHA256 != i.Xray.SHA256 || !xrayCandidate(i.Xray, node.XrayDraft) ||
 					p.Sequence <= i.Xray.ConfigRevision {
 					return errXrayInventory
 				}

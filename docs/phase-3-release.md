@@ -1,30 +1,22 @@
 # 阶段 3 制品发布
 
-生产发布采用 **GitHub Releases 和单个 Ed25519 签名的制品清单**，由一位维护者管理发布密钥。签发工具和 Xray 安装客户端已接入此格式，首份生产清单仍待审核和发布。TUF 流程用于旧任务收尾和历史验证。
+Core 安装直接使用各项目官方 GitHub Releases。安装 Xray 时，管理员在节点面板选择一个已发布的稳定版本；Master 根据固定的 Xray 仓库读取该版本和节点架构对应的官方制品，并把精确版本、架构和 SHA-256 签入生命周期任务。节点只从固定的官方来源下载，并校验文件长度和 SHA-256。
 
-## 1. 发布位置和密钥
+这条流程不需要单独维护 Core 发布公钥或签名清单。Master 在上游 API 提供制品摘要时核对该摘要；未提供时由 Master 下载官方文件并计算摘要。Agent 与 Helper 仍使用专用任务公钥核验任务。Agent/Helper 成对更新使用独立的运行时签名和节点授权流程，见[成对更新手册](./phase-3-runtime-update.md)。
 
-- Xray、sing-box 和 mita 使用各自官方 GitHub Releases 上的原始二进制包。MCUI 的安装器仅选择已核验并登记进有效签名清单的版本与架构。
-- V1 在 `ACnoway/mcui` 的 GitHub Releases 发布 Compose 配置、预构建的主控安装程序和通用 Agent 安装器，通过 GitHub Container Registry 分发配套主控镜像。安装器包含 amd64 和 arm64 二进制。Agent/Helper 成对更新 ZIP 使用独立的更新流程。[主控打包](./master-deployment.md) · [Agent 接入](./phase-1-operations.md#节点首次接入)
-- 先以草稿上传 `manifest.json` 和 `manifest.json.sig`，再将包含两个附件的 Release 发布为 Latest。客户端通过固定仓库的 `releases/latest` 取得标签，再从该标签取两个文件。给已发布的 Latest Release 更换附件会导致同版本内容冲突。每次变更发新标签和更高版本，保留清单引用的制品版本。可以单独发布清单更新，复用已发布的 ZIP。每个设为 Latest 的 Release 都需带这两个文件。
-- 维护者在离线签发环境保管一把 Ed25519 发布私钥。通过可信安装包或带外配置为节点预置对应公钥并核对指纹。发布私钥与任务签发、SSH 和 GitHub 上传凭据分开。更换或撤销公钥通过节点本地管理完成。
+## 1. 发布位置和信任边界
 
-## 2. 取件核验和发布
+- Xray、sing-box 和 mita 的 Core 制品来自各自固定的官方仓库。当前远程生命周期管理支持 Xray；面板列出该节点架构有对应制品的已发布稳定版本，管理员明确选择安装、升级或降级目标。
+- Master 解析所选标签对应的官方 Release，接受精确的预期资产名称和 GitHub 官方下载地址。节点再次解析同一个版本和架构，并用任务中的摘要校验下载结果。版本发布或资产替换后，旧任务的摘要不匹配时会失败。
+- Xray 任务签名密钥只负责授权节点、动作和精确的 Core 版本。它与只读状态任务密钥、SSH/GitHub 凭据分开管理。节点不需要 Core 发布公钥或手工更新签名清单。
+- MCUI 在 `ACnoway/mcui` 的 GitHub Releases 发布 Compose 配置、预构建主控和通用 Agent 安装器；配套主控镜像由 GitHub Container Registry 分发。[主控打包](./master-deployment.md) · [Agent 接入](./phase-1-operations.md#节点首次接入)
 
-1. 每个版本和架构核对一次。记录官方地址、文件名、长度和 SHA-256，与上游公布的摘要比对（如有）。检查归档成员、可执行文件架构和许可证，关联相应的构建或运行结果。上游有可验证签名时核验并记录结果。
-2. 构建 MCUI 自身更新包可使用现有 `bash scripts/build-runtime-release.sh NEW_DIRECTORY`。同一架构的 Agent 和 Helper 作为一个 ZIP 发布，取件记录关联源码提交和构建结果。供成对监督器使用的清单只包含 `mcui-runtime` 条目，由运行时专用发布密钥签署。节点授权使用另一把密钥。[成对更新手册](./phase-3-runtime-update.md)
-3. 将通过核验的条目填入[清单格式](./agent-technical-design-v1.0.md#62-制品清单最小字段)。发布时递增 `manifest_version`（正整数，最大值为 9007199254740991），设置 RFC 3339 `expires_at`。组件为 `xray`、`sing-box`、`mita` 或 `mcui-runtime`，操作系统为 `linux`，架构为 `amd64` 或 `arm64`。源标识分别为 `github:XTLS/Xray-core`、`github:SagerNet/sing-box`、`github:enfein/mieru` 和 `github:ACnoway/mcui`。ID 为 `<组件>-<架构>-<小写SHA256>`，其中 Xray 使用前缀 `xray-manifest-`。上游制品的 `build_options` 为 `upstream-prebuilt`，已核验签名记为 `verified`，确认未提供签名记为 `not-provided`。MCUI ZIP 使用 `mcui-build:<40位源码提交SHA>` 与 `not-applicable`，文件名为 `mcui-runtime-linux-<架构>.zip`。
-4. 用发布私钥对 `manifest.json` 的原始字节签名，将 64 字节 Ed25519 分离签名写入 `manifest.json.sig`。使用节点预置公钥复验后发布这两个文件。撤销制品时在下一版清单移除相应条目，`artifacts: []` 可一次撤销所有制品。
+## 2. MCUI 发布和制品检查
 
-```sh
-go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
-./mcui-manifest sign -private-key "$RELEASE_PRIVATE_KEY" -manifest manifest.json -signature manifest.json.sig
-./mcui-manifest verify -public-key "$RELEASE_PUBLIC_KEY" -manifest manifest.json -signature manifest.json.sig
-```
-
-私钥使用 Ed25519 PKCS#8 PEM，Unix 上仅所有者可访问。公钥支持 PKIX PEM 或标准 Base64 编码的 32 字节原始公钥。核对 `verify` 输出中的原始公钥 SHA-256 指纹、清单版本及原始字节摘要。签发命令拒绝覆盖已有签名文件。
-
-任务绑定节点、动作和清单中的精确制品。V1 面板由有效清单筛选可安装版本，默认选择当前节点可安装的最新稳定版，并在创建任务时锁定实际版本与摘要。Agent 与 Helper 分别核验清单签名和版本，再按相同长度和 SHA-256 校验官方源或主控缓存的字节。[节点启动恢复](./phase-3-operations.md#进程中断恢复验收) · [制品信任方案](./artifact-trust.md)
+1. Core 版本目录读取上游 GitHub Releases。管理员在执行安装操作时选定版本；Master 检查 Release 已发布、不是草稿或预发布，并确认该节点架构的 Xray ZIP 存在。
+2. 如果 GitHub API 提供 asset SHA-256，Master 将它用于任务摘要并在节点端复核；如果上游没有摘要，Master 下载该固定官方资产并计算 SHA-256。节点下载时再次检查任务绑定的文件长度和摘要，并严格校验解压内容。
+3. Core 的安全更新由上游发布和项目兼容矩阵管理，无需每个版本另行生成、签署和发布 MCUI 清单。出现不兼容版本时，管理员可在面板选择仍兼容的已发布版本。
+4. 构建 MCUI 自身更新包可使用 `bash scripts/build-runtime-release.sh NEW_DIRECTORY`。Agent 和 Helper 的成对 ZIP 仍由运行时专用密钥签署，节点更新还需独立授权。[成对更新手册](./phase-3-runtime-update.md)
 
 ### 标签和预发布
 
@@ -34,7 +26,7 @@ go build -trimpath -o mcui-manifest ./cmd/mcui-manifest
 
 **Publish MCUI release** 在推送新标签时运行项目检查，从该标签构建 amd64 和 arm64 制品，并上传到 GitHub Release。每个架构提供 `mcui-master-linux-<arch>.tar.gz`（主控和 Web 文件）和 `mcui-agent-linux-<arch>.zip`（Agent 和 Helper），另附 `SHA256SUMS-binaries`。
 
-Alpha 和 Beta 会自动公开为 Pre-release，生产部署继续从 Latest 获取签名清单。可从已包含工作流的提交推送测试标签。
+Alpha 和 Beta 会自动公开为 Pre-release；正式版按稳定标签发布。Core 版本仍从各 Core 项目的官方 Releases 选择。可从已包含工作流的提交推送测试标签。
 
 ```sh
 git tag -a v0.1.0-alpha.1 -m v0.1.0-alpha.1
@@ -45,31 +37,27 @@ git push origin refs/tags/v0.1.0-alpha.1
 
 ### 发布 Compose 和通用 Agent
 
-1. 维护者审核制品并离线签发清单。把项目发布公钥写入仓库 Actions 变量 `MCUI_RELEASE_PUBLIC_KEY`。部署者无需配置此变量。
-2. 推送 `vX.Y.Z` 标签。工作流在该版本的 Release 草稿上传二进制。将 `manifest.json` 和 `manifest.json.sig` 上传到草稿。Git 标签标识 MCUI 源码版本，`manifest_version` 是客户端核对的单调递增序号。
-3. 签名附件和发布公钥齐备时，工作流自动核验清单并继续发布。如果首次运行时材料还未齐备，从 `master` 手动运行 **Publish MCUI release**，输入已有标签。工作流构建两架构主控镜像，上传安装器、Compose 文件和摘要，然后发布 Release 并更新镜像的 `latest` 标签。
-4. 首次发布后，将 GHCR 的 `mcui-master` 包设为公开。检查镜像可匿名拉取，Release 安装器摘要与配套镜像中 `/opt/mcui/release/agent-release` 的摘要一致。
+1. 推送 `vX.Y.Z` 标签。工作流在该版本的 Release 草稿上传二进制，无需准备 Core 清单或发布公钥。
+2. 工作流完成后，从 `master` 手动运行 **Publish MCUI release** 并输入已有标签。工作流构建两架构主控镜像，上传安装器、Compose 文件和摘要，然后发布 Release 并更新镜像的 `latest` 标签。
+3. 首次发布后，将 GHCR 的 `mcui-master` 包设为公开。检查镜像可匿名拉取，Release 安装器摘要与配套镜像中 `/opt/mcui/release/agent-release` 的摘要一致。
 
-可用 `bash scripts/build-compose-release.sh NEW_DIRECTORY vX.Y.Z release.pub manifest.json manifest.json.sig` 在隔离环境构建同样的制品。通用安装器内含项目发布公钥，面板在生成安装命令时传入部署的任务签发公钥。独立发布的清单更新可保留原版本 Agent 安装器，镜像中固定的下载版本继续可用。[发布工作流](../.github/workflows/release-deployment.yml)
+可用 `bash scripts/build-compose-release.sh NEW_DIRECTORY vX.Y.Z` 在隔离环境构建同样的制品。通用安装器从面板命令接收 Xray 生命周期任务公钥；Core 发布公钥不再随安装器分发。[发布工作流](../.github/workflows/release-deployment.yml)
 
 ### 生产发布验收
 
-- 维护者核验首批制品和发布公钥，签发并发布首份生产清单。
-- 验证一键脚本和 Compose 的发布入口、首次凭据、证书接入，以及从面板命令安装空 Agent。验证管理员选择默认版本后使用核准的官方 Xray 制品。
+- 验证一键脚本和 Compose 的发布入口、首次凭据、证书接入，以及从面板命令安装空 Agent。验证管理员能选择官方稳定版并安装精确的 Xray 制品。
 - 发布检查覆盖 Go、前端锁文件、镜像及已支持的 Core 版本，记录修复版本和升级方式。验证补丁的签名、安装和回滚。
-- 用生产信任材料完成节点部署，确认 chrony 实际通过 NTS 使用 `time.cloudflare.com`，验证签名清单、安装及结果回报。单机用户按单机流程备份和恢复。启用了独立检查点的部署另外验证旧快照拒绝。[单机备份恢复](./phase-2-operations.md#单机运行与备份恢复)
+- 用生产任务信任材料完成节点部署，确认 chrony 实际通过 NTS 使用 `time.cloudflare.com`，验证任务签名、制品摘要、安装及结果回报。单机用户按单机流程备份和恢复。启用了独立检查点的部署另外验证旧快照拒绝。[单机备份恢复](./phase-2-operations.md#单机运行与备份恢复)
 - 使用独立的运行时发布密钥和节点更新授权密钥验收远程成对更新，在待发布的节点配置上复验断电和磁盘写满后的恢复与结果回报。[成对更新](./phase-3-runtime-update.md)
 - 记录对应提交、支持平台、部署与恢复结果。常规开发使用隔离节点和测试信任材料。[阶段 3 开发进度](./phase-3-progress.md#后续工作)
 
-## 3. 从当前 TUF 实现迁移
+## 3. 旧 TUF 实现
 
-1. 先为节点配发发布公钥和经带外核对的当前清单，按[节点手册](./phase-3-operations.md)初始化 Agent 状态及本地工具和 Helper 共用的特权清单状态。
-2. 更新 Master 和独立签发工具。已投递的 TUF 任务仍可由旧模式节点领取和回报，切换节点前先收尾或对账。旧的未投递提案不再投递，按原任务序号规则处理保留槽后，用当前单签清单重建提案。
-3. 协调切换节点的 Agent、Helper 和本地工具。新提案使用格式版本 3，签名信封中的 Xray 制品 ID 带 `xray-manifest-` 前缀，Master 仅向声明 `install=xray-manifest-v1` 的节点租出新任务。旧任务的 `manifest_version` 仍指 TUF 的 `core-targets` 委派版本。保留原身份、任务账本、已部署版本和恢复状态。
+旧版 TUF 客户端、已签发任务和历史验证材料仍保留在代码库中，供需要重现旧部署的用户使用。新安装流程不再要求复制 TUF 根、Core 发布公钥或 Core 签名清单。Agent/Helper 成对自更新继续使用自己的签名材料，见[更新手册](./phase-3-runtime-update.md)。
 
 ## 4. 迁移前的 TUF 调试手册
 
-本节适用于复现现有 TUF 实现与历史验证。生产发布按上面的单签清单方案实施。
+本节只适用于复现历史 TUF 实现与旧部署；新 Core 安装不使用此流程。
 
 `mcui-tuf` 生成、签署并检查标准 TUF metadata。节点以独立渠道分发的离线根为起点，在 HTTPS 仓库刷新 metadata，再前往固定 GitHub 官方源取制品。
 

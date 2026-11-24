@@ -49,7 +49,7 @@ type PanelXrayOptions = {
     panel_multi_route?: boolean
     panel_statistics?: boolean; statistics_active?: boolean
   }
-  state: string; versions: string[]; catalog_version: number; config_ready: boolean
+  state: string; versions: string[]; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
   panel_inbounds?: boolean
   panel_trust?: { certificate: string; sha256: string } | null
@@ -94,12 +94,10 @@ const runtimeUpdateStatus: Record<RuntimeUpdate['status'], string> = {
 const runtimeProofFields = [
   { name: 'authorization', label: '节点授权 JSON', limit: 8192 },
   { name: 'authorization_signature', label: '节点授权签名', limit: 64 },
-  { name: 'manifest', label: '发布清单 JSON', limit: 1 << 20 },
-  { name: 'manifest_signature', label: '发布清单签名', limit: 64 },
 ]
 const xrayInstallInput = ref({
   operation: 'core.install' as CoreXrayOperation,
-  version: '', architecture: 'amd64', sha256: '', manifest_version: '' as number | '',
+  version: '', architecture: 'amd64', sha256: '',
   current_version: '', current_sha256: '',
 })
 const xrayOperationLabel: Record<XrayOperation, string> = {
@@ -973,8 +971,7 @@ async function submitPanelXray(operation: XrayOperation = panelXrayOperation.val
     const preview = operation === 'config.apply' ? `\n配置 SHA-256 ${options.current.candidate?.sha256}` : ''
     if (!confirm(`确认${xrayOperationLabel[operation]}节点「${node.name}」的 Xray ${options.current.version}${target}？${note}${preview}`)) return
   }
-  const fields = { operation, version, state: options.state,
-    catalog_version: version ? options.catalog_version : 0, confirm_operation: dangerous ? operation : '' }
+  const fields = { operation, version, state: options.state, confirm_operation: dangerous ? operation : '' }
   const intent = JSON.stringify({ node_id: node.id, ...fields })
   if (panelXrayRetry?.intent !== intent) panelXrayRetry = { intent, id: crypto.randomUUID().replaceAll('-', '') }
   panelXraySubmitting.value = true
@@ -1044,10 +1041,9 @@ async function submitRuntimeUpdate(event: Event) {
 async function createXrayInstall() {
   const nodeID = selectedNode.value?.id
   if (!nodeID || xrayInstallBusy.value) return
-  const { operation, version, architecture, sha256, manifest_version, current_version, current_sha256 } = xrayInstallInput.value
+  const { operation, version, architecture, sha256, current_version, current_sha256 } = xrayInstallInput.value
   const fields = {
     operation, version, architecture, sha256, node_id: nodeID,
-    manifest_version: xrayUsesArtifact.value ? manifest_version : undefined,
     current_version: xrayVersionChange.value ? current_version : undefined,
     current_sha256: xrayVersionChange.value ? current_sha256 : undefined,
   }
@@ -1586,8 +1582,8 @@ onMounted(async () => {
       </section>
 
       <template v-else-if="page === 'versions'">
-      <section class="card core-catalog"><div class="section-head"><div><h2>主控备用制品</h2></div><button class="outline" @click="loadCoreBackups">刷新状态</button></div><p>主控从官方 Releases 同步每种 Core 最新稳定版的 amd64/arm64 制品，每种 Core 只保留一版。远程 Xray 安装优先访问官方源。官方源不可用时，只有与签名清单完全匹配的缓存才能用于安装。</p><p v-if="coreBackupError" class="catalog-error">{{ coreBackupError }}</p><p v-if="coreBackups?.updated_at" class="catalog-stale">最近更新：{{ new Date(coreBackups.updated_at).toLocaleString() }}</p><div v-if="coreBackups?.cores.length" class="release-list"><article v-for="core in coreBackups.cores" :key="core.id" class="release-row"><div class="release-heading"><div><strong>{{ core.name }} {{ core.version }}</strong><small>{{ core.repository }} · 缓存于 {{ new Date(core.cached_at).toLocaleString() }}</small></div><a :href="core.release_url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><div v-for="asset in core.assets" :key="asset.architecture" class="release-asset"><span>{{ asset.architecture }} · {{ asset.name }}</span><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest }}</small></div></article></div><div v-else-if="!coreBackupError" class="empty">主控尚未缓存备用制品；后台会在启动后从官方源同步。</div></section>
-      <section class="card core-catalog"><div class="section-head"><div><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="refreshCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases，每页 10 个、最多浏览最近 100 个版本。此目录用于发现版本。面板安装可选版本来自已验签的 Xray 发布清单。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div><button v-if="selectedCoreCatalog?.has_more" class="outline load-older" :disabled="coreCatalogLoading" @click="loadOlderCoreReleases">{{ coreCatalogLoading ? '读取中…' : '加载较早版本' }}</button></div></div></section>
+      <section class="card core-catalog"><div class="section-head"><div><h2>主控备用制品</h2></div><button class="outline" @click="loadCoreBackups">刷新状态</button></div><p>主控从官方 Releases 同步每种 Core 最新稳定版的 amd64/arm64 制品，每种 Core 只保留一版。远程 Xray 安装优先访问官方源。官方源不可用时，缓存必须与签名任务中的版本、架构和 SHA-256 完全匹配。</p><p v-if="coreBackupError" class="catalog-error">{{ coreBackupError }}</p><p v-if="coreBackups?.updated_at" class="catalog-stale">最近更新：{{ new Date(coreBackups.updated_at).toLocaleString() }}</p><div v-if="coreBackups?.cores.length" class="release-list"><article v-for="core in coreBackups.cores" :key="core.id" class="release-row"><div class="release-heading"><div><strong>{{ core.name }} {{ core.version }}</strong><small>{{ core.repository }} · 缓存于 {{ new Date(core.cached_at).toLocaleString() }}</small></div><a :href="core.release_url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><div v-for="asset in core.assets" :key="asset.architecture" class="release-asset"><span>{{ asset.architecture }} · {{ asset.name }}</span><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest }}</small></div></article></div><div v-else-if="!coreBackupError" class="empty">主控尚未缓存备用制品；后台会在启动后从官方源同步。</div></section>
+      <section class="card core-catalog"><div class="section-head"><div><h2>Core 官方版本目录</h2></div><button class="outline" :disabled="coreCatalogLoading" @click="refreshCoreCatalog">{{ coreCatalogLoading ? '读取中…' : '刷新目录' }}</button></div><p>目录来自官方 GitHub Releases，每页 10 个、最多浏览最近 100 个版本。安装时可在「管理 Core」抽屉选择该节点架构可用的稳定版本。</p><p v-if="coreCatalog?.stale" class="catalog-stale">上游暂不可用，当前显示缓存目录（{{ new Date(coreCatalog.retrieved_at).toLocaleString() }}）。</p><p v-if="coreCatalogError" class="catalog-error">{{ coreCatalogError }}</p><div v-if="coreCatalog" class="catalog-layout"><label>Core<select v-model="coreCatalogCore"><option v-for="core in coreCatalog.cores" :key="core.id" :value="core.id">{{ core.name }}（{{ core.repository }}）</option></select></label><div><div v-if="selectedCoreCatalog?.releases.length" class="release-list"><article v-for="release in selectedCoreCatalog.releases" :key="release.version" class="release-row"><div class="release-heading"><div><strong>{{ release.version }}</strong><span v-if="release.prerelease" class="release-badge">预发布</span><small>{{ release.title }} · {{ new Date(release.published_at).toLocaleDateString() }}</small></div><a :href="release.url" target="_blank" rel="noopener noreferrer">官方发布页 ↗</a></div><details v-if="release.assets.length"><summary>{{ release.assets.length }} 个发布制品</summary><div v-for="asset in release.assets" :key="asset.name" class="release-asset"><a :href="asset.download_url" target="_blank" rel="noopener noreferrer">{{ asset.name }}</a><small>{{ (asset.size / 1048576).toFixed(1) }} MiB · {{ asset.digest || '上游未提供 SHA-256' }}</small></div></details><small v-else>此版本没有可用的官方制品链接</small></article></div><div v-else class="empty">{{ selectedCoreCatalog ? '官方目录中没有可显示的版本' : '正在加载发布目录' }}</div><button v-if="selectedCoreCatalog?.has_more" class="outline load-older" :disabled="coreCatalogLoading" @click="loadOlderCoreReleases">{{ coreCatalogLoading ? '读取中…' : '加载较早版本' }}</button></div></div></section>
       </template>
 
       <template v-else-if="page === 'tasks'">
@@ -1728,7 +1724,6 @@ onMounted(async () => {
           </template>
           <label>{{ xrayUsesArtifact ? '目标版本' : '已安装版本' }}<input v-model.trim="xrayInstallInput.version" placeholder="v26.10.31" required /></label>
           <label>{{ xrayUsesArtifact ? '目标 SHA-256' : '已安装 SHA-256' }}<input v-model.trim="xrayInstallInput.sha256" pattern="[a-f0-9]{64}" maxlength="64" spellcheck="false" required /></label>
-          <label v-if="xrayUsesArtifact">制品清单版本<input v-model.number="xrayInstallInput.manifest_version" type="number" min="1" max="9007199254740991" required /></label>
           <button :disabled="xrayInstallBusy">预留序号并创建提案</button>
         </form>
         <p v-if="xrayInstallError" class="error" role="alert">{{ xrayInstallError }}</p>

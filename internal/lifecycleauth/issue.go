@@ -117,7 +117,7 @@ func signInstallTask(request Request, requestID string, key ed25519.PrivateKey, 
 func expectedInstallTask(request Request, requestID string) installTask {
 	p := request.Proposal
 	prefix := "xray-"
-	if p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation) {
+	if p.SchemaVersion == SignedManifestProposalVersion || (p.SchemaVersion == ChangeProposalVersion && IsVersionChange(p.Operation)) {
 		prefix = "xray-manifest-"
 	}
 	payload := installPayload{Core: p.Core, Version: p.Version}

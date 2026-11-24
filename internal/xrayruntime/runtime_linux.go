@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -89,6 +90,10 @@ type releaseTrust interface {
 	Revalidate(context.Context, artifacttrust.Target) error
 }
 
+type officialReleaseTrust interface {
+	LookupOfficialRelease(context.Context, string, string, string, string) (artifacttrust.Target, error)
+}
+
 // Runtime holds the exclusive local lifecycle lock until Close.
 type Runtime struct {
 	dir     string
@@ -121,11 +126,12 @@ func (r *Runtime) ApplyWithManifest(ctx context.Context, action Action, release 
 	return r.apply(ctx, action, Release{}, release, trust, manifestVersion, "", nil)
 }
 
-// ApplyAuthorized rechecks the remote authorization before candidate
+// ApplyAuthorized rechecks the signed task's release digest before candidate
 // execution and immediately before recording any activation intent.
 func (r *Runtime) ApplyAuthorized(ctx context.Context, action Action, expected, release Release, trust releaseTrust, manifestVersion int64, hash string, authorize func(context.Context) error) (string, error) {
 	safeSource := (action == Install && expected == (Release{})) || ((action == Upgrade || action == Downgrade) && expected.valid())
-	if !safeSource || manifestVersion <= 0 || !validTaskHash(hash) || authorize == nil {
+	_, official := trust.(officialReleaseTrust)
+	if !safeSource || (manifestVersion <= 0 && !official) || manifestVersion < 0 || !validTaskHash(hash) || authorize == nil {
 		return "FAILED", nil
 	}
 	return taskOutcome(r.apply(ctx, action, expected, release, trust, manifestVersion, hash, authorize))
@@ -163,7 +169,9 @@ func (r *Runtime) apply(ctx context.Context, action Action, expected, release Re
 		return artifacttrust.ErrUntrustedTarget
 	}
 	var target artifacttrust.Target
-	if manifestVersion != 0 {
+	if official, ok := trust.(officialReleaseTrust); ok && manifestVersion == 0 {
+		target, err = official.LookupOfficialRelease(ctx, "xray", release.Version, runtime.GOARCH, release.SHA256)
+	} else if manifestVersion != 0 {
 		target, err = trust.LookupCoreManifest(ctx, "xray", release.Version, manifestVersion)
 	} else {
 		target, err = trust.Lookup(ctx, "xray", release.Version)
@@ -171,8 +179,8 @@ func (r *Runtime) apply(ctx context.Context, action Action, expected, release Re
 	if err != nil {
 		return err
 	}
-	if target.SHA256 != release.SHA256 || target.ArchiveFormat != "zip" || target.SignatureStatus == "unverified" {
-		return errors.New("Xray artifact does not match the reviewed release")
+	if target.SHA256 != release.SHA256 || target.ArchiveFormat != "zip" || (manifestVersion != 0 && target.SignatureStatus == "unverified") {
+		return errors.New("Xray archive does not match the authorized release")
 	}
 	if err := r.stage(ctx, release, target.Size, func() (string, error) {
 		return trust.Download(ctx, target)

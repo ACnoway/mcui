@@ -94,7 +94,7 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Xray install proposal", http.StatusBadRequest)
 		return
 	}
-	schema := lifecycleauth.SignedManifestProposalVersion
+	schema := lifecycleauth.OfficialReleaseProposalVersion
 	switch in.Operation {
 	case "", "core.install":
 		in.Operation = "core.install"
@@ -104,7 +104,9 @@ func (s *Server) createXrayInstall(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Xray control does not use a manifest version", http.StatusBadRequest)
 			return
 		}
-	case "core.upgrade", "core.downgrade", "core.uninstall":
+	case "core.upgrade", "core.downgrade":
+		schema = lifecycleauth.OfficialReleaseProposalVersion
+	case "core.uninstall":
 		schema = lifecycleauth.ChangeProposalVersion
 	default:
 		http.Error(w, "invalid Xray lifecycle operation", http.StatusBadRequest)
@@ -312,10 +314,6 @@ func (s *Server) dispatchXrayInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	if existing, err := s.taskRuntime.Store.GetRecord(id); err == nil && bytes.Equal(existing.Raw, record.SignedTask) {
 		writeJSON(w, http.StatusOK, s.taskRecordView(existing))
-		return
-	}
-	if !lifecycleauth.IsControlOperation(task.Operation) && !task.SignedManifest {
-		http.Error(w, "rebuild the legacy proposal with the signed release manifest", http.StatusConflict)
 		return
 	}
 	if !task.ActiveAt(now) {

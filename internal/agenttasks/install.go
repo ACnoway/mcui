@@ -23,7 +23,7 @@ type installReconciler interface {
 }
 
 type InstallArtifacts interface {
-	LookupCoreManifest(context.Context, string, string, int64) (artifacttrust.Target, error)
+	LookupOfficialRelease(context.Context, string, string, string, string) (artifacttrust.Target, error)
 	Download(context.Context, artifacttrust.Target) (string, error)
 }
 
@@ -200,17 +200,17 @@ func (r *installRuntime) prepare(ctx context.Context, install lifecycleauth.Inst
 	if lifecycleauth.IsControlOperation(install.Operation) {
 		return nil
 	}
-	if backend, ok := r.artifacts.(interface{ UsesSignedManifest() bool }); ok && backend.UsesSignedManifest() != install.SignedManifest {
+	if install.ManifestVersion != 0 || install.SignedManifest {
 		return lifecycleauth.ErrDenied
 	}
 	if install.Operation == xrayconfig.Operation {
 		return nil
 	}
-	target, err := r.artifacts.LookupCoreManifest(ctx, "xray", install.Version, install.ManifestVersion)
+	target, err := r.artifacts.LookupOfficialRelease(ctx, "xray", install.Version, install.Architecture, install.SHA256)
 	if err != nil {
 		return err
 	}
-	if target.SHA256 != install.SHA256 || target.Architecture != install.Architecture || target.SignatureStatus == "unverified" {
+	if target.SHA256 != install.SHA256 || target.Architecture != install.Architecture {
 		return lifecycleauth.ErrDenied
 	}
 	_, err = r.artifacts.Download(ctx, target)

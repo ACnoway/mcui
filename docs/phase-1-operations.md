@@ -32,26 +32,23 @@ MCUI_AGENT_INSTALLER_MASTER_CA=/etc/mcui-master/agent-trust-ca.pem
 
 ## 节点首次接入
 
-1. 通用 GitHub 安装器适用于运行 systemd 的 Debian amd64 和 arm64 节点。以 root 或有 sudo 权限的账号执行。安装器按需补齐基础工具、配置 chrony，并用预置的项目发布公钥核验 GitHub 的 Core 清单。自建基础安装包的系统依赖和时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
+1. 通用 GitHub 安装器适用于运行 systemd 的 Debian amd64 和 arm64 节点。以 root 或有 sudo 权限的账号执行。安装器按需补齐基础工具并配置 chrony。Core 制品在后续安装任务中从官方 GitHub Releases 获取并按签名 SHA-256 核验。自建基础安装包的系统依赖和时间配置见[阶段 2 操作说明](./phase-2-operations.md)。
 2. 安全管理员在「节点管理」创建待接入的节点，选择「生成安装命令」并完成 MFA 复验。在 10 分钟内把命令粘贴到该节点的可信终端。命令先核验下载文件的 SHA-256，再以 root 运行安装程序。
 3. 安装程序核对本地身份、Agent/Helper 账本和候选信任，再通过已验证的 HTTPS 兑换安装码。核对响应节点 ID 后，凭据原子写入 `/var/lib/mcui-agent/identity.json`（`0600`），安装程序补齐缺失的信任文件并启动服务。首次心跳使原记录上线，节点仍为空 Agent。
 
 ### 构建包含 Xray 引导的安装包
 
-维护者用 `--managed-core release.pub` 构建通用安装器。面板命令传入状态任务和 Core 管理公钥及对应 key ID。安装器保留已接入节点的身份、签发信任与清单状态。已经使用其他签发公钥的节点需要先按本地信任轮换流程迁移。[部署制品发布](./phase-3-release.md#发布-compose-和通用-agent)
-
-在构建机准备 Xray 安装任务公钥、制品发布公钥、已独立核对的生效清单 `manifest.json` 和原始签名 `manifest.json.sig`。安装任务、状态任务和发布使用各自的公钥。沿用原安装包地址与 SHA-256 审核流程，将生成的新包设置为主控批准的安装包。主控仍需启用已配置好的 Xray 签发及制品服务。
+通用安装器用 `--managed-core` 构建。生成节点接入命令时，面板传入状态任务和 Xray 生命周期任务公钥及对应 key ID。安装器保留已接入节点的身份、签发信任和任务账本。Core 安装使用各项目官方 GitHub Releases，不需 Core 发布公钥或签名清单。[部署制品发布](./phase-3-release.md#发布-compose-和通用-agent)
 
 ```sh
-bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --xray-bootstrap \
-  xray-install-key-1 xray-install.pub release.pub manifest.json manifest.json.sig
+bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --managed-core
 ```
 
-这个安装包在 Debian/systemd 节点执行同一条接入命令时，安装 Xray 管理单元、初始化 Agent 与 Helper 的制品清单状态，并准备本地 chrony NTS 时钟。节点上的状态任务和制品授权经 systemd 创建的 Unix 套接字读取经验证的时间。节点仍经主控安装所选的 Xray 版本。上游 NTS 未同步时签名任务等待可信时间。
+这个安装包在 Debian/systemd 节点执行接入命令时，安装 Xray 管理单元、配置 Agent 与 Helper 验证 Xray 生命周期任务的公钥，并准备本地 chrony NTS 时钟。节点上的签名任务经 systemd 创建的 Unix 套接字读取经验证的时间。管理员可在主控面板选择官方 Xray 版本；上游 NTS 未同步时签名任务等待可信时间。
 
 在全新 amd64 节点上，该包还准备 iproute2、slirp4netns、入站凭据密钥和隔离网络服务。节点需支持 TUN、网络命名空间和 systemd 的地址过滤。保留状态的重新接入默认沿用原有配置模式。可按维护流程显式迁移旧节点。 [主控添加入站](./phase-4-xray-inbound.md#从主控添加入站) · [旧节点迁移](./phase-4-xray-inbound.md#将旧节点迁移到主控定义模式)
 
-已启用 Xray 生命周期的节点重新接入时，需要保留 Agent 和 Helper 已接受的清单状态。状态丢失时接入命令会在兑换安装码前停止，按[制品信任恢复](./phase-3-release.md)核对并恢复原有状态。
+已启用 Xray 生命周期的节点重新接入时，需要保留 Agent、Helper 已接受的任务账本和生命周期状态。状态损坏时接入命令会在兑换安装码前停止，应先按本地恢复流程核对和恢复原状态。
 
 ### 首次接入时初始化成对更新
 
@@ -66,7 +63,7 @@ bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --runtime-boots
 
 沿用原命令构建的安装包只准备 Agent 和 Helper。Xray 入站目录、业务网络配置和远程运行时监督的准备步骤当前分别见[受控入站部署](./phase-4-xray-inbound.md#节点准备)和[成对更新](./phase-3-runtime-update.md#启用本地监督)。
 
-2026-11-24 在 `ro` 的 Debian 13 amd64 虚拟机验证 `75839cf`。虚拟机无外网网卡，使用隔离 HTTPS 注册端和 chrony 4.6.1 NTS 服务、独立测试 CA 与签名材料。执行一次安装命令后，Agent 和 Helper 启动，两份制品清单状态按预期属主写入，受限时钟套接字提供认证时间，Agent 回报 Xray 尚未安装的状态。重启后，已注册节点恢复心跳。该次演练的覆盖范围是 Agent 接入和 Xray 生命周期引导。
+2026-11-24 在 `ro` 的 Debian 13 amd64 虚拟机验证 `75839cf`。虚拟机无外网网卡，使用隔离 HTTPS 注册端和 chrony 4.6.1 NTS 服务、独立测试 CA 与签名材料。该历史演练覆盖 Agent 接入和当时版本的 Xray 生命周期引导，不代表本次官方版本选择流程的验证结果。
 
 生成、替换和撤销只操作所选节点。安装命令包含一次性安装码，应通过可信途径交付，避免写入共享终端历史、工单和日志。长期 Token 只由 Agent 从 HTTPS 响应取得。安装码兑换响应丢失或凭据保存失败时，为原节点生成新命令。
 

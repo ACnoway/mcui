@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: Stable draft Release tag with signed manifest attachments
+        description: Stable draft Release tag
         required: true
         type: string
       commit:
@@ -29,19 +29,13 @@ jobs:
       contents: write
       packages: write
     steps:
-      - name: Check release inputs
+      - name: Check stable draft
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PUBLIC_KEY: ${{ vars.MCUI_RELEASE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          [[ -n $RELEASE_PUBLIC_KEY ]]
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName |
             jq -e --arg tag "$RELEASE_TAG" '.isDraft and (.isPrerelease | not) and .tagName == $tag'
-          mkdir "$RUNNER_TEMP/mcui-signatures"
-          printf '%s\n' "$RELEASE_PUBLIC_KEY" >"$RUNNER_TEMP/mcui-signatures/release.pub"
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --dir "$RUNNER_TEMP/mcui-signatures" --pattern manifest.json --pattern manifest.json.sig
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,9 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           npm install --global pnpm@12.17.0
-          signed="$RUNNER_TEMP/mcui-signatures"
-          bash scripts/build-compose-release.sh "$RUNNER_TEMP/mcui-release" "$RELEASE_TAG" \
-            "$signed/release.pub" "$signed/manifest.json" "$signed/manifest.json.sig"
+          bash scripts/build-compose-release.sh "$RUNNER_TEMP/mcui-release" "$RELEASE_TAG"
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:

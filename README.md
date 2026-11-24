@@ -27,7 +27,7 @@ Proxy Configuration shows sampled inbound, client, and outbound bytes for the no
 
 ## Releases
 
-Push a tag such as `v0.1.0-alpha.1` to build the Linux amd64 and arm64 Master and Agent packages and publish a GitHub pre-release. Stable deployment releases are published after the offline-signed manifest is available. [Release tags and publishing](docs/phase-3-release.md#标签和预发布)
+Push a tag such as `v0.1.0-alpha.1` to build the Linux amd64 and arm64 Master and Agent packages and publish a GitHub pre-release. Stable deployment releases use the same workflow without a separate Core manifest release. [Release tags and publishing](docs/phase-3-release.md#标签和预发布)
 
 ## Development checks
 

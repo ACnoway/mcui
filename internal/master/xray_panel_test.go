@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -21,13 +22,33 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/corecatalog"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
 	"github.com/ACnoway/mcui/internal/xraytraffic"
 )
+
+type testXrayReleaseCatalog struct {
+	snapshot corecatalog.Snapshot
+	assets   map[string]corecatalog.ReleaseArtifact
+}
+
+func (f *testXrayReleaseCatalog) List(context.Context) (corecatalog.Snapshot, error) {
+	return f.snapshot, nil
+}
+
+func (f *testXrayReleaseCatalog) ListXrayReleases(context.Context) (corecatalog.Snapshot, error) {
+	return f.snapshot, nil
+}
+
+func (f *testXrayReleaseCatalog) ResolveRelease(_ context.Context, core, version, arch, _ string) (corecatalog.ReleaseArtifact, error) {
+	asset, ok := f.assets[version+"/"+arch]
+	if !ok || core != "xray" {
+		return corecatalog.ReleaseArtifact{}, errors.New("release fixture not found")
+	}
+	return asset, nil
+}
 
 func TestPanelXraySelectSignDeliverAndConfirm(t *testing.T) {
 	testPanelXraySelectSignDeliverAndConfirm(t, nil)
@@ -58,7 +79,6 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	const secondNodeID = "second-fixture-node"
 	s := client.server
 	s.EnableSingleAdmin()
-	now := time.Now().UTC().Truncate(time.Second)
 	const secret = "JBSWY3DPEHPK3PXP"
 	if err := client.store.Update(func(st *store.State) error {
 		admin := st.Admins["operator-1"]
@@ -107,33 +127,29 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		t.Fatal(err)
 	}
 	defer ledger.Close()
-	artifact := func(version, arch, fill string) artifacttrust.Artifact {
+	artifact := func(version, arch, fill string) corecatalog.ReleaseArtifact {
 		t.Helper()
 		digest := strings.Repeat(fill, 64)
 		filename, err := corecatalog.ExpectedAssetName("xray", version, arch)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return artifacttrust.Artifact{Component: "xray", Version: version, Architecture: arch, OS: "linux",
-			SHA256: digest, ArtifactID: "xray-manifest-" + arch + "-" + digest, Filename: filename,
-			SourceID: "github:XTLS/Xray-core", ArchiveFormat: "zip", BuildOptions: "upstream-prebuilt",
-			Length: 1024, ReviewID: "test-review", SignatureStatus: "not-provided"}
+		return corecatalog.ReleaseArtifact{Core: "xray", Version: version, Architecture: arch, SHA256: digest,
+			Filename: filename, Size: 1024, DownloadURL: "https://github.com/XTLS/Xray-core/releases/download/" + version + "/" + filename}
 	}
 	newer := artifact(xrayconfig.Version, "amd64", "b")
 	older := artifact("v26.9.0", "amd64", "a")
 	other := artifact("v26.11.0", "arm64", "c")
-	rawManifest, err := json.Marshal(artifacttrust.Manifest{SchemaVersion: 1, ManifestVersion: 2, ExpiresAt: now.Add(time.Hour),
-		Artifacts: []artifacttrust.Artifact{older, other, newer}})
-	if err != nil {
-		t.Fatal(err)
+	assets := map[string]corecatalog.ReleaseArtifact{
+		newer.Version + "/amd64": newer, older.Version + "/amd64": older, other.Version + "/arm64": other,
 	}
-	releasePub, releaseKey := generate()
-	sig := ed25519.Sign(releaseKey, rawManifest)
-	current := func(context.Context) (artifacttrust.Manifest, error) {
-		return artifacttrust.VerifyManifest(rawManifest, sig, releasePub, time.Now().UTC())
+	var releases []corecatalog.Release
+	for _, asset := range []corecatalog.ReleaseArtifact{newer, older, other} {
+		releases = append(releases, corecatalog.Release{Version: asset.Version, Assets: []corecatalog.Asset{{Name: asset.Filename, Size: asset.Size, DownloadURL: asset.DownloadURL}}})
 	}
+	s.coreCatalog = &testXrayReleaseCatalog{snapshot: corecatalog.Snapshot{Cores: []corecatalog.Core{{ID: "xray", Releases: releases}}}, assets: assets}
 	token := strings.Repeat("k", 36)
-	signer, err := lifecycleauth.NewPanelSignerHandler(policy, ledger, key, []byte(token), trustedNow, current)
+	signer, err := lifecycleauth.NewPanelSignerHandler(policy, ledger, key, []byte(token), trustedNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +196,6 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		var response struct {
 			State    string                      `json:"state"`
 			Versions []string                    `json:"versions"`
-			Catalog  int64                       `json:"catalog_version"`
 			Current  lifecycleauth.XrayInventory `json:"current"`
 			Usage    struct {
 				UserStatistics string `json:"user_statistics"`
@@ -188,9 +203,9 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 				Reason         string `json:"reason"`
 			} `json:"usage"`
 		}
-		if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil || response.Catalog != 2 ||
+		if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil ||
 			!reflect.DeepEqual(response.Versions, []string{newer.Version, older.Version}) {
-			t.Fatalf("invalid trusted version selection: %s, %v", r.Body, err)
+			t.Fatalf("invalid official version selection: %s, %v", r.Body, err)
 		}
 		reason := "capability_unverified"
 		if response.Current.ConfigRevision != 0 {
@@ -205,8 +220,8 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	expect(admin(http.MethodGet, nil, ""), http.StatusConflict)
 	heartbeat(&lifecycleauth.XrayInventory{})
 	in := panelXrayRequest{TaskID: "install-fixture-1234567890", Operation: "core.install", Version: other.Version,
-		CatalogVersion: 2, State: options()}
-	expect(admin(http.MethodPost, in, client.csrf), http.StatusBadRequest)
+		State: options()}
+	expect(admin(http.MethodPost, in, client.csrf), http.StatusConflict)
 	in.Version = newer.Version
 	expect(admin(http.MethodPost, in, "wrong-csrf"), http.StatusForbidden)
 	expect(admin(http.MethodPost, in, client.csrf), http.StatusServiceUnavailable)
@@ -217,16 +232,16 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		t.Fatal(err)
 	}
 	task, err := policy.InstallKey().Verify(record.Raw)
-	if err != nil || task.Sequence != 1 || task.Architecture != "amd64" || !task.SignedManifest ||
-		task.ManifestVersion != 2 || task.SHA256 != newer.SHA256 || task.Version != newer.Version {
+	if err != nil || task.Sequence != 1 || task.Architecture != "amd64" || task.SignedManifest ||
+		task.ManifestVersion != 0 || task.SHA256 != newer.SHA256 || task.Version != newer.Version {
 		t.Fatalf("incorrect signed install: %+v %v", task, err)
 	}
 	if _, err := s.verifyStoredXrayTask(record.Raw, true); err != nil {
 		t.Fatal(err)
 	}
-	completeNode := func(agent taskTestClient, id string, sequence int64, release artifacttrust.Artifact) {
+	completeNode := func(agent taskTestClient, id string, sequence int64, release corecatalog.ReleaseArtifact) {
 		t.Helper()
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1&xray_routing=v1", sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-official-v1&install_reconciliation=v1&xray_control=v1&xray_change=v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1&xray_routing=v1", sequence)
 		expect(agent.request(http.MethodGet, next, nil, true), http.StatusOK)
 		result, err := json.Marshal(lifecycleauth.InstallResult{Outcome: "SUCCEEDED", Version: release.Version, SHA256: release.SHA256})
 		if err != nil {
@@ -235,14 +250,14 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		expect(agent.request(http.MethodPost, "/api/v1/agent/tasks/ack", taskAckRequest{TaskID: id, Sequence: sequence, StatusVersion: 1,
 			Status: "SUCCEEDED", Result: result}, true), http.StatusNoContent)
 	}
-	complete := func(id string, sequence int64, release artifacttrust.Artifact) {
+	complete := func(id string, sequence int64, release corecatalog.ReleaseArtifact) {
 		t.Helper()
 		completeNode(client, id, sequence, release)
 	}
 	complete(in.TaskID, 1, newer)
 	heartbeat(&lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256, Running: true})
 	change := panelXrayRequest{TaskID: "downgrade-fixture-1234567890", Operation: "core.downgrade", Version: older.Version,
-		CatalogVersion: 2, State: options()}
+		State: options()}
 	expect(admin(http.MethodPost, change, client.csrf), http.StatusBadRequest)
 	change.Confirm = change.Operation
 	expect(admin(http.MethodPost, change, client.csrf), http.StatusPreconditionRequired)
@@ -261,14 +276,14 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	complete(change.TaskID, 2, older)
 	heartbeat(&lifecycleauth.XrayInventory{Version: older.Version, SHA256: older.SHA256})
 	upgrade := panelXrayRequest{TaskID: "upgrade-fixture-1234567890", Operation: "core.upgrade", Version: newer.Version,
-		CatalogVersion: 2, State: options()}
+		State: options()}
 	expect(admin(http.MethodPost, upgrade, client.csrf), http.StatusCreated)
 	complete(upgrade.TaskID, 3, newer)
 	config := xrayconfig.Reference{Port: 1080, SHA256: strings.Repeat("d", 64), Size: 350}
 	node := lifecycleauth.XrayInventory{Version: newer.Version, SHA256: newer.SHA256, Running: true, Candidate: config}
 	heartbeat(&node)
 	apply := panelXrayRequest{TaskID: "config-fixture-1234567890", Operation: xrayconfig.Operation, Version: newer.Version,
-		CatalogVersion: 2, State: options(), Confirm: xrayconfig.Operation}
+		State: options(), Confirm: xrayconfig.Operation}
 	expect(admin(http.MethodPost, apply, client.csrf), http.StatusPreconditionRequired)
 	apply.MFACode = fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 	node.Candidate.Port++
@@ -285,7 +300,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	if err != nil || task.Sequence != 4 || task.Operation != xrayconfig.Operation || task.Config != config || task.SHA256 != newer.SHA256 {
 		t.Fatalf("incorrect signed configuration: %+v %v", task, err)
 	}
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=4&install=xray-manifest-v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=4&install=xray-official-v1", nil, true), http.StatusNoContent)
 	complete(apply.TaskID, 4, newer)
 
 	node.PlanSupported, node.Candidate = true, xrayconfig.Reference{}
@@ -352,12 +367,12 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 	if err != nil || task.Sequence != 5 || task.Config != node.Candidate || task.Plan != plan.Encode() {
 		t.Fatalf("signed task did not bind plan and configuration: %+v %v", task, err)
 	}
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1", nil, true), http.StatusNoContent)
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1", nil, true), http.StatusNoContent)
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1", nil, true), http.StatusNoContent)
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1", nil, true), http.StatusNoContent)
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1", nil, true), http.StatusNoContent)
-	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-official-v1&xray_config=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-official-v1&xray_config=v1&xray_plan=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_http=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1", nil, true), http.StatusNoContent)
+	expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=5&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1", nil, true), http.StatusNoContent)
 	complete(managed.TaskID, 5, newer)
 
 	subscriptionPath := "https://panel.example.test" + path + "/subscriptions"
@@ -531,7 +546,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		removeAlice.TaskID = "reduced-config-fixture-0123456789"
 		removeAlice.State, removeAlice.MFACode = options(), fmtCode(totpAt(totpKey, time.Now().Unix()/30))
 		expect(admin(http.MethodPost, removeAlice, client.csrf), http.StatusCreated)
-		expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=6&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1", nil, true), http.StatusNoContent)
+		expect(client.request(http.MethodGet, "/api/v1/agent/tasks/next?next_sequence=6&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1", nil, true), http.StatusNoContent)
 		expect(fetch(publicURL, alice, ""), http.StatusNotFound)
 		complete(removeAlice.TaskID, 6, newer)
 		expect(fetch(publicURL, bob, ""), http.StatusNotFound) // ACK arrived before the new heartbeat.
@@ -716,7 +731,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		heartbeat(&direct)
 		installDirect := panelXrayRequest{TaskID: "panel-inbound-reinstall-12345", Operation: "core.install",
-			Version: newer.Version, CatalogVersion: 2, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
+			Version: newer.Version, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
 		expect(admin(http.MethodPost, installDirect, client.csrf), http.StatusCreated)
 		installed, err := runtime.Store.GetRecord(installDirect.TaskID)
 		if err != nil {
@@ -849,7 +864,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			t.Fatal("unapplied panel inbound received a share")
 		}
 		applyDirect := panelXrayRequest{TaskID: "panel-inbound-fixture-12345", Operation: xrayconfig.Operation, Confirm: xrayconfig.Operation,
-			Version: newer.Version, CatalogVersion: 2, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
+			Version: newer.Version, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
 		expect(admin(http.MethodPost, applyDirect, client.csrf), http.StatusConflict)
 		_, direct.Candidate, err = config.RenderPanel(private)
 		if err != nil {
@@ -867,7 +882,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || issued.Plan != registered.XrayDraft || issued.Config != direct.Candidate {
 			t.Fatalf("signed task does not bind the preview and sealed draft: %v", err)
 		}
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-manifest-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1&xray_public=v1&xray_trojan_tls=v1&xray_panel_inbounds=v1", issued.Sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1&xray_public=v1&xray_trojan_tls=v1&xray_panel_inbounds=v1", issued.Sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
 		expect(client.request(http.MethodGet, next+"&xray_panel_multi_client=v1", nil, true), http.StatusNoContent)
 		expect(client.request(http.MethodGet, next+"&xray_panel_trojan=v1", nil, true), http.StatusNoContent)

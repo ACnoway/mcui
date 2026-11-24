@@ -36,9 +36,6 @@ func main() {
 	taskPublicKeyPath := flag.String("task-public-key", "", "trusted status-task Ed25519 public key (PKIX PEM or Base64 raw key)")
 	installKeyID := flag.String("xray-install-key-id", os.Getenv("MCUI_XRAY_INSTALL_KEY_ID"), "trusted Xray install signing key ID")
 	installKeyPath := flag.String("xray-install-public-key", os.Getenv("MCUI_XRAY_INSTALL_PUBLIC_KEY"), "trusted Xray install signing public key")
-	tufRoot := flag.String("xray-tuf-root", os.Getenv("MCUI_XRAY_TUF_ROOT"), "locally provisioned Xray TUF root")
-	tufOrigin := flag.String("xray-tuf-origin", os.Getenv("MCUI_XRAY_TUF_ORIGIN"), "approved Xray TUF HTTPS metadata origin")
-	releaseKeyPath := flag.String("xray-release-public-key", os.Getenv("MCUI_XRAY_RELEASE_PUBLIC_KEY"), "locally provisioned artifact release public key")
 	taskLedgerPath := flag.String("task-ledger", "/var/lib/mcui-agent/tasks.db", "private durable status-task ledger")
 	helperSocket := flag.String("helper-socket", "/run/mcui/helper.sock", "local privileged Helper Unix socket")
 	initializeTaskLedger := flag.Bool("initialize-task-ledger", false, "explicitly initialize a missing ledger for a previously registered node and exit")
@@ -111,11 +108,9 @@ func main() {
 	if managed && (*taskKeyID == "" || *taskPublicKeyPath == "") {
 		log.Fatal("managed runtime requires the task ledger and Helper configuration")
 	}
-	installEnabled := *installKeyID != "" || *installKeyPath != "" || *releaseKeyPath != "" || *tufRoot != "" || *tufOrigin != ""
-	signedManifest := *releaseKeyPath != ""
-	if installEnabled && (*installKeyID == "" || *installKeyPath == "" || *taskKeyID == "" ||
-		(signedManifest && (*tufRoot != "" || *tufOrigin != "")) || (!signedManifest && (*tufRoot == "" || *tufOrigin == ""))) {
-		log.Fatal("Xray installs require task trust and exactly one artifact trust configuration")
+	installEnabled := *installKeyID != "" || *installKeyPath != ""
+	if installEnabled && (*installKeyID == "" || *installKeyPath == "" || *taskKeyID == "") {
+		log.Fatal("Xray installs require a purpose-specific install key and task trust")
 	}
 	if *taskKeyID != "" || *taskPublicKeyPath != "" {
 		if *taskKeyID == "" || *taskPublicKeyPath == "" {
@@ -164,24 +159,17 @@ func main() {
 				log.Fatalf("parse Xray install public key: %v", err)
 			}
 			installKey = lifecycleauth.InstallKey{ID: *installKeyID, PublicKey: key}
-			if signedManifest {
-				artifacts, err = artifacttrust.OpenSignedCore(*releaseKeyPath, filepath.Join(filepath.Dir(*taskLedgerPath), "xray-manifest"), trustedNow, publicKey, key)
-				if err == nil {
-					err = artifacts.ConfigureMasterBackup(*masterURL, *serverCA)
-				}
-			} else {
-				artifacts, err = artifacttrust.OpenProvisionedCore(*tufRoot, *tufOrigin, filepath.Join(filepath.Dir(*taskLedgerPath), "xray-tuf"), func() error {
-					_, err := trustedNow()
-					return err
-				})
-			}
+			artifacts, err = artifacttrust.OpenOfficialCore(filepath.Join(filepath.Dir(*taskLedgerPath), "xray-artifacts"))
 			if err != nil {
-				log.Fatalf("open Agent Xray artifact trust: %v", err)
+				log.Fatalf("open Agent Xray artifact cache: %v", err)
 			}
-			client.EnableXrayInstalls(signedManifest)
+			if err = artifacts.ConfigureMasterBackup(*masterURL, *serverCA); err != nil {
+				log.Fatalf("configure Master Xray artifact backup: %v", err)
+			}
+			client.EnableXrayInstalls(false)
 			if reader, ok := executor.(interface {
 				ReadXrayInventory(context.Context, string, *string) (*lifecycleauth.XrayInventory, error)
-			}); signedManifest && ok {
+			}); ok {
 				client.SetXrayInventory(reader.ReadXrayInventory)
 			}
 		}

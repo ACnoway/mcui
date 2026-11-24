@@ -14,8 +14,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/ACnoway/mcui/internal/artifacttrust"
 )
 
 type PanelSignerClient struct {
@@ -58,14 +56,6 @@ func (c *PanelSignerClient) exchange(ctx context.Context, method, path string, b
 	return raw, nil
 }
 
-func (c *PanelSignerClient) Manifest(ctx context.Context) (artifacttrust.Manifest, error) {
-	raw, err := c.exchange(ctx, http.MethodGet, "/v1/xray/manifest", nil, artifacttrust.MaxManifestBytes)
-	if err != nil {
-		return artifacttrust.Manifest{}, err
-	}
-	return artifacttrust.ParseManifest(raw)
-}
-
 func (c *PanelSignerClient) Issue(ctx context.Context, proposal Proposal) ([]byte, error) {
 	raw, err := json.Marshal(proposal)
 	if err != nil {
@@ -74,20 +64,11 @@ func (c *PanelSignerClient) Issue(ctx context.Context, proposal Proposal) ([]byt
 	return c.exchange(ctx, http.MethodPost, "/v1/xray/issue", raw, maxProofBytes)
 }
 
-func NewPanelSignerHandler(policy *Policy, ledger *Ledger, key ed25519.PrivateKey, token []byte, now func() (time.Time, error), current func(context.Context) (artifacttrust.Manifest, error)) (http.Handler, error) {
-	if !policy.HasPanelScope() || ledger == nil || !matchesPrivate(key, policy.signingKey) || len(token) < 32 || now == nil || current == nil {
+func NewPanelSignerHandler(policy *Policy, ledger *Ledger, key ed25519.PrivateKey, token []byte, now func() (time.Time, error)) (http.Handler, error) {
+	if !policy.HasPanelScope() || ledger == nil || !matchesPrivate(key, policy.signingKey) || len(token) < 32 || now == nil {
 		return nil, errors.New("incomplete panel Xray signer configuration")
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/xray/manifest", func(w http.ResponseWriter, r *http.Request) {
-		manifest, err := current(r.Context())
-		raw, encodeErr := json.Marshal(manifest)
-		if err != nil || encodeErr != nil || len(raw) > artifacttrust.MaxManifestBytes {
-			http.Error(w, "verified release manifest unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write(raw)
-	})
 	mux.HandleFunc("POST /v1/xray/issue", func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProofBytes))
 		var p Proposal
@@ -99,20 +80,12 @@ func NewPanelSignerHandler(policy *Policy, ledger *Ledger, key ed25519.PrivateKe
 			http.Error(w, "invalid proposal", http.StatusForbidden)
 			return
 		}
-		var manifest artifacttrust.Manifest
-		if !IsControlOperation(p.Operation) {
-			manifest, err = current(r.Context())
-			if err != nil {
-				http.Error(w, "verified release manifest unavailable", http.StatusServiceUnavailable)
-				return
-			}
-		}
 		at, err := now()
 		if err != nil {
 			http.Error(w, "trusted time unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		task, err := policy.IssuePanel(r.Context(), ledger, p, key, at, manifest)
+		task, err := policy.IssuePanel(r.Context(), ledger, p, key, at)
 		if err != nil {
 			http.Error(w, "signing rejected", http.StatusConflict)
 			return

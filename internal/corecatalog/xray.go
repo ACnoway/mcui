@@ -14,8 +14,10 @@ var (
 // ValidXrayRelease recognizes the exact release selector accepted by the
 // privileged Xray lifecycle.
 func ValidXrayRelease(version, sha256 string) bool {
-	return stableXrayVersion.MatchString(version) && xrayDigest.MatchString(sha256)
+	return ValidXrayVersion(version) && xrayDigest.MatchString(sha256)
 }
+
+func ValidXrayVersion(version string) bool { return stableXrayVersion.MatchString(version) }
 
 // CompareXrayVersions compares two validated stable Xray versions numerically.
 func CompareXrayVersions(left, right string) int {

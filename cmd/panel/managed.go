@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/ACnoway/mcui/internal/artifacttrust"
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/master"
 	"github.com/ACnoway/mcui/internal/security"
@@ -74,10 +73,6 @@ func configureManagedRuntime(srv *master.Server, dataDir, releaseDir, publicURL,
 		if err != nil {
 			return nil, err
 		}
-		source, err := artifacttrust.OpenPublishedManifest(filepath.Join(releaseDir, "release.pub"), filepath.Join(dir, "manifest"), clock.Now, statusPublic, corePublic)
-		if err != nil {
-			return nil, err
-		}
 		path := filepath.Join(dir, "core-issuance.db")
 		if err := lifecycleauth.InitLedger(path); err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, err
@@ -86,7 +81,7 @@ func configureManagedRuntime(srv *master.Server, dataDir, releaseDir, publicURL,
 		if err != nil {
 			return nil, err
 		}
-		coreSigner, err = lifecycleauth.NewPanelSigner(policy, ledger, coreKey, clock.Now, source)
+		coreSigner, err = lifecycleauth.NewPanelSigner(policy, ledger, coreKey, clock.Now)
 		if err != nil {
 			_ = ledger.Close()
 			return nil, err

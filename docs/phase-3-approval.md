@@ -1,12 +1,12 @@
 # Xray 远程生命周期的运维授权与独立签发
 
-安装提案使用格式 3，启停使用格式 4，升级、降级和卸载使用格式 5。节点继续用专用生命周期公钥核验任务、租约和精确参数。历史 TUF 任务按原清单收尾。[制品发布](./phase-3-release.md)
+新安装、升级和降级提案使用格式 7，配置使用格式 6，启停使用格式 4，卸载使用格式 5。节点继续用专用生命周期公钥核验任务、租约和精确参数。历史格式仍可解析。[Core 发布与版本选择](./phase-3-release.md)
 
 ## 单管理员面板签发
 
-发布版 Compose 自动管理签发密钥、任务账本、签发策略与制品清单。Core 管理权限目前涵盖 Xray，在任务中绑定 Core 类型和具体操作。以下配置适用于使用独立签发进程的部署。[Compose 部署](./master-deployment.md#compose-安装)
+发布版 Compose 自动管理签发密钥、任务账本和签发策略。Core 管理权限目前涵盖 Xray；任务绑定 Core 类型、操作、精确版本、架构及 SHA-256。以下配置适用于使用独立签发进程的部署。[Compose 部署](./master-deployment.md#compose-安装)
 
-启用单管理员部署和现有状态任务运行时，并按[节点部署步骤](./phase-3-operations.md#5-启用远程-xray-安装)配置节点的生命周期公钥、发布公钥、NTS 时间和 Xray 状态目录。升级 Agent 及 Helper 后，面板从已认证心跳取得节点架构和 Helper 读出的已提交版本。状态缺失、过期或等待对账时，面板暂停操作。
+启用单管理员部署和现有状态任务运行时，并按[节点部署步骤](./phase-3-operations.md#5-启用远程-xray-安装)配置节点的生命周期公钥、NTS 时间和 Xray 状态目录。升级 Agent 及 Helper 后，面板从已认证心跳取得节点架构和 Helper 读出的已提交版本。状态缺失、过期或等待对账时，面板暂停操作。
 
 面板与独立的生命周期签发进程都读取受保护的策略文件。举例，以下策略允许列出的节点使用后台签发。需要允许新建节点时，显式配置 `"panel": {"all_nodes": true}`。
 
@@ -19,7 +19,7 @@
 }
 ```
 
-从同一发布提交构建 `mcui-lifecycle`。签发进程使用独立账号，保管 `0600` 的生命周期签发私钥和私有账本。配置经过校验的发布清单及其分离签名，并以签发账号使用 `mcui-manifest init-state` 预置[防回滚状态](./phase-3-release.md)。签发服务优先通过[受控 loopback 监控接口](./phase-2-operations.md#11-配置认证-nts-时间)校验 Cloudflare NTS 状态。已有权限的签发账号也可使用本机 `/run/chrony/chronyd.sock`。面板与签发进程共用一份高熵 API Token，文件使用 `0600` 或 `0640`。
+从同一发布提交构建 `mcui-lifecycle`。签发进程使用独立账号，保管 `0600` 的生命周期签发私钥和私有账本。签发服务优先通过[受控 loopback 监控接口](./phase-2-operations.md#11-配置认证-nts-时间)校验 Cloudflare NTS 状态。已有权限的签发账号也可使用本机 `/run/chrony/chronyd.sock`。面板与签发进程共用一份高熵 API Token，文件使用 `0600` 或 `0640`。
 
 ```sh
 mcui-lifecycle init-ledger -ledger /var/lib/mcui-xray-signer/issuance.db
@@ -27,16 +27,12 @@ mcui-lifecycle serve -listen 127.0.0.1:9232 \
   -policy /etc/mcui-xray-signer/policy.json \
   -key /etc/mcui-xray-signer/signing.pem \
   -ledger /var/lib/mcui-xray-signer/issuance.db \
-  -token-file /etc/mcui-xray-signer/token \
-  -release-key /etc/mcui-xray-signer/release.pub \
-  -manifest-state /var/lib/mcui-xray-signer/manifest \
-  -manifest /etc/mcui-xray-signer/manifest.json \
-  -manifest-signature /etc/mcui-xray-signer/manifest.json.sig
+  -token-file /etc/mcui-xray-signer/token
 ```
 
-面板配置 `MCUI_XRAY_INSTALL_POLICY`、`MCUI_XRAY_PANEL_SIGNER_URL=http://127.0.0.1:9232` 和 `MCUI_XRAY_PANEL_SIGNER_TOKEN_FILE`。也可使用同名功能的命令行参数。Compose 部署通过覆盖文件挂载配置并传入任务运行时参数，签发进程与 Master 共享容器网络的回环接口。签发器依赖 Master 核验会话和 MFA，并独立核对签发策略、任务参数、期限和制品清单。节点继续独立校验签名和制品。
+面板配置 `MCUI_XRAY_INSTALL_POLICY`、`MCUI_XRAY_PANEL_SIGNER_URL=http://127.0.0.1:9232` 和 `MCUI_XRAY_PANEL_SIGNER_TOKEN_FILE`。也可使用同名功能的命令行参数。Compose 部署通过覆盖文件挂载配置并传入任务运行时参数，签发进程与 Master 共享容器网络的回环接口。签发器依赖 Master 核验会话和 MFA，并独立核对签发策略、任务参数和期限。节点继续独立校验任务签名、官方来源和制品摘要。
 
-在面板节点详情选择操作。安装、升级和降级只显示该节点架构可用的稳定版本，默认选中当前操作下的最新版本。降级和卸载显示目标版本并单独确认，要求输入 TOTP 验证码。签发或投递遇到暂时错误时，在有效期内使用同一请求重试。已到期且未投递的预留序号可通过只读状态任务收尾。
+在面板节点详情选择操作。安装、升级和降级只显示该节点架构有官方资产的稳定版本，管理员明确选择目标版本。Master 将官方制品的 SHA-256 写入签名任务。降级和卸载显示目标版本并单独确认，要求输入 TOTP 验证码。签发或投递遇到暂时错误时，在有效期内使用同一请求重试。已到期且未投递的预留序号可通过只读状态任务收尾。
 
 ## 范围运维员手工签发
 
@@ -63,9 +59,9 @@ mcui-lifecycle serve -listen 127.0.0.1:9232 \
 
 ## 2. 创建并签署请求
 
-1. 在已接入的节点详情页填写获审核的版本、架构、SHA-256 和当前签名制品清单的 `manifest_version`。通过 MFA 复验创建并下载 `proposal.json`。节点队列空闲时才可预留序号。提案格式为 V3，有效期 30 分钟。
-2. 发起启动或停止时，选择对应操作，填写节点已安装版本、架构与 SHA-256。启停提案不填写制品清单版本。
-3. 升级或降级提案同时填写当前版本与摘要，以及目标版本、摘要和签名清单版本。卸载提案填写将卸载的已安装版本、架构与摘要。
+1. 在已接入的节点详情页填写获审核的版本、架构和 SHA-256。通过 MFA 复验创建并下载 `proposal.json`。节点队列空闲时才可预留序号。新提案格式为 V7，有效期 30 分钟。
+2. 发起启动或停止时，选择对应操作，填写节点已安装版本、架构与 SHA-256。
+3. 升级或降级提案同时填写当前版本与摘要，以及目标版本、架构和摘要。卸载提案填写将卸载的已安装版本、架构与摘要。
 4. 运维员核对提案后使用自己的密钥签署。请求签名覆盖完整提案及请求时间。
 
 ```sh

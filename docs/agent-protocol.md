@@ -5,7 +5,7 @@
 
 ## 1. 信任边界与基本约束
 
-Agent 主动 HTTPS Pull，任务投递和 ACK 按节点 Token 鉴权。Master 从凭据记录确定节点，逐请求检查当前状态与对象归属。Master Web、Signer、Agent、root Helper、Core 为独立边界。当前状态任务 Signer 使用专用 Ed25519 私钥签署 V2 `core.status`。制品发布、节点凭据和任务密钥相互独立。Web 不直接持有签名私钥。Master 对只读查询逐请求校验管理员角色和节点范围并写审计。高危任务按[面板授权](./panel-authz.md)执行。节点的制品发布公钥通过带外配置更换。审批绑定操作、节点、规范化参数摘要、期限和用途，`approval_id` 索引对应的签名授权证据。
+Agent 主动 HTTPS Pull，任务投递和 ACK 按节点 Token 鉴权。Master 从凭据记录确定节点，逐请求检查当前状态与对象归属。Master Web、Signer、Agent、root Helper、Core 为独立边界。状态任务和 Xray 生命周期任务分别使用专用 Ed25519 私钥签署。Web 不直接持有签名私钥。Master 对只读查询逐请求校验管理员角色和节点范围并写审计。高危任务按[面板授权](./panel-authz.md)执行。审批绑定操作、节点、规范化参数摘要、期限和用途，`approval_id` 索引对应的签名授权证据。
 
 任何签名都不能代替配置语义策略、可信制品验证或 Helper 独立授权。禁止任意 Shell、脚本、URL、文件路径、unit 和 argv；未知类型、字段、策略一律拒绝。主控离线或认证失败时不接收新授权，默认保留运行中的 LKG；已开始事务只能依照下文恢复。完全控制合法签名者或节点 root 仍可能破坏安全。
 
@@ -38,7 +38,7 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 
 ## 4. 任务、配置和控制消息
 
-以下对象所有列出字段均必填、无其他字段；字段名大小写敏感。每个任务 `task_id` 全局唯一，`node_id` 精确匹配本机；每节点序号自 1 连续分配。定义任务 body（示例未包含可用签名，**不是测试向量**）：
+以下对象列出的字段为必填（明确说明可选的除外），无其他字段；字段名大小写敏感。每个任务 `task_id` 全局唯一，`node_id` 精确匹配本机；每节点序号自 1 连续分配。定义任务 body（示例未包含可用签名，**不是测试向量**）：
 
 ```json
 {"schema_version":1,"task_id":"task-001","node_id":"node-001","sequence":1,"operation":"core.start","issued_at":"2026-11-16T08:00:00Z","not_before":"2026-11-16T08:00:00Z","expires_at":"2026-11-16T08:10:00Z","payload":{"core":"xray"},"approval_id":"approval-001","signing_key_id":"task-key-01","signature_algorithm":"Ed25519","signature":"<base64>"}
@@ -51,15 +51,15 @@ JSON 必须符合 I-JSON/JCS：UTF-8 严格解码，拒绝重复键（包括转�
 | `core.status` | 无；V1 仅定义签名结构，阶段 2 的运行时使用 V2，规则见[状态任务协议草案](./phase-2-protocol-draft.md) |
 | `core.start`, `core.stop`, `core.uninstall` | Xray 使用已安装的 `version`、`architecture`、`sha256`。仅有 `core` 的旧信封保留解析兼容。 |
 | `core.restart` | 无 |
-| `core.install` | `version`、`artifact_id` 为标识符，`manifest_version` 为正整数 |
-| `core.upgrade`, `core.downgrade` | Xray 同时绑定已安装的 `current_version`、`current_sha256` 和目标的 `version`、`artifact_id`、`manifest_version`。旧信封保留解析兼容。 |
-| `config.apply` | 当前 Xray 模板使用 `version`、`architecture`、`sha256`、`manifest_version`、`port`、`config`。历史 `revision`、`content_sha256`、`core_version` 形态保留解析兼容。 |
+| `core.install` | `version`、`artifact_id`；新官方版本任务不含 `manifest_version`，历史清单任务保留该字段 |
+| `core.upgrade`, `core.downgrade` | Xray 同时绑定已安装的 `current_version`、`current_sha256` 和目标的 `version`、`artifact_id`；历史清单任务保留 `manifest_version` |
+| `config.apply` | 当前 Xray 模板使用 `version`、`architecture`、`sha256`、`port`、`config`；历史格式可带 `manifest_version`。旧 `revision`、`content_sha256`、`core_version` 形态保留解析兼容。 |
 
-任务签名只授权固定动作；制品 ID、版本、架构及摘要须匹配独立受信任且未过期的发布清单，降级须独立授权。任务时间为启动与新步骤授权边界，不是可无限续租的通行证。[Agent/Helper 成对更新](./phase-3-runtime-update.md)使用本地监督器和独立签名授权。节点 Token 轮换按第 2 节接入流程处理。
+任务签名授权固定动作及精确 Core 版本、架构和 SHA-256。Agent 和 Helper 只从固定官方 GitHub Release 源获取相同版本的资产，并对下载字节复验任务摘要；新任务不依赖独立 Core 清单。降级须单独确认。任务时间为启动与新步骤授权边界，不是可无限续租的通行证。[Agent/Helper 成对更新](./phase-3-runtime-update.md)使用本地监督器和独立签名授权。节点 Token 轮换按第 2 节接入流程处理。
 
 **配置签名对象**必填字段：`schema_version`、`node_id`、`core`、`core_version`、`revision`、`content_sha256`、`content_size`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`。通用 `content_size` 上限为 4194304 字节，当前 Xray 模板只接受 1..8192 字节。摘要覆盖精确原始配置字节。
 
-Xray 任务的 `payload.config` 是独立签名的配置元数据。它与任务共用独立 Xray 运维公钥，分别使用 `MCUI-CONFIG-V1` 与 `MCUI-TASK-V1` 签名域。两份签名的节点、Core、精确版本、时间窗与密钥必须一致，配置 `revision` 等于任务 `sequence`。支持 `xray_config=v1` 且使用签名发布清单的 Agent 才能领取此形态。配置正文按节点 root 策略确定性生成，摘要、长度与监听端口均须匹配。Helper 持久化已进入切换的最高修订，配置失败恢复上一次已提交的精确内容和运行意图。通过原任务凭证对账，重复投递不重新应用。要恢复更早的配置需发起更高修订。 [受控入站部署](./phase-4-xray-inbound.md)
+Xray 任务的 `payload.config` 是独立签名的配置元数据。它与任务共用独立 Xray 运维公钥，分别使用 `MCUI-CONFIG-V1` 与 `MCUI-TASK-V1` 签名域。两份签名的节点、Core、精确版本、时间窗与密钥必须一致，配置 `revision` 等于任务 `sequence`。支持 `xray_config=v1` 的 Agent 才能领取此形态。配置正文按节点 root 策略确定性生成，摘要、长度与监听端口均须匹配。Helper 持久化已进入切换的最高修订，配置失败恢复上一次已提交的精确内容和运行意图。通过原任务凭证对账，重复投递不重新应用。要恢复更早的配置需发起更高修订。 [受控入站部署](./phase-4-xray-inbound.md)
 
 面板管理配置任务另含外层签名字段 `payload.plan`。其值是紧凑 JSON 字符串，内含按端口升序排列的对象。原模板使用 `{"port":1080,"users":["alice","bob"]}`，节点明确授权的 HTTP 专用端口使用 `{"port":1081,"protocol":"http","users":["alice"]}`。用户名按字典序排列。端口及同一端口上的用户名均唯一，空数组表示移除全部监听。Agent 须额外声明 `xray_plan=v1` 才会领取包含此字段的任务，含 HTTP 专用端口的草稿还要求 `xray_http=v1`。节点 Token 心跳获取本节点草稿，Helper 只读预览并上报草稿摘要及候选引用。签发前 Master 校验该摘要仍对应保存的草稿，端口类型和用户名仍获节点目录许可。执行时 Helper 使用外层签名的草稿及本地目录重新渲染，独立核对精确配置引用。空数组时引用中的端口仍使用节点许可的非特权端口，实际监听以已应用授权数组为准。
 
@@ -93,7 +93,7 @@ VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之�
 
 ### 阶段 2 已接通的 V2 状态查询子集
 
-状态查询使用 `schema_version: 2`、`operation: core.status`。V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。显式启用单签名清单的 Agent 通过 `install=xray-manifest-v1` 接收独立签发的 V1 `core.install`，共享同一节点序号。旧 TUF 节点使用 `install=xray-v1` 处理已投递任务。安装租约为 60 秒，同一节点凭据可为未过期的同一信封续租。租约到期只重投相同签名消息。Agent 账本先写入再处理；重复 ACK 可重放，执行中状态重启后进入 `NEEDS_RECONCILIATION`。[Xray 安装操作说明](./phase-3-operations.md#5-启用远程-xray-安装)
+状态查询使用 `schema_version: 2`、`operation: core.status`。V2 结构与 `not-applicable` / `observe` 语义见[状态任务协议草案](./phase-2-protocol-draft.md)。支持官方 Release 安装的 Agent 通过 `install=xray-official-v1` 接收生命周期任务，共享同一节点序号。历史 TUF 与签名清单 Agent 使用各自旧能力标记，避免收到不兼容的新任务。安装租约为 60 秒，同一节点凭据可为未过期的同一信封续租。租约到期只重投相同签名消息。Agent 账本先写入再处理；重复 ACK 可重放，执行中状态重启后进入 `NEEDS_RECONCILIATION`。[Xray 安装操作说明](./phase-3-operations.md#5-启用远程-xray-安装)
 
 支持远程启停的 Agent 在轮询中声明 `xray_control=v1`。升级、降级、卸载使用 `xray_change=v1`。各操作共享租约、序号及 ACK 规则，Helper 校验已安装版本和架构。符合条件的签名安装、升级和降级任务可按目标摘要使用主控制品缓存。卸载只操作节点的受管版本。[远程启停](./phase-3-operations.md#6-远程启停) · [远程版本切换与卸载](./phase-3-operations.md#7-远程版本切换与卸载)
 
@@ -117,7 +117,7 @@ V1 控制运行时当前允许：取消尚未过期、尚未开始的状态任�
 
 创建高危任务须由有目标范围的安全管理员发起，再由另一位安全管理员独立批准；发起者不得审批本人请求。批准绑定不可变任务规范化内容摘要、完整节点范围、Core/版本、固定步骤、有效期和一次消费。审批自发起起 30 分钟到期，任务签名最长 10 分钟。签发身份再次检查当前授权和审批状态，并原子消费；Web/任务状态字段本身不构成独立审批证明。阶段 1 邀请与节点禁用属于既有安全管理员 MFA 敏感操作，不构成任务审批。
 
-任务签名密钥、制品发布密钥、HTTPS 服务端私钥和节点 Token 彼此分离。生产制品发布采用 [GitHub Releases 与单签名清单](./artifact-trust.md)，节点预置 Ed25519 发布公钥，通过本地带外配置更换。发布私钥由维护者离线保管。
+状态任务签名密钥、Xray 生命周期任务签名密钥、HTTPS 服务端私钥和节点 Token 彼此分离。Core 制品从固定的官方 GitHub Releases 获取，不要求本地预置 Core 发布公钥；任务签名绑定精确版本、架构和 SHA-256。
 
 ## 6. 防回退与灾难恢复
 
@@ -143,5 +143,5 @@ Go 测试通过 `internal/protocol` 校验 schema、拒绝负例并比对规范�
 2. 当前 V2 状态签发服务、V1 控制签发、持久化任务存储、受限序号恢复、chrony NTS 检查和独立进程隔离已有代码；节点 Token 鉴权和可选的独立回滚检查点已接入主控。独立审批存储、独立 `CANCELED` skip 和完整带外恢复仍待实现。禁止将状态查询 signer 用于其他操作。
 3. V1 任务 parser/向量与 V2 状态查询格式不同。[阶段 2 状态任务 V2 协议](./phase-2-protocol-draft.md)加入只读步骤字段与共享向量，用户于 2026-11-17 批准其作为阶段 2 开发基线；制品和架构的 `not-applicable` 仅适用于只读状态查询。批准不构成生产授权。
 4. Helper 当前实现固定状态查询；Core 逐版本配置允许字段为空、默认拒绝。候选 Core 版本需按 [兼容矩阵](./core-compatibility.md) 实测后再拟定字段表。自更新、安装、配置、统计、真实恢复、通用 skip/序号恢复和制品信任运行时仍禁用。
-5. 新 Xray 任务的 `artifact_id` 固定为 `xray-manifest-<架构>-<SHA256>`，并签入单签名清单的 `manifest_version`。旧 ID `xray-<架构>-<SHA256>` 仅绑定 TUF 的 `core-targets` 委派版本。[迁移步骤](./phase-3-release.md#3-从当前-tuf-实现迁移)
-6. Agent 和 Helper 用固定的 `POST /api/v1/helper/artifacts/xray` 请求主控备用制品，发送当前安装签名信封 `task`、`lease_id` 和期望 `length`。Master 核对已投递任务、节点范围和当前租约，再按精确版本、架构、摘要及长度匹配缓存。客户端只使用已验签清单授权的字节。
+5. 新 Xray 任务的 `artifact_id` 固定为 `xray-<架构>-<SHA256>`，不含 `manifest_version`。旧清单任务格式仍保留解析兼容。
+6. Agent 和 Helper 用固定的 `POST /api/v1/helper/artifacts/xray` 请求主控备用制品，发送当前安装签名信封 `task`、`lease_id` 和期望 `length`。Master 核对已投递任务、节点范围和当前租约，再按精确版本、架构、摘要及长度匹配缓存。客户端只使用与签名任务一致的字节。

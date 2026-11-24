@@ -21,19 +21,20 @@ import (
 )
 
 const (
-	maxSequence                   = 9007199254740991
-	maxProofBytes                 = 16 << 10
-	maxPolicySize                 = 256 << 10
-	maxUnixTime                   = 253402300799
-	proposalTTL                   = 30 * time.Minute
-	taskTTL                       = 10 * time.Minute
-	requestDomain                 = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
-	controlRequestDomain          = "MCUI-XRAY-CONTROL-REQUEST-V1\n"
-	changeRequestDomain           = "MCUI-XRAY-CHANGE-REQUEST-V1\n"
-	SignedManifestProposalVersion = 3
-	ControlProposalVersion        = 4
-	ChangeProposalVersion         = 5
-	ConfigProposalVersion         = 6
+	maxSequence                    = 9007199254740991
+	maxProofBytes                  = 16 << 10
+	maxPolicySize                  = 256 << 10
+	maxUnixTime                    = 253402300799
+	proposalTTL                    = 30 * time.Minute
+	taskTTL                        = 10 * time.Minute
+	requestDomain                  = "MCUI-XRAY-INSTALL-REQUEST-V2\n"
+	controlRequestDomain           = "MCUI-XRAY-CONTROL-REQUEST-V1\n"
+	changeRequestDomain            = "MCUI-XRAY-CHANGE-REQUEST-V1\n"
+	SignedManifestProposalVersion  = 3
+	ControlProposalVersion         = 4
+	ChangeProposalVersion          = 5
+	ConfigProposalVersion          = 6
+	OfficialReleaseProposalVersion = 7
 )
 
 var (
@@ -201,11 +202,13 @@ func (p Proposal) validOperation() bool {
 	}
 	switch p.Operation {
 	case "core.install":
-		return p.SchemaVersion >= 1 && p.SchemaVersion <= SignedManifestProposalVersion && noCurrent && validManifest
+		legacy := p.SchemaVersion >= 1 && p.SchemaVersion <= SignedManifestProposalVersion && validManifest
+		return noCurrent && (legacy || p.SchemaVersion == OfficialReleaseProposalVersion && p.ManifestVersion == 0)
 	case "core.start", "core.stop":
 		return p.SchemaVersion == ControlProposalVersion && noCurrent && p.ManifestVersion == 0
 	case "core.upgrade", "core.downgrade":
-		return p.SchemaVersion == ChangeProposalVersion && validManifest &&
+		legacy := p.SchemaVersion == ChangeProposalVersion && validManifest
+		return (legacy || p.SchemaVersion == OfficialReleaseProposalVersion && p.ManifestVersion == 0) &&
 			validVersionChange(p.Operation, p.CurrentVersion, p.CurrentSHA256, p.Version, p.SHA256)
 	case "core.uninstall":
 		return p.SchemaVersion == ChangeProposalVersion && noCurrent && p.ManifestVersion == 0
@@ -215,7 +218,7 @@ func (p Proposal) validOperation() bool {
 				return false
 			}
 		}
-		return p.SchemaVersion == ConfigProposalVersion && noCurrent && validManifest &&
+		return p.SchemaVersion == ConfigProposalVersion && noCurrent && (p.ManifestVersion == 0 || validManifest) &&
 			p.Version == xrayconfig.Version && p.Architecture == xrayconfig.Architecture && p.Config.Valid()
 	default:
 		return false
@@ -223,7 +226,7 @@ func (p Proposal) validOperation() bool {
 }
 
 func (p Proposal) singleOperator() bool {
-	return p.SchemaVersion >= 2 && p.SchemaVersion <= ConfigProposalVersion
+	return p.SchemaVersion >= 2 && p.SchemaVersion <= OfficialReleaseProposalVersion
 }
 
 func (p Proposal) requestDomain() string {

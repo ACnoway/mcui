@@ -125,7 +125,7 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 	}
 
 	const base = "/api/v1/admin/xray-installs"
-	in := xrayInstallRequest{TaskID: "xray-install-0000000000001", NodeID: client.nodeID, Version: "v26.10.31", Architecture: goruntime.GOARCH, SHA256: strings.Repeat("a", 64), ManifestVersion: 2}
+	in := xrayInstallRequest{TaskID: "xray-install-0000000000001", NodeID: client.nodeID, Version: "v26.10.31", Architecture: goruntime.GOARCH, SHA256: strings.Repeat("a", 64)}
 	assertStatus(request(http.MethodPost, base, "test-session-token", "bad-csrf", in), http.StatusForbidden)
 	assertStatus(request(http.MethodPost, base, "test-session-token", client.csrf, in), http.StatusPreconditionRequired)
 	totpKey, err := base32Decode(totpSecret)
@@ -144,7 +144,7 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 		t.Fatal(err)
 	}
 	proposal, err := lifecycleauth.ParseProposal(record.Proposal)
-	if err != nil || proposal.SchemaVersion != lifecycleauth.SignedManifestProposalVersion || proposal.Sequence != 1 || record.Status != "AWAITING_SIGNATURE" {
+	if err != nil || proposal.SchemaVersion != lifecycleauth.OfficialReleaseProposalVersion || proposal.Sequence != 1 || record.Status != "AWAITING_SIGNATURE" {
 		t.Fatalf("proposal = %+v, status = %s, error = %v", proposal, record.Status, err)
 	}
 	retry := request(http.MethodPost, base, "test-session-token", client.csrf, in)
@@ -212,7 +212,7 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-v1&next_sequence=1", nil, true), http.StatusNoContent)
 	download := func(expected string) helperAuthorizationRequest {
 		t.Helper()
-		response := client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence="+expected, nil, true)
+		response := client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-official-v1&next_sequence="+expected, nil, true)
 		assertStatus(response, http.StatusOK)
 		var check helperAuthorizationRequest
 		if err := json.Unmarshal(response.Body.Bytes(), &check); err != nil || len(check.LeaseID) != 32 || !bytes.Equal(check.Task, task) {
@@ -384,7 +384,7 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 	if err := client.server.ReconcileTaskRuntime(); err != nil {
 		t.Fatalf("reconcile recorded installation: %v", err)
 	}
-	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=2", nil, true), http.StatusNoContent)
+	assertStatus(client.request(http.MethodGet, "/api/v1/agent/tasks/next?install=xray-official-v1&next_sequence=2", nil, true), http.StatusNoContent)
 
 	for i, operation := range []string{"core.stop", "core.start", "core.upgrade", "core.downgrade", "core.uninstall"} {
 		control := in
@@ -401,6 +401,9 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 		versionChange := lifecycleauth.IsVersionChange(operation)
 		if versionChange || operation == "core.uninstall" {
 			schema, capability = lifecycleauth.ChangeProposalVersion, "xray_change=v1"
+			if versionChange {
+				schema = lifecycleauth.OfficialReleaseProposalVersion
+			}
 		}
 		res := request(http.MethodPost, base, "test-session-token", client.csrf, control)
 		assertStatus(res, http.StatusCreated)
@@ -442,13 +445,13 @@ func testXrayInstallReservationAndOperatorAuthorization(t *testing.T, independen
 		if err := json.Unmarshal(res.Body.Bytes(), &dispatched); err != nil || dispatched.Operation != operation {
 			t.Fatalf("dispatched control: %+v (%v)", dispatched, err)
 		}
-		next := "/api/v1/agent/tasks/next?install=xray-manifest-v1&next_sequence=" + strconv.FormatInt(sequence, 10)
+		next := "/api/v1/agent/tasks/next?install=xray-official-v1&next_sequence=" + strconv.FormatInt(sequence, 10)
 		assertStatus(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
 		if schema == lifecycleauth.ChangeProposalVersion {
 			assertStatus(client.request(http.MethodGet, next+"&xray_control=v1", nil, true), http.StatusNoContent)
 		}
 		if versionChange {
-			legacy := strings.Replace(next, "xray-manifest-v1", "xray-v1", 1)
+			legacy := strings.Replace(next, "xray-official-v1", "xray-v1", 1)
 			assertStatus(client.request(http.MethodGet, legacy+"&"+capability, nil, true), http.StatusNoContent)
 		}
 		res = client.request(http.MethodGet, next+"&"+capability, nil, true)
@@ -601,9 +604,9 @@ func (e testInstallExecutor) ReconcileInstall(_ context.Context, raw []byte) (js
 
 type testInstallArtifacts map[string]artifacttrust.Target
 
-func (s testInstallArtifacts) LookupCoreManifest(_ context.Context, core, version string, manifest int64) (artifacttrust.Target, error) {
+func (s testInstallArtifacts) LookupOfficialRelease(_ context.Context, core, version, architecture, sha256 string) (artifacttrust.Target, error) {
 	target, ok := s[version]
-	if !ok || manifest != 2 || core != target.Core {
+	if !ok || core != target.Core || version != target.Version || architecture != target.Architecture || sha256 != target.SHA256 {
 		return artifacttrust.Target{}, lifecycleauth.ErrDenied
 	}
 	return target, nil

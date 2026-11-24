@@ -2,6 +2,8 @@ package corecatalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,9 +20,11 @@ import (
 const (
 	maxResponseBytes = 8 << 20
 	pageSize         = 10
+	installPageSize  = 100
 	cacheLifetime    = 10 * time.Minute
 	staleLifetime    = 24 * time.Hour
 	MaxPage          = 10
+	maxAssetSize     = int64(512 << 20)
 )
 
 var (
@@ -61,6 +65,20 @@ type Snapshot struct {
 	Cores       []Core    `json:"cores"`
 }
 
+// ReleaseArtifact identifies the fixed upstream asset for an exact Core
+// release. SHA256 is taken from GitHub's release API when present, or computed
+// from the official asset when the caller does not supply an expected digest.
+type ReleaseArtifact struct {
+	Core         string
+	Version      string
+	Architecture string
+	Filename     string
+	Size         int64
+	SHA256       string
+	DownloadURL  string
+	Prerelease   bool
+}
+
 type Source interface {
 	List(context.Context) (Snapshot, error)
 }
@@ -86,11 +104,14 @@ type pageCache struct {
 
 type Client struct {
 	httpClient *http.Client
+	assetHTTP  *http.Client
 	now        func() time.Time
 
 	mu       sync.Mutex
 	cached   map[int]pageCache
 	fetching map[int]chan struct{}
+	xray     pageCache
+	xrayBusy chan struct{}
 }
 
 func NewClient() *Client {
@@ -101,10 +122,184 @@ func NewClient() *Client {
 				return http.ErrUseLastResponse
 			},
 		},
+		assetHTTP: &http.Client{
+			Timeout: 15 * time.Minute,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 || !allowedAssetHost(req.URL) {
+					return errors.New("Core asset redirect host is not approved")
+				}
+				return nil
+			},
+		},
 		now:      time.Now,
 		cached:   make(map[int]pageCache),
 		fetching: make(map[int]chan struct{}),
 	}
+}
+
+// ListXrayReleases returns up to 100 official Xray releases for installation
+// choices. The general catalog remains paged in groups of ten.
+func (c *Client) ListXrayReleases(ctx context.Context) (Snapshot, error) {
+	if c == nil || c.httpClient == nil || c.now == nil {
+		return Snapshot{}, errors.New("release catalog unavailable")
+	}
+	for {
+		c.mu.Lock()
+		now := c.now()
+		if len(c.xray.snapshot.Cores) != 0 && now.Before(c.xray.expires) {
+			out := cloneSnapshot(c.xray.snapshot)
+			c.mu.Unlock()
+			return out, nil
+		}
+		if c.xrayBusy != nil {
+			wait := c.xrayBusy
+			c.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return Snapshot{}, ctx.Err()
+			}
+		}
+		wait := make(chan struct{})
+		c.xrayBusy = wait
+		old := cloneSnapshot(c.xray.snapshot)
+		c.mu.Unlock()
+
+		var fresh Snapshot
+		core, err := c.fetchProviderPage(ctx, providers[0], 1, installPageSize)
+		if err == nil {
+			fresh = Snapshot{RetrievedAt: c.now().UTC(), Page: 1, Cores: []Core{core}}
+		}
+
+		c.mu.Lock()
+		if err == nil {
+			c.xray = pageCache{snapshot: cloneSnapshot(fresh), expires: c.now().Add(cacheLifetime)}
+		} else if len(old.Cores) != 0 && c.now().Sub(old.RetrievedAt) <= staleLifetime {
+			old.Stale = true
+			c.xray = pageCache{snapshot: cloneSnapshot(old), expires: c.now().Add(time.Minute)}
+			fresh, err = old, nil
+		}
+		c.xrayBusy = nil
+		close(wait)
+		c.mu.Unlock()
+		if err != nil {
+			return Snapshot{}, err
+		}
+		return cloneSnapshot(fresh), nil
+	}
+}
+
+// ResolveRelease verifies that the exact release and architecture asset exist
+// in the fixed upstream repository. expectedSHA256 is bound by the signed Core
+// management task; GitHub's digest is checked whenever the API supplies one.
+func (c *Client) ResolveRelease(ctx context.Context, coreID, version, architecture, expectedSHA256 string) (ReleaseArtifact, error) {
+	if c == nil || c.httpClient == nil || c.assetHTTP == nil || !tagPattern.MatchString(version) {
+		return ReleaseArtifact{}, errors.New("invalid Core release")
+	}
+	var p *provider
+	for i := range providers {
+		if providers[i].id == coreID {
+			p = &providers[i]
+			break
+		}
+	}
+	if p == nil {
+		return ReleaseArtifact{}, errors.New("unsupported Core release")
+	}
+	if coreID == "xray" && !ValidXrayVersion(version) {
+		return ReleaseArtifact{}, errors.New("Xray release must be a stable semantic version")
+	}
+	filename, err := ExpectedAssetName(coreID, version, architecture)
+	if err != nil {
+		return ReleaseArtifact{}, err
+	}
+	endpoint := p.apiURL + "/tags/" + url.PathEscape(version)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ReleaseArtifact{}, err
+	}
+	setGitHubHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ReleaseArtifact{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ReleaseArtifact{}, fmt.Errorf("release source returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxResponseBytes {
+		return ReleaseArtifact{}, errors.New("invalid release source response")
+	}
+	var release upstreamRelease
+	if err = json.Unmarshal(body, &release); err != nil || release.TagName != version || release.Draft ||
+		(coreID == "xray" && release.Prerelease) || !tagPattern.MatchString(release.TagName) {
+		return ReleaseArtifact{}, errors.New("requested Core version is not a published release")
+	}
+	var found *upstreamAsset
+	for i := range release.Assets {
+		if release.Assets[i].Name == filename {
+			if found != nil {
+				return ReleaseArtifact{}, errors.New("release has duplicate architecture assets")
+			}
+			copy := release.Assets[i]
+			found = &copy
+		}
+	}
+	if found == nil || found.Size <= 0 || found.Size > maxAssetSize {
+		return ReleaseArtifact{}, errors.New("release has no usable asset for this architecture")
+	}
+	assetURL, ok := validAssetURL(found.BrowserDownloadURL, *p, version, filename)
+	if !ok {
+		return ReleaseArtifact{}, errors.New("release asset URL is outside the fixed official repository")
+	}
+	digest := ""
+	if found.Digest != "" {
+		if !digestPattern.MatchString(found.Digest) {
+			return ReleaseArtifact{}, errors.New("release asset digest is invalid")
+		}
+		digest = strings.TrimPrefix(found.Digest, "sha256:")
+	}
+	if expectedSHA256 != "" {
+		if !xrayDigest.MatchString(expectedSHA256) || digest != "" && digest != expectedSHA256 {
+			return ReleaseArtifact{}, errors.New("release asset digest differs from the signed task")
+		}
+		digest = expectedSHA256
+	} else if digest == "" {
+		digest, err = c.hashOfficialAsset(ctx, assetURL, found.Size)
+		if err != nil {
+			return ReleaseArtifact{}, err
+		}
+	}
+	return ReleaseArtifact{
+		Core: coreID, Version: version, Architecture: architecture, Filename: filename,
+		Size: found.Size, SHA256: digest, DownloadURL: assetURL, Prerelease: release.Prerelease,
+	}, nil
+}
+
+func (c *Client) hashOfficialAsset(ctx context.Context, source string, size int64) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("User-Agent", "mcui-core-catalog/1")
+	resp, err := c.assetHTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Request == nil || !allowedAssetHost(resp.Request.URL) ||
+		(resp.ContentLength >= 0 && resp.ContentLength != size) {
+		return "", errors.New("official release asset download was rejected")
+	}
+	h := sha256.New()
+	written, err := io.Copy(h, io.LimitReader(resp.Body, size+1))
+	if err != nil || written != size {
+		return "", errors.New("official release asset length is invalid")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (c *Client) List(ctx context.Context) (Snapshot, error) {
@@ -213,21 +408,23 @@ type upstreamAsset struct {
 }
 
 func (c *Client) fetchProvider(ctx context.Context, p provider, page int) (Core, error) {
+	return c.fetchProviderPage(ctx, p, page, pageSize)
+}
+
+func (c *Client) fetchProviderPage(ctx context.Context, p provider, page, size int) (Core, error) {
 	endpoint, err := url.Parse(p.apiURL)
 	if err != nil {
 		return Core{}, errors.New("release source endpoint is invalid")
 	}
 	query := endpoint.Query()
-	query.Set("per_page", fmt.Sprint(pageSize))
+	query.Set("per_page", fmt.Sprint(size))
 	query.Set("page", fmt.Sprint(page))
 	endpoint.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return Core{}, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "mcui-core-catalog/1")
+	setGitHubHeaders(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return Core{}, err
@@ -251,10 +448,14 @@ func (c *Client) fetchProvider(ctx context.Context, p provider, page int) (Core,
 	if err = json.Unmarshal([]byte(trimmedBody), &releases); err != nil {
 		return Core{}, errors.New("release source returned invalid JSON")
 	}
-	if len(releases) > pageSize {
+	if len(releases) > size {
 		return Core{}, errors.New("release source returned too many releases")
 	}
-	out := Core{ID: p.id, Name: p.name, Repository: p.repository, HasMore: len(releases) == pageSize && page < MaxPage, Releases: make([]Release, 0, len(releases))}
+	maxPages := MaxPage
+	if size != pageSize {
+		maxPages = 1
+	}
+	out := Core{ID: p.id, Name: p.name, Repository: p.repository, HasMore: len(releases) == size && page < maxPages, Releases: make([]Release, 0, len(releases))}
 	for _, release := range releases {
 		if release.Draft || !tagPattern.MatchString(release.TagName) {
 			continue
@@ -297,6 +498,12 @@ func (c *Client) fetchProvider(ctx context.Context, p provider, page int) (Core,
 		return out.Releases[i].PublishedAt.After(out.Releases[j].PublishedAt)
 	})
 	return out, nil
+}
+
+func setGitHubHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "mcui-core-catalog/1")
 }
 
 func validReleaseURL(raw string, p provider, tag string) (string, bool) {

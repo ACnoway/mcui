@@ -75,8 +75,8 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 			return InstallTask{}, ErrDenied
 		}
 		payload.Architecture, payload.SHA256 = architecture, digest
-		if IsVersionChange(wire.Operation) && (!signedManifest ||
-			!validVersionChange(wire.Operation, payload.CurrentVersion, payload.CurrentSHA256, payload.Version, payload.SHA256)) {
+		if IsVersionChange(wire.Operation) &&
+			!validVersionChange(wire.Operation, payload.CurrentVersion, payload.CurrentSHA256, payload.Version, payload.SHA256) {
 			return InstallTask{}, ErrDenied
 		}
 	case IsControlOperation(wire.Operation):
@@ -91,7 +91,7 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 			protocol.Verify(protocol.Config, configRaw, key.PublicKey) != nil {
 			return InstallTask{}, ErrDenied
 		}
-		signedManifest = true
+		signedManifest = payload.ManifestVersion > 0
 	default:
 		return InstallTask{}, ErrDenied
 	}
@@ -116,10 +116,13 @@ func (key InstallKey) Verify(raw []byte) (InstallTask, error) {
 }
 
 func (t InstallTask) Matches(p Proposal, id string) bool {
+	expectedSignedManifest := p.SchemaVersion == SignedManifestProposalVersion ||
+		(p.SchemaVersion == ChangeProposalVersion && IsVersionChange(p.Operation)) ||
+		(p.Operation == xrayconfig.Operation && p.ManifestVersion > 0)
 	return id == t.ApprovalID && p.TaskID == t.TaskID && p.NodeID == t.NodeID && p.SigningKeyID == t.KeyID &&
 		p.Sequence == t.Sequence && p.Operation == t.Operation && p.ManifestVersion == t.ManifestVersion && p.Version == t.Version &&
 		p.CurrentVersion == t.CurrentVersion && p.CurrentSHA256 == t.CurrentSHA256 &&
-		t.SignedManifest == (p.SchemaVersion == SignedManifestProposalVersion || IsVersionChange(p.Operation) || p.Operation == xrayconfig.Operation) &&
+		t.SignedManifest == expectedSignedManifest &&
 		t.Config == p.Config && t.Plan == p.Plan &&
 		p.Architecture == t.Architecture && p.SHA256 == t.SHA256 &&
 		t.NotBefore.Unix() >= p.CreatedAt && t.ExpiresAt.Unix() <= p.ExpiresAt

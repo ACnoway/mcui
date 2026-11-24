@@ -81,7 +81,7 @@ type XrayDeliveryCapabilities struct {
 }
 
 func (c XrayDeliveryCapabilities) supports(operation string) bool {
-	if c.InstallMode != "xray-v1" && c.InstallMode != "xray-manifest-v1" {
+	if c.InstallMode != "xray-v1" && c.InstallMode != "xray-manifest-v1" && c.InstallMode != "xray-official-v1" {
 		return false
 	}
 	switch operation {
@@ -92,7 +92,7 @@ func (c XrayDeliveryCapabilities) supports(operation string) bool {
 	case "core.upgrade", "core.downgrade", "core.uninstall":
 		return c.Change
 	case xrayconfig.Operation:
-		return c.Config && c.InstallMode == "xray-manifest-v1"
+		return c.Config && (c.InstallMode == "xray-manifest-v1" || c.InstallMode == "xray-official-v1")
 	default:
 		return false
 	}
@@ -155,14 +155,15 @@ type Ack struct {
 }
 
 type taskEnvelope struct {
-	SignedManifest bool      `json:"-"`
-	SchemaVersion  int       `json:"schema_version"`
-	TaskID         string    `json:"task_id"`
-	NodeID         string    `json:"node_id"`
-	Sequence       int64     `json:"sequence"`
-	KeyID          string    `json:"signing_key_id"`
-	Operation      string    `json:"operation"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	SignedManifest  bool      `json:"-"`
+	SchemaVersion   int       `json:"schema_version"`
+	TaskID          string    `json:"task_id"`
+	NodeID          string    `json:"node_id"`
+	Sequence        int64     `json:"sequence"`
+	KeyID           string    `json:"signing_key_id"`
+	Operation       string    `json:"operation"`
+	ManifestVersion int64     `json:"manifest_version,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at"`
 }
 
 type Store struct{ db *sql.DB }
@@ -717,9 +718,21 @@ func (s *Store) lease(authenticatedNodeID string, now time.Time, configuredKeyID
 	if err != nil {
 		return zero, err
 	}
-	if (body.Operation == "core.install" || lifecycleauth.IsVersionChange(body.Operation)) &&
-		body.SignedManifest != (capabilities.InstallMode == "xray-manifest-v1") {
-		return zero, ErrNotFound
+	if body.Operation == "core.install" || lifecycleauth.IsVersionChange(body.Operation) {
+		switch capabilities.InstallMode {
+		case "xray-official-v1":
+			if body.SignedManifest || body.ManifestVersion != 0 {
+				return zero, ErrNotFound
+			}
+		case "xray-manifest-v1":
+			if !body.SignedManifest || body.ManifestVersion == 0 {
+				return zero, ErrNotFound
+			}
+		case "xray-v1":
+			if body.SignedManifest || body.ManifestVersion == 0 {
+				return zero, ErrNotFound
+			}
+		}
 	}
 	if body.NodeID != authenticatedNodeID || body.NodeID != d.NodeID || body.TaskID != d.TaskID || body.Sequence != d.Sequence || body.KeyID != storedKey {
 		return zero, ErrIdentity
@@ -953,7 +966,8 @@ func verifyDeliveryTask(raw []byte, storedKey, statusKeyID string, statusKey ed2
 			if !capabilities.supportsTask(task) {
 				return body, ErrNotFound
 			}
-			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID, Operation: task.Operation, ExpiresAt: task.ExpiresAt, SignedManifest: task.SignedManifest}, nil
+			return taskEnvelope{SchemaVersion: 1, TaskID: task.TaskID, NodeID: task.NodeID, Sequence: task.Sequence, KeyID: task.KeyID,
+				Operation: task.Operation, ManifestVersion: task.ManifestVersion, ExpiresAt: task.ExpiresAt, SignedManifest: task.SignedManifest}, nil
 		}
 	}
 	return body, ErrIdentity

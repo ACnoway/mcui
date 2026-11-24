@@ -37,14 +37,10 @@ func run() error {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	var release xrayruntime.Release
 	var metadataURL string
-	var releaseKeyPath string
-	var manifestVersion int64
 	action := xrayruntime.Action(command)
 	switch action {
 	case xrayruntime.Install, xrayruntime.Upgrade, xrayruntime.Downgrade:
 		flags.StringVar(&metadataURL, "metadata-url", "", "legacy: explicitly use this TUF HTTPS metadata origin")
-		flags.StringVar(&releaseKeyPath, "release-public-key", "", "locally provisioned release public key (default /etc/mcui-xray/release.pub)")
-		flags.Int64Var(&manifestVersion, "manifest-version", 0, "require this exact release manifest version")
 		fallthrough
 	case xrayruntime.Start, xrayruntime.Stop, xrayruntime.Uninstall:
 		flags.StringVar(&release.Version, "version", "", "exact Xray release version")
@@ -61,11 +57,6 @@ func run() error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional argument")
-	}
-	manifestRequested := false
-	flags.Visit(func(opt *flag.Flag) { manifestRequested = manifestRequested || opt.Name == "manifest-version" })
-	if manifestRequested && manifestVersion <= 0 {
-		return errors.New("-manifest-version must be positive")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -84,21 +75,12 @@ func run() error {
 		err = runtime.Recover(ctx)
 	case xrayruntime.Install, xrayruntime.Upgrade, xrayruntime.Downgrade:
 		var client *artifacttrust.Client
-		switch {
-		case metadataURL != "" && releaseKeyPath != "":
-			return errors.New("configure only one artifact trust source")
-		case metadataURL != "":
+		if metadataURL != "" {
 			client, err = openLegacyTrust(metadataURL)
-		default:
-			if releaseKeyPath == "" {
-				releaseKeyPath = "/etc/mcui-xray/release.pub"
-			}
-			clock := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource)
-			client, err = artifacttrust.OpenSignedCore(releaseKeyPath, filepath.Join(xrayruntime.StateDir, "control", "xray-manifest"), clock.Now)
+		} else {
+			client, err = artifacttrust.OpenOfficialCore(filepath.Join(xrayruntime.StateDir, "control", "artifacts"))
 		}
-		if err == nil && manifestRequested {
-			err = runtime.ApplyWithManifest(ctx, action, release, client, manifestVersion)
-		} else if err == nil {
+		if err == nil {
 			err = runtime.Apply(ctx, action, release, client)
 		}
 	default:
