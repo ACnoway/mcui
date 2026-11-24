@@ -19,7 +19,7 @@ Phase 3 adds the official Core release catalog, a backup cache, signed Xray life
 
 The panel opens on the node overview. Use the node list for Agent enrollment and Core lifecycle operations. Proxy Configuration can create Xray loopback inbounds and publish Trojan/TLS on newly enrolled Debian amd64 nodes. It also supports editing grants from an existing node catalog. Settings contains the audit log, Core releases, task history, and administrator management. [Frontend design](docs/frontend-design.md) · [Xray inbound creation](docs/phase-4-xray-inbound.md#从主控添加入站)
 
-Administrators can create an Xray client on the Master and bind it to inbounds on multiple nodes. After the node revisions are applied, the panel can issue one subscription for the client and a separate HTTPS share link for each inbound. The recipient uses the link to generate an Xray client configuration with the credential issued by that node. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
+Administrators can create an Xray client on the Master and bind it to both panel-defined and node-catalog inbounds on multiple nodes. After the node revisions are applied, the panel can issue one subscription for the client and a separate HTTPS share link for each inbound. The recipient uses the link to generate an Xray client configuration with the credential for that inbound. [Client subscriptions](docs/phase-4-xray-inbound.md#客户端订阅)
 
 ## Development checks
 

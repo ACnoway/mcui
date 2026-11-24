@@ -38,9 +38,10 @@ type xrayClientView struct {
 }
 
 type clientNodeOption struct {
-	ID       string             `json:"id"`
-	Name     string             `json:"name"`
-	Inbounds []clientPortOption `json:"inbounds"`
+	ID            string             `json:"id"`
+	Name          string             `json:"name"`
+	PanelInbounds bool               `json:"panel_inbounds,omitempty"`
+	Inbounds      []clientPortOption `json:"inbounds"`
 }
 
 type clientPortOption struct {
@@ -85,24 +86,35 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 		Nodes   []clientNodeOption `json:"nodes"`
 	}{Clients: []xrayClientView{}, Nodes: []clientNodeOption{}}
 	err = s.store.View(func(st store.State) error {
+		nodeOptions := make(map[string]clientNodeOption)
 		for id, node := range st.Nodes {
 			if !s.panelXrayScope(&st, lifecycleauth.Proposal{NodeID: id, RequesterID: ctx.Admin.ID}) {
 				continue
 			}
 			inventory, _, err := panelInventory(node, now)
-			if err != nil || inventory.Xray.Catalog == nil {
+			if err != nil {
 				continue
 			}
-			catalog := inventory.Xray.Catalog
 			option := clientNodeOption{ID: id, Name: node.Name}
-			for _, port := range catalog.Ports {
-				inbound, users, _ := catalog.Inbound(port)
-				if len(users) > 0 {
-					option.Inbounds = append(option.Inbounds, clientPortOption{port, inbound.Protocol, users})
+			if catalog := inventory.Xray.Catalog; catalog != nil {
+				for _, port := range catalog.Ports {
+					inbound, users, _ := catalog.Inbound(port)
+					if len(users) > 0 {
+						option.Inbounds = append(option.Inbounds, clientPortOption{port, inbound.Protocol, users})
+					}
+				}
+			} else if inventory.Xray.PanelKey != "" && inventory.Xray.Version == xrayconfig.Version {
+				draft, err := xrayconfig.ParseConfiguration(node.XrayDraft)
+				if err == nil && draft.Panel != nil {
+					option.PanelInbounds = true
+					for _, inbound := range draft.Inbounds {
+						option.Inbounds = append(option.Inbounds, clientPortOption{inbound.Port, inbound.Protocol, inbound.Users})
+					}
 				}
 			}
 			if len(option.Inbounds) > 0 {
 				result.Nodes = append(result.Nodes, option)
+				nodeOptions[id] = option
 			}
 		}
 		grants := make(map[string]subscriptionGrant)
@@ -117,9 +129,14 @@ func (s *Server) listXrayClients(w http.ResponseWriter, r *http.Request) {
 				protocol := grant.allowedPorts(binding.Credential, binding.Port).protocols[binding.Port]
 				applied := hasClientBinding(grant.plan, binding.XrayBinding)
 				node := st.Nodes[binding.NodeID]
-				if !applied && node.Inventory != nil && node.Inventory.Xray != nil && node.Inventory.Xray.Catalog != nil {
-					inbound, _, _ := node.Inventory.Xray.Catalog.Inbound(binding.Port)
-					protocol = inbound.Protocol
+				if !applied {
+					options := nodeOptions[binding.NodeID].Inbounds
+					if index := slices.IndexFunc(options, func(option clientPortOption) bool { return option.Port == binding.Port }); index >= 0 {
+						protocol = options[index].Protocol
+					} else if node.Inventory != nil && node.Inventory.Xray != nil && node.Inventory.Xray.Catalog != nil {
+						inbound, _, _ := node.Inventory.Xray.Catalog.Inbound(binding.Port)
+						protocol = inbound.Protocol
+					}
 				}
 				row.Bindings = append(row.Bindings, clientBindingView{
 					XrayBinding: binding.XrayBinding, NodeName: node.Name, Protocol: protocol, Applied: applied,
@@ -232,11 +249,18 @@ func (s *Server) saveXrayClientBindings(w http.ResponseWriter, r *http.Request) 
 			if !s.panelXrayScope(st, lifecycleauth.Proposal{NodeID: id, RequesterID: ctx.Admin.ID}) {
 				return store.ErrNotFound
 			}
-			for other, record := range st.XrayClients {
-				if other != username && slices.ContainsFunc(record.Bindings, func(binding store.XrayClientBinding) bool {
-					return binding.NodeID == id && binding.Credential == additions[0].Credential
-				}) {
-					return errClientCredential
+			if st.Nodes[id].XrayPanelKey == "" && slices.ContainsFunc(in.Bindings, func(binding store.XrayBinding) bool {
+				return binding.NodeID == id && binding.Credential != additions[0].Credential
+			}) {
+				return errClientCredential
+			}
+			for _, addition := range additions {
+				for other, record := range st.XrayClients {
+					if other != username && slices.ContainsFunc(record.Bindings, func(binding store.XrayClientBinding) bool {
+						return binding.NodeID == id && binding.Credential == addition.Credential
+					}) {
+						return errClientCredential
+					}
 				}
 			}
 			if err := stageClientBindings(st, id, additions, removed[id], now); err != nil {
@@ -264,17 +288,12 @@ func validClientBindings(bindings []store.XrayBinding) bool {
 	if bindings == nil || len(bindings) > maxClientBindings {
 		return false
 	}
-	credentials := make(map[string]string)
 	ports := make(map[string]map[int]bool)
 	for _, binding := range bindings {
 		if !security.ValidNodeID(binding.NodeID) || binding.Port < 1024 || binding.Port > 65535 ||
 			!xrayconfig.ValidUsername(binding.Credential) {
 			return false
 		}
-		if credential, exists := credentials[binding.NodeID]; exists && credential != binding.Credential {
-			return false
-		}
-		credentials[binding.NodeID] = binding.Credential
 		if ports[binding.NodeID] == nil {
 			ports[binding.NodeID] = make(map[int]bool)
 		}
@@ -291,13 +310,13 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 		return err
 	}
 	node := st.Nodes[id]
-	var catalog *xrayconfig.Catalog
+	var inventory lifecycleauth.NodeInventory
+	var err error
 	if len(additions) > 0 {
-		inventory, _, err := panelInventory(node, now)
-		if err != nil || inventory.Xray.Catalog == nil {
+		inventory, _, err = panelInventory(node, now)
+		if err != nil {
 			return errXrayInventory
 		}
-		catalog = inventory.Xray.Catalog
 	}
 	encoded := node.XrayDraft
 	if encoded == "" {
@@ -311,6 +330,32 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 	draft, err := xrayconfig.ParseConfiguration(encoded)
 	if err != nil {
 		return errXrayInventory
+	}
+	if draft.Panel != nil {
+		if len(additions) > 0 && (inventory.Xray.PanelKey == "" || inventory.Xray.Version != xrayconfig.Version) {
+			return errXrayInventory
+		}
+		for _, binding := range additions {
+			if !hasClientBinding(draft.Inbounds, binding) {
+				return errClientCredential
+			}
+		}
+		entries := panelInbounds(draft)
+		entries = slices.DeleteFunc(entries, func(entry panelInbound) bool {
+			return slices.Contains(removals, store.XrayBinding{NodeID: id, Port: entry.Inbound.Port, Credential: entry.Inbound.Users[0]})
+		})
+		if len(entries) != len(draft.Inbounds) {
+			node.XrayDraft = encodePanelInbounds(entries, draft.Panel.TLS).Encode()
+			st.Nodes[id] = node
+		}
+		return nil
+	}
+	var catalog *xrayconfig.Catalog
+	if len(additions) > 0 {
+		catalog = inventory.Xray.Catalog
+		if catalog == nil {
+			return errXrayInventory
+		}
 	}
 	for _, binding := range removals {
 		if index := inboundIndex(draft.Inbounds, binding.Port); index >= 0 {

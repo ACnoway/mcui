@@ -749,6 +749,43 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || config.Panel == nil || config.Panel.TLS == nil || !config.Panel.TLS.Trust.Valid() || config.Inbounds[0].PublicEndpoint != change.Public {
 			t.Fatalf("public endpoint or TLS identity missing from draft: %v", err)
 		}
+		const clientsURL = "https://panel.example.test/api/v1/admin/xray/clients"
+		const aggregateURL = "https://panel.example.test/api/v1/client-subscription"
+		central := func(method, suffix string, body any) *httptest.ResponseRecorder {
+			return subscriptionAdmin(method, clientsURL+suffix, client.csrf, body)
+		}
+		legacy := store.XrayBinding{NodeID: secondNodeID, Port: 1080, Credential: "native"}
+		published := store.XrayBinding{NodeID: client.nodeID, Port: 1080, Credential: "alice"}
+		listed := central(http.MethodGet, "", nil)
+		expect(listed, http.StatusOK)
+		if !strings.Contains(listed.Body.String(), `"panel_inbounds":true`) || strings.Contains(listed.Body.String(), credential) ||
+			strings.Contains(listed.Body.String(), config.Panel.Credentials[0]) {
+			t.Fatal("client options must expose the panel account name without its credential")
+		}
+		bind := func(revision int, bindings ...store.XrayBinding) *httptest.ResponseRecorder {
+			return central(http.MethodPut, "/customer/bindings", map[string]any{"revision": revision, "bindings": bindings})
+		}
+		unknown := published
+		unknown.Credential = "not-registered"
+		expect(bind(3, legacy, unknown), http.StatusConflict)
+		expect(bind(3, legacy, published), http.StatusOK)
+		expect(subscriptionAdmin(http.MethodPut, "https://panel.example.test"+path+"/inbounds/1080", client.csrf,
+			panelInboundChange{State: options(), Remove: true}), http.StatusConflict)
+		expect(central(http.MethodPost, "/customer/share", map[string]any{"action": "issue", "node_id": client.nodeID, "port": 1080}), http.StatusConflict)
+		share := func() clientShareResult {
+			t.Helper()
+			r := central(http.MethodPost, "/customer/share", map[string]any{"action": "issue"})
+			expect(r, http.StatusOK)
+			var result clientShareResult
+			if err := json.Unmarshal(r.Body.Bytes(), &result); err != nil || result.Subscription == nil {
+				t.Fatalf("invalid client share: %v", err)
+			}
+			return result
+		}
+		pendingShare := share()
+		if len(pendingShare.Inbounds) != 1 || pendingShare.Inbounds[0].XrayBinding != legacy {
+			t.Fatal("unapplied panel inbound received a share")
+		}
 		applyDirect := panelXrayRequest{TaskID: "panel-inbound-fixture-12345", Operation: xrayconfig.Operation, Confirm: xrayconfig.Operation,
 			Version: newer.Version, CatalogVersion: 2, State: options(), MFACode: fmtCode(totpAt(totpKey, time.Now().Unix()/30))}
 		expect(admin(http.MethodPost, applyDirect, client.csrf), http.StatusConflict)
@@ -800,6 +837,24 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if !strings.Contains(response.Body.String(), `"username":"alice","eligible":true`) {
 			t.Fatal("panel-managed inbound was unavailable for single-node subscription")
 		}
+		entries := fetch(aggregateURL, pendingShare.Subscription.Token, "")
+		expect(entries, http.StatusOK)
+		var subscribed struct{ Entries []clientSubscriptionEntry }
+		if err := json.Unmarshal(entries.Body.Bytes(), &subscribed); err != nil || len(subscribed.Entries) != 2 ||
+			!strings.Contains(entries.Body.String(), `"public_endpoints"`) || !strings.Contains(entries.Body.String(), config.Panel.TLS.Trust.SHA256) {
+			t.Fatalf("aggregate did not include the verified public endpoint and legacy binding: %v", err)
+		}
+		activeShare := share()
+		if len(activeShare.Inbounds) != 2 {
+			t.Fatal("applied panel inbound did not receive a share")
+		}
+		var panelLink string
+		for _, entry := range activeShare.Inbounds {
+			if entry.XrayBinding == published {
+				panelLink = entry.Token
+			}
+		}
+		expect(fetch(aggregateURL, panelLink, ""), http.StatusOK)
 		alternative := testTrojanTrust(t)
 		applied := append(xrayconfig.Plan{}, *direct.Applied...)
 		applied[0].TLSCertSHA256 = alternative.SHA256
@@ -807,6 +862,24 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		heartbeat(&direct)
 		if reportedTrust() != nil {
 			t.Fatal("accepted certificate supplied by inventory in place of signed trust")
+		}
+		expect(fetch(aggregateURL, panelLink, ""), http.StatusNotFound)
+		direct.PanelTLS, direct.Applied = &config.Panel.TLS.Trust, &config.Inbounds
+		heartbeat(&direct)
+		expect(bind(4, legacy), http.StatusOK)
+		expect(fetch(aggregateURL, panelLink, ""), http.StatusNotFound)
+		entries = fetch(aggregateURL, activeShare.Subscription.Token, "")
+		expect(entries, http.StatusOK)
+		if strings.Contains(entries.Body.String(), `"public_endpoints"`) {
+			t.Fatal("removed panel binding remained in the aggregate before node apply")
+		}
+		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		revoked, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil || revoked.Panel == nil || len(revoked.Inbounds) != 0 || revoked.Panel.TLS != nil {
+			t.Fatalf("unbind did not stage removal of the panel inbound and its unused TLS identity: %v", err)
 		}
 	})
 	if err := s.ReconcileTaskRuntime(); err != nil {

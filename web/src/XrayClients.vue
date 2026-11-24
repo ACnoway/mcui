@@ -8,7 +8,7 @@ type Binding = { node_id: string; port: number; credential: string }
 type BindingView = Binding & { node_name: string; protocol: XrayProtocol | ''; applied: boolean; share_expires_at?: number; share_id?: string }
 type Client = { username: string; revision: number; bindings: BindingView[]; expires_at?: number; share_id?: string }
 type Port = { port: number; protocol: XrayProtocol | ''; credentials: string[] }
-type Node = { id: string; name: string; inbounds: Port[] }
+type Node = { id: string; name: string; panel_inbounds?: boolean; inbounds: Port[] }
 type Link = { id: string; token: string; expires_at: number }
 type LinkResponse = { subscription?: Link; inbounds: (Binding & Link)[] }
 
@@ -38,9 +38,11 @@ const credential = ref('')
 const changedNodes = ref<string[]>([])
 const filtered = computed(() => clients.value.filter(client => client.username.includes(search.value.trim().toLowerCase()) &&
   (!nodeFilter.value || client.bindings.some(binding => binding.node_id === nodeFilter.value))))
-const availablePorts = computed(() => (nodes.value.find(node => node.id === selectedNode.value)?.inbounds ?? []).filter(port =>
+const selectedNodeOption = computed(() => nodes.value.find(node => node.id === selectedNode.value))
+const availablePorts = computed(() => (selectedNodeOption.value?.inbounds ?? []).filter(port =>
   !draft.value.some(binding => binding.node_id === selectedNode.value && binding.port === port.port)))
-const localCredential = computed(() => draft.value.find(binding => binding.node_id === selectedNode.value)?.credential)
+const localCredential = computed(() => selectedNodeOption.value?.panel_inbounds ? undefined
+  : draft.value.find(binding => binding.node_id === selectedNode.value)?.credential)
 const credentials = computed(() => (availablePorts.value.find(port => port.port === selectedPort.value)?.credentials ?? []).filter(name =>
   (!localCredential.value || name === localCredential.value) && !clients.value.some(client => client.username !== editing.value?.username &&
     client.bindings.some(binding => binding.node_id === selectedNode.value && binding.credential === name))))
@@ -116,7 +118,7 @@ function editBindings(client: Client) {
 
 function choosePort() {
   const preferred = localCredential.value ?? editing.value?.username ?? ''
-  credential.value = credentials.value.includes(preferred) ? preferred : ''
+  credential.value = credentials.value.length === 1 ? credentials.value[0] : credentials.value.includes(preferred) ? preferred : ''
 }
 
 function addBinding() {
@@ -227,6 +229,9 @@ onActivated(refresh)
       <button type="submit" class="outline" :disabled="busy || !credential || draft.length >= 64">添加绑定</button>
     </form>
     <p v-else class="feedback">等待节点上报可用的入站和凭据。</p>
+    <p v-if="editing.bindings.some(binding => !draft.some(item => bindingKey(item) === bindingKey(binding)))" class="feedback">
+      解除绑定立即撤销对应的入站分享。下发后，主控定义的入站会被移除，节点预配的入站会撤销该凭据的授权。
+    </p>
     <p>保存后，在受影响节点的「代理配置」中预览并下发。</p>
     <div class="actions"><button type="button" :disabled="busy || loading" @click="saveBindings">保存绑定</button></div>
   </PanelDialog>

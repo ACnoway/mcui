@@ -1377,6 +1377,7 @@ onMounted(async () => {
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
           <XrayPanelInbounds v-if="panelXray.panel_inbounds" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
             :network="panelXray.draft_network ?? null" :busy="draftDisabled" :save="savePanelInbound"
+            :managed-bindings="panelXray.managed_bindings ?? []"
             :trojan="!!panelXray.current.panel_trojan" :addresses="panelXray.current.panel_addresses ?? []"
             :trust="panelXray.panel_trust ?? undefined" :applied="panelXray.current.applied ?? []"
             :revision="panelXray.current.config_revision ?? 0" />

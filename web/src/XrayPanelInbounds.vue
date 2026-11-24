@@ -13,6 +13,7 @@ export type PanelInboundChange = { remove: true } | {
 
 const props = defineProps<{
   inbounds: Inbound[]; network: Network | null; busy: boolean
+  managedBindings: { port: number; credential: string }[]
   save: (port: number, change: PanelInboundChange) => Promise<void>
   trojan: boolean; addresses: string[]; trust?: XraySubscription['trojan_trust']; applied: Inbound[]; revision: number
 }>()
@@ -37,6 +38,10 @@ const needsCredential = computed(() => {
 
 function protocolLabel(protocol?: string) {
   return protocols.find(option => option.value === (protocol ?? ''))?.label ?? protocol
+}
+
+function centrallyBound(port: number) {
+  return props.managedBindings.some(binding => binding.port === port)
 }
 
 function target(port: number) {
@@ -154,11 +159,11 @@ async function remove(port: number) {
       <tbody><tr v-for="inbound in inbounds" :key="inbound.port">
         <th scope="row">{{ inbound.public_endpoint ? destinationLabel(inbound.public_endpoint) : `127.0.0.1:${inbound.port}` }}</th>
         <td>{{ protocolLabel(inbound.protocol) }}</td>
-        <td>{{ inbound.users[0] }}</td>
+        <td>{{ inbound.users[0] }}<template v-if="centrallyBound(inbound.port)"> · 已在「客户端」绑定</template></td>
         <td>{{ target(inbound.port) ? destinationLabel(target(inbound.port)!) : '拒绝全部' }}</td>
         <td><div class="actions">
           <button type="button" class="outline" :disabled="busy" @click="open(inbound)">编辑</button>
-          <button type="button" class="quiet" :disabled="busy" @click="remove(inbound.port)">删除</button>
+          <button v-if="!centrallyBound(inbound.port)" type="button" class="quiet" :disabled="busy" @click="remove(inbound.port)">删除</button>
           <button v-if="appliedPublic(inbound.port)" type="button" class="outline" @click="openDownload(inbound.port)">客户端配置</button>
         </div></td>
       </tr></tbody>
@@ -168,11 +173,12 @@ async function remove(port: number) {
 
   <PanelDialog v-if="form" :title="form.editing ? `编辑入站 · ${form.port}` : '添加入站'" @close="form = null">
     <form @submit.prevent="submit">
-      <label>协议 <select v-model="form.protocol" @change="form.credential = ''">
+      <label>协议 <select v-model="form.protocol" :disabled="form.editing && centrallyBound(form.port)" @change="form.credential = ''">
         <option v-for="protocol in protocols.filter(option => trojan || option.value !== 'trojan')" :key="protocol.value" :value="protocol.value">{{ protocol.label }}</option>
       </select></label>
       <label>监听端口 <input v-model.number="form.port" type="number" min="1024" max="65535" required :disabled="form.editing" /></label>
-      <label>客户端用户名 <input v-model="form.username" pattern="[a-z][a-z0-9_\-]{0,23}" autocomplete="off" required /></label>
+      <label>客户端用户名 <input v-model="form.username" pattern="[a-z][a-z0-9_\-]{0,23}" autocomplete="off"
+        :disabled="form.editing && centrallyBound(form.port)" required /></label>
       <label>{{ form.protocol === 'vless' || form.protocol === 'vmess' ? 'UUID' : '密码' }}
         <input v-model="form.credential" autocomplete="off" :required="needsCredential" :placeholder="needsCredential ? '' : '留空保留原凭据'" />
       </label>
