@@ -157,7 +157,7 @@
 2. **Xray。** 直接以 3x-ui 的入站操作和配置模型为基准。对齐创建、编辑、复制、启停、删除、客户端管理和分享。从备注、协议、监听地址和端口开始，按协议和传输展示客户端凭据、TLS/REALITY、嗅探与回落等适用字段，对齐已验收组合的默认值、联动校验和生成的 Xray 配置。首批覆盖已接入协议的直监听和常规出站，再按上表补齐协议、传输、DNS、出站和路由功能。若复用上游源码，记录固定版本与来源并遵循其 GPLv3 许可。[3x-ui 入站表单](https://github.com/MHSanaei/3x-ui/blob/main/frontend/src/schemas/forms/inbound-form.ts) · [3x-ui Debian 服务](https://github.com/MHSanaei/3x-ui/blob/main/x-ui.service.debian) · [3x-ui 许可证](https://github.com/MHSanaei/3x-ui/blob/main/LICENSE)
 3. **sing-box。** 参考 S-UI 的入站、客户端、TLS、出站、路由与订阅操作，采用锁定版本的 sing-box 原生配置和校验。入站按类型组织参数并使用原生监听字段。服务端出站、DNS 和路由按 sing-box 的语义设置。订阅从生效的入站、用户凭据和公布地址生成 sing-box 客户端配置。首批从具备真实客户端的常用组合验收，再扩展端点、服务和额外订阅格式。[S-UI 配置模型](https://github.com/alireza0/s-ui/wiki/Configuration-Objects) · [sing-box 配置](https://sing-box.sagernet.org/configuration/)
 4. **Mieru/mita。** 将「入站」映射为 mita 原生端口绑定，提供受版本支持的 TCP/UDP 端口或端口范围、服务端用户和客户端配置。按实际授权范围展示用户绑定，按 mita 的能力提供 DNS 或其他出站选项。验证原生配置读取、完整替换和内部持久化状态恢复，避免以合并更新撤销旧端口或用户。[Mieru 服务端文档](https://github.com/enfein/mieru/blob/v3.39.0/docs/server-install.md) · [Mieru 客户端文档](https://github.com/enfein/mieru/blob/v3.39.0/docs/client-install.md)
-5. **下发与迁移。** 复用主控草稿、节点预检、预览、签名下发和修订确认。已有 Xray 节点由管理员逐节点发起迁移。预览列出监听和出站策略变化，核对端口冲突并保留已有对外端点、客户端凭据、绑定和订阅。迁移失败时恢复上一份可用修订及其网络模式和监听，兼容旧命名空间与中继。网络模式、监听和策略版本纳入应用与恢复事务。
+5. **下发与恢复。** 新节点复用主控草稿、节点预检、预览、签名下发和修订确认。预览列出监听和出站策略变化并核对端口冲突。应用失败时恢复上一份可用修订及监听；网络模式、监听和策略版本纳入应用与恢复事务。此轮不要求旧节点兼容或迁移。
 6. **验收。** 用锁定版本的官方 Core 和真实客户端验证新建入站、DNS、公网 TCP/UDP、按平台提供的 IPv4/IPv6、配置导入、撤销、重启和端口冲突回滚。共存场景覆盖三个 Core 的监听冲突、文件和管理接口权限，以及更新对其他 Core 的影响。按 Core 和版本登记通过的功能、统计、额度与订阅格式。
 
 ## 阶段 5：安装方式与 Docker 构建

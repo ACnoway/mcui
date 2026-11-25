@@ -89,6 +89,11 @@ func TestPanelSocksInboundUsesProtectedDirectOutbound(t *testing.T) {
 		t.Fatalf("failed to render SOCKS5 inbound: %v", err)
 	}
 	var config struct {
+		DNS struct {
+			Tag           string   `json:"tag"`
+			Servers       []string `json:"servers"`
+			QueryStrategy string   `json:"queryStrategy"`
+		} `json:"dns"`
 		Inbounds []struct {
 			Listen   string `json:"listen"`
 			Protocol string `json:"protocol"`
@@ -101,7 +106,8 @@ func TestPanelSocksInboundUsesProtectedDirectOutbound(t *testing.T) {
 			Protocol string `json:"protocol"`
 			Tag      string `json:"tag"`
 			Settings struct {
-				FinalRules []struct {
+				DomainStrategy string `json:"domainStrategy"`
+				FinalRules     []struct {
 					Action string   `json:"action"`
 					IP     []string `json:"ip"`
 				} `json:"finalRules"`
@@ -121,9 +127,10 @@ func TestPanelSocksInboundUsesProtectedDirectOutbound(t *testing.T) {
 		config.Inbounds[0].Protocol != "socks" || config.Inbounds[0].Settings.Auth != "password" || config.Inbounds[0].Settings.UDP {
 		t.Fatalf("unexpected rendered SOCKS5 inbound: %s", raw)
 	}
-	if len(config.Outbounds) != 2 || config.Outbounds[0].Tag != denyTag ||
+	if len(config.Outbounds) != 3 || config.Outbounds[0].Tag != denyTag || config.Outbounds[2].Tag != PanelDNSTag ||
 		config.Outbounds[1].Tag != "direct" || config.Outbounds[1].Protocol != "freedom" ||
-		len(config.Outbounds[1].Settings.FinalRules) != 1 {
+		config.Outbounds[1].Settings.DomainStrategy != "UseIPv4" || len(config.Outbounds[1].Settings.FinalRules) != 1 ||
+		config.DNS.Tag != PanelDNSTag || !slices.Equal(config.DNS.Servers, []string{PanelDNSAddress}) || config.DNS.QueryStrategy != "UseIPv4" {
 		t.Fatalf("SOCKS5 inbound does not use the expected direct outbound: %s", raw)
 	}
 	blocked := config.Outbounds[1].Settings.FinalRules[0].IP
@@ -132,8 +139,8 @@ func TestPanelSocksInboundUsesProtectedDirectOutbound(t *testing.T) {
 			t.Errorf("direct outbound does not block %s", target)
 		}
 	}
-	if len(config.Routing.Rules) != 1 || config.Routing.Rules[0].OutboundTag != "direct" ||
-		!slices.Equal(config.Routing.Rules[0].InboundTags, []string{"published-93.184.216.35:443"}) {
+	if len(config.Routing.Rules) != 2 || config.Routing.Rules[0].OutboundTag != PanelDNSTag || config.Routing.Rules[1].OutboundTag != "direct" ||
+		!slices.Equal(config.Routing.Rules[1].InboundTags, []string{"published-93.184.216.35:443"}) {
 		t.Fatalf("SOCKS5 inbound is not routed to Freedom: %s", raw)
 	}
 	ports := map[string]int{"published-93.184.216.35:443": 1080}

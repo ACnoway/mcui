@@ -7,7 +7,7 @@ trap '/usr/sbin/ip netns delete mcui-xray' EXIT
 
 coproc SLIRP {
   exec /usr/bin/unshare --mount --propagation private -- /usr/bin/slirp4netns \
-    --configure --disable-host-loopback --disable-dns \
+    --configure --disable-host-loopback \
     --enable-sandbox --ready-fd=3 --netns-type=path /run/netns/mcui-xray tap0 3>&1 1>&2
 }
 network_pid=$SLIRP_PID

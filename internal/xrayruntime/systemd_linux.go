@@ -32,7 +32,7 @@ const (
 	networkPolicyPreflight
 )
 
-var panelNetworkAllow = []string{"10.0.2.3/32", "127.0.0.0/8"}
+var panelNetworkAllow = []string{xrayconfig.PanelDNSAddress + "/32", "127.0.0.0/8"}
 var panelNetworkDeny = []string{
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
 	"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",

@@ -253,11 +253,17 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 
 func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, error) {
 	var config struct {
+		DNS struct {
+			Tag           string   `json:"tag"`
+			Servers       []string `json:"servers"`
+			QueryStrategy string   `json:"queryStrategy"`
+		} `json:"dns"`
 		Outbounds []struct {
 			Tag      string `json:"tag"`
 			Protocol string `json:"protocol"`
 			Settings struct {
-				FinalRules []struct {
+				DomainStrategy string `json:"domainStrategy"`
+				FinalRules     []struct {
 					Action string   `json:"action"`
 					IP     []string `json:"ip"`
 				} `json:"finalRules"`
@@ -288,10 +294,18 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 	if config.Inbounds == nil || (len(config.Inbounds) == 0 && len(config.Routing.Rules) != 0) {
 		return nil, nil, false, errors.New("invalid saved Xray route")
 	}
-	direct := false
+	direct, dnsOutbound := false, false
 	for _, outbound := range config.Outbounds {
+		if outbound.Tag == xrayconfig.PanelDNSTag {
+			if dnsOutbound || outbound.Protocol != "freedom" || outbound.Settings.DomainStrategy != "" || len(outbound.Settings.FinalRules) != 0 {
+				return nil, nil, false, errors.New("invalid Xray DNS outbound")
+			}
+			dnsOutbound = true
+		}
 		if outbound.Tag == "direct" {
-			if direct || outbound.Protocol != "freedom" || len(outbound.Settings.FinalRules) != 1 ||
+			if direct || outbound.Protocol != "freedom" || outbound.Settings.DomainStrategy != "UseIPv4" ||
+				config.DNS.Tag != xrayconfig.PanelDNSTag || !slices.Equal(config.DNS.Servers, []string{xrayconfig.PanelDNSAddress}) || config.DNS.QueryStrategy != "UseIPv4" ||
+				len(outbound.Settings.FinalRules) != 1 ||
 				outbound.Settings.FinalRules[0].Action != "block" ||
 				!slices.Equal(outbound.Settings.FinalRules[0].IP, xrayconfig.PanelDirectBlockedIPs()) {
 				return nil, nil, false, errors.New("invalid saved Xray direct outbound")
@@ -314,8 +328,16 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 		}
 	}
 	slices.Sort(socksTags)
-	directRules := 0
+	directRules, dnsRules := 0, 0
 	for _, rule := range config.Routing.Rules {
+		if rule.Outbound == xrayconfig.PanelDNSTag {
+			if !dnsOutbound || dnsRules != 0 || !slices.Equal(rule.Tags, []string{xrayconfig.PanelDNSTag}) ||
+				rule.Network != "udp" || !slices.Equal(rule.IP, []string{xrayconfig.PanelDNSAddress + "/32"}) || rule.Port != 53 {
+				return nil, nil, false, errors.New("invalid Xray DNS route")
+			}
+			dnsRules++
+			continue
+		}
 		if rule.Outbound == "direct" {
 			if !direct || directRules != 0 || len(rule.Tags) == 0 || rule.Network != "" || len(rule.IP) != 0 || rule.Port != 0 {
 				return nil, nil, false, errors.New("invalid saved Xray direct route")
@@ -344,7 +366,7 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 			destinations = append(destinations, rule.IP[0])
 		}
 	}
-	if direct != (directRules == 1) {
+	if direct != (directRules == 1) || direct != dnsOutbound || direct != (dnsRules == 1) {
 		return nil, nil, false, errors.New("Xray direct outbound and route do not match")
 	}
 	var published []publishedInbound
