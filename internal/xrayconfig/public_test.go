@@ -57,3 +57,11 @@ func TestPublicEndpointBindsEncryptedPlanToDedicatedLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicVLESSPlan(t *testing.T) {
+	endpoint := PublicEndpoint{Address: "93.184.216.35", Port: 443}
+	plan := Plan{{Port: 1080, Protocol: VLESS, PublicEndpoint: endpoint, Users: []string{"alice"}}}
+	if !plan.Valid() {
+		t.Fatal("public VLESS plan was rejected")
+	}
+}

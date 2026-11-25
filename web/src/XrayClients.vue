@@ -132,6 +132,18 @@ function createClient() {
   })
 }
 
+function deleteClient(client: Client) {
+  if (!confirm(`删除客户端 ${client.username}？其分享链接会立即失效，节点授权将在下发后撤销。`)) return
+  return update(async () => {
+    await props.mutate(`${path}/${client.username}/delete`, { revision: client.revision })
+    changedNodes.value = [...new Set(client.bindings.map(binding => binding.node_id))]
+    issued.value.delete(client.username)
+    for (const key of deliveries.value.keys()) {
+      if (key.startsWith(`${client.username}:`)) deliveries.value.delete(key)
+    }
+  })
+}
+
 function editBindings(client: Client) {
   error.value = ''
   editing.value = client
@@ -257,6 +269,7 @@ onActivated(refresh)
           <td>{{ formatExpiry(client.expires_at) }}</td><td><div class="actions">
             <button type="button" class="outline" :disabled="busy" @click="editBindings(client)">分配入站</button>
             <button type="button" class="outline" :disabled="busy" @click="openShares(client)">分享</button>
+            <button type="button" class="danger" :disabled="busy || loading" @click="deleteClient(client)">删除</button>
           </div></td>
         </tr></tbody>
       </table>

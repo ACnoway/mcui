@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { destinationLabel, type Destination, type Network, type Route } from './xrayManagement'
+import { destinationLabel, testRoute, type Destination, type Network, type Route } from './xrayManagement'
 
 const props = defineProps<{
   tab: 'outbound' | 'routing'
@@ -20,6 +20,27 @@ const address = ref('')
 const tcpPort = ref(443)
 const inboundPort = ref<number | ''>('')
 const outboundTag = ref('')
+const testInbound = ref<number | ''>('')
+const testAddress = ref('')
+const testPort = ref<number | ''>('')
+const testedRoute = ref<{ inbound: number; address: string; port: number } | null>(null)
+
+const validTestAddress = computed(() => {
+  const octets = testAddress.value.split('.')
+  return octets.length === 4 && octets.every(octet =>
+    /^(0|[1-9][0-9]{0,2})$/.test(octet) && Number(octet) <= 255,
+  )
+})
+const canTestRoute = computed(() => props.network && testInbound.value !== '' &&
+  props.inboundPorts.includes(testInbound.value) && validTestAddress.value &&
+  typeof testPort.value === 'number' && Number.isInteger(testPort.value) && testPort.value >= 1 && testPort.value <= 65535)
+const routeDecision = computed(() => {
+  if (!props.network || !testedRoute.value) return null
+  return testRoute(props.network, testedRoute.value.inbound, {
+    address: testedRoute.value.address,
+    port: testedRoute.value.port,
+  })
+})
 
 const outbounds = computed(() => props.network?.outbounds ?? [])
 const routes = computed(() => props.network?.routes ?? [])
@@ -48,7 +69,11 @@ const withdrawnDestinations = computed(() => outbounds.value.filter(outbound =>
 ).map(outbound => outbound.tag))
 
 watch(() => props.tab, cancelEdit)
-watch(() => props.network, cancelEdit)
+watch(() => props.network, () => {
+  cancelEdit()
+  testedRoute.value = null
+})
+watch([testInbound, testAddress, testPort], () => { testedRoute.value = null })
 
 function cancelEdit() {
   outboundIndex.value = null
@@ -113,6 +138,11 @@ function moveRoute(index: number, direction: number) {
   updated.splice(next, 0, route)
   updateRoutes(updated)
 }
+
+function runRouteTest() {
+  if (!canTestRoute.value || testInbound.value === '' || testPort.value === '') return
+  testedRoute.value = { inbound: testInbound.value, address: testAddress.value, port: testPort.value }
+}
 </script>
 
 <template>
@@ -163,6 +193,19 @@ function moveRoute(index: number, direction: number) {
       </div>
     </template>
     <template v-else>
+      <form v-if="network" class="filters" @submit.prevent="runRouteTest">
+        <label>测试入站<select v-model="testInbound" required>
+          <option value="" disabled>选择入站</option>
+          <option v-for="port in inboundPorts" :key="port" :value="port">{{ port }}</option>
+        </select></label>
+        <label>目标 IPv4<input v-model.trim="testAddress" inputmode="decimal" required /></label>
+        <label>目标 TCP 端口<input v-model.number="testPort" type="number" min="1" max="65535" required /></label>
+        <button type="submit" class="outline" :disabled="!canTestRoute">测试草稿路由</button>
+      </form>
+      <p v-if="testedRoute" class="feedback" role="status">
+        <template v-if="routeDecision">匹配第 {{ routeDecision.ruleIndex + 1 }} 条规则，使用出站 {{ routeDecision.outbound.tag }}。</template>
+        <template v-else>没有匹配的规则，使用默认拒绝出站。</template>
+      </p>
       <form v-if="routeIndex !== null" class="filters" @submit.prevent="saveRoute">
         <label>入站<select v-model="inboundPort" required :disabled="disabled" @change="outboundTag = ''">
           <option value="" disabled>选择入站</option>

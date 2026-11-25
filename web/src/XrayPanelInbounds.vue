@@ -9,7 +9,7 @@ type Inbound = { port: number; protocol?: string; users: string[]; public_endpoi
 type Client = { username: string; credential: string }
 type ClientEdit = Client & { originalUsername?: string }
 export type PanelInboundChange = { remove: true } | {
-  protocol: Protocol; clients: Client[]; destination?: Destination
+  protocol: Protocol; clients: Client[]; destination?: Destination; copy_routes_from?: number
   public_endpoint?: Destination; rotate_tls?: boolean
 }
 
@@ -17,7 +17,8 @@ const props = defineProps<{
   inbounds: Inbound[]; network: Network | null; busy: boolean
   managedBindings: { port: number; credential: string }[]
   save: (port: number, change: PanelInboundChange) => Promise<void>
-  multiClient: boolean; trojan: boolean; addresses: string[]; trust?: XraySubscription['trojan_trust']; applied: Inbound[]; revision: number
+  multiClient: boolean; trojan: boolean; publicVless: boolean; appliedVerified: boolean
+  addresses: string[]; trust?: XraySubscription['trojan_trust']; applied: Inbound[]; revision: number
 }>()
 
 const protocols: { value: Protocol; label: string }[] = [
@@ -26,7 +27,7 @@ const protocols: { value: Protocol; label: string }[] = [
   { value: 'trojan', label: 'Trojan/TLS' },
 ]
 const form = ref<{
-  port: number; editing: boolean; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
+  port: number; editing: boolean; copyFrom?: number; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
   published: boolean; publicAddress: string; publicPort: number; rotateTLS: boolean
 } | null>(null)
 const error = ref('')
@@ -60,18 +61,18 @@ function targets(port: number) {
     .flatMap(route => network.outbounds.find(outbound => outbound.tag === route.outbound_tag)?.destination ?? []) ?? []
 }
 
-function open(inbound?: Inbound) {
+function open(inbound?: Inbound, copy = false) {
   const configured = inbound ? targets(inbound.port) : []
   const existing = configured.length === 1 ? configured[0] : undefined
   const firstFree = Array.from({ length: 5 }, (_, index) => 1080 + index)
     .find(port => !props.inbounds.some(entry => entry.port === port)) ?? 1080
   form.value = {
-    editing: !!inbound, port: inbound?.port ?? firstFree,
+    editing: !!inbound && !copy, copyFrom: copy ? inbound?.port : undefined, port: copy ? firstFree : inbound?.port ?? firstFree,
     protocol: protocols.find(option => option.value === inbound?.protocol)?.value ?? '',
-    clients: inbound?.users.map(username => ({ username, credential: '', originalUsername: username })) ??
+    clients: inbound?.users.map(username => ({ username, credential: '', originalUsername: copy ? undefined : username })) ??
       [{ username: '', credential: '' }],
     address: existing?.address ?? '', targetPort: existing?.port ?? 443,
-    published: !!inbound?.public_endpoint, publicAddress: inbound?.public_endpoint?.address ?? props.addresses[0] ?? '',
+    published: !copy && !!inbound?.public_endpoint, publicAddress: inbound?.public_endpoint?.address ?? props.addresses[0] ?? '',
     publicPort: inbound?.public_endpoint?.port ?? 443, rotateTLS: false,
   }
   error.value = ''
@@ -95,8 +96,9 @@ async function submit() {
   try {
     await props.save(draft.port, {
       protocol: draft.protocol, clients: draft.clients.map(({ username, credential }) => ({ username, credential })),
-      destination: draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
-      public_endpoint: draft.protocol === 'trojan' && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
+      destination: !draft.copyFrom && draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
+      copy_routes_from: draft.copyFrom,
+      public_endpoint: (draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
       rotate_tls: draft.protocol === 'trojan' && draft.rotateTLS ? true : undefined,
     })
     form.value = null
@@ -115,9 +117,9 @@ function downloadFile(contents: string, type: string, filename: string) {
 }
 
 function appliedPublic(port: number) {
-  if (!props.trust) return undefined
-  return props.applied.find(entry => entry.port === port && entry.protocol === 'trojan' &&
-    entry.public_endpoint && entry.tls_cert_sha256 === props.trust?.sha256)
+  if (!props.appliedVerified) return undefined
+  return props.applied.find(entry => entry.port === port && entry.public_endpoint &&
+    (entry.protocol === 'vless' || (entry.protocol === 'trojan' && props.trust && entry.tls_cert_sha256 === props.trust.sha256)))
 }
 
 function openDownload(port: number) {
@@ -131,6 +133,7 @@ function downloadClient() {
   const { inbound, username, localPort, password } = dialog
   const active = appliedPublic(inbound.port)
   if (!active?.public_endpoint || dialog.revision !== props.revision || !active.users.includes(username) ||
+      active.protocol !== inbound.protocol ||
       destinationLabel(active.public_endpoint) !== destinationLabel(inbound.public_endpoint!) ||
       active.tls_cert_sha256 !== inbound.tls_cert_sha256) {
     dialog.error = '生效入站已变化，请重新打开客户端配置。'
@@ -139,8 +142,10 @@ function downloadClient() {
   try {
     const metadata: XraySubscription = {
       schema_version: 4, username, address: '127.0.0.1', ports: [active.port],
-      port_protocols: { [active.port]: 'trojan' }, public_endpoints: { [active.port]: active.public_endpoint },
-      trojan_trust: props.trust, revision: props.revision, expires_at: Math.floor(Date.now() / 1000) + 60,
+      port_protocols: { [active.port]: active.protocol === 'trojan' ? 'trojan' : 'vless' },
+      public_endpoints: { [active.port]: active.public_endpoint },
+      ...(active.protocol === 'trojan' ? { trojan_trust: props.trust } : {}),
+      revision: props.revision, expires_at: Math.floor(Date.now() / 1000) + 60,
     }
     const config = buildXrayClient(metadata, active.port, localPort, password)
     downloadFile(JSON.stringify(config, null, 2), 'application/json', 'xray-client.json')
@@ -177,6 +182,7 @@ async function remove(port: number) {
         <td>{{ targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
         <td><div class="actions">
           <button type="button" class="outline" :disabled="busy" @click="open(inbound)">编辑</button>
+          <button type="button" class="outline" :disabled="busy || inbounds.length >= 4" @click="open(inbound, true)">复制</button>
           <button v-if="!centrallyBound(inbound.port)" type="button" class="quiet" :disabled="busy" @click="remove(inbound.port)">删除</button>
           <button v-if="appliedPublic(inbound.port)" type="button" class="outline" @click="openDownload(inbound.port)">客户端配置</button>
         </div></td>
@@ -185,7 +191,7 @@ async function remove(port: number) {
   </div>
   <p v-else class="empty">暂无入站。</p>
 
-  <PanelDialog v-if="form" :title="form.editing ? `编辑入站 · ${form.port}` : '添加入站'" @close="form = null">
+  <PanelDialog v-if="form" :title="form.editing ? `编辑入站 · ${form.port}` : form.copyFrom ? `复制入站 · ${form.copyFrom}` : '添加入站'" @close="form = null">
     <form @submit.prevent="submit">
       <label>协议 <select v-model="form.protocol" :disabled="form.editing && centrallyBound(form.port)" @change="form.clients.forEach(client => client.credential = '')">
         <option v-for="protocol in protocols.filter(option => trojan || option.value !== 'trojan')" :key="protocol.value" :value="protocol.value">{{ protocol.label }}</option>
@@ -209,8 +215,9 @@ async function remove(port: number) {
       <div v-if="multiClient && form.clients.length < 8" class="actions">
         <button type="button" class="outline" :disabled="busy" @click="form.clients.push({ username: '', credential: '' })">添加客户端</button>
       </div>
-      <template v-if="form.protocol === 'trojan'">
+      <template v-if="form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
+        <p v-if="form.protocol === 'vless' && form.published" class="feedback">此 VLESS 入口使用明文 RAW TCP，请在可信网络或受保护的传输通道中使用。</p>
         <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
         <template v-if="form.published">
           <label>宿主公网 IPv4 <select v-model="form.publicAddress" required>
@@ -219,11 +226,12 @@ async function remove(port: number) {
           </select></label>
           <label>公网 TCP 端口 <input v-model.number="form.publicPort" type="number" min="1" max="65535" required /></label>
         </template>
-        <label v-if="inbounds.some(entry => entry.protocol === 'trojan')">
+        <label v-if="form.protocol === 'trojan' && inbounds.some(entry => entry.protocol === 'trojan')">
           <input v-model="form.rotateTLS" type="checkbox" /> 轮换此节点主控入站共用的 TLS 证书
         </label>
       </template>
-      <p v-if="form.editing && targets(form.port).length > 1">此入站有多条放行规则。到「路由」编辑目标和顺序。</p>
+      <p v-if="form.copyFrom">复制源入站的路由。请为新端口生成并保存各客户端凭据。</p>
+      <p v-else-if="form.editing && targets(form.port).length > 1">此入站有多条放行规则。到「路由」编辑目标和顺序。</p>
       <template v-else>
         <label>允许的目标 IPv4 <input v-model.trim="form.address" inputmode="decimal" placeholder="留空拒绝全部" /></label>
         <label>目标 TCP 端口 <input v-model.number="form.targetPort" type="number" min="1" max="65535" :required="!!form.address" :disabled="!form.address" /></label>
@@ -235,13 +243,13 @@ async function remove(port: number) {
     </form>
   </PanelDialog>
 
-  <PanelDialog v-if="download" title="下载生效的 Trojan 客户端配置" @close="download = null">
+  <PanelDialog v-if="download" title="下载生效的客户端配置" @close="download = null">
     <form @submit.prevent="downloadClient">
       <p>{{ destinationLabel(download.inbound.public_endpoint!) }}</p>
       <label>客户端 <select v-model="download.username" @change="download.password = ''">
         <option v-for="user in download.inbound.users" :key="user" :value="user">{{ user }}</option>
       </select></label>
-      <label>客户端密码 <input v-model="download.password" type="password" autocomplete="off" required /></label>
+      <label>{{ download.inbound.protocol === 'vless' ? '客户端 UUID' : '客户端密码' }} <input v-model="download.password" type="password" autocomplete="off" required /></label>
       <label>本地 SOCKS5 端口 <input v-model.number="download.localPort" type="number" min="1024" max="65535" required /></label>
       <p v-if="download.error" class="notice" role="alert">{{ download.error }}</p>
       <div class="actions"><button type="submit">下载 Xray 配置</button></div>

@@ -45,6 +45,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 		statsGroup, view.PanelStatistics = statisticsGroup()
 		if network, ok := r.service.(panelNetworkService); ok {
 			view.PanelTrojan = true
+			view.PanelPublicVLESS = true
 			view.PanelAddresses, _ = network.panelAddresses()
 		}
 		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil && plan.Panel != nil &&
@@ -293,9 +294,9 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, error) {
 		if inbound.Listen == "127.0.0.1" && !ok {
 			continue
 		}
-		encrypted := (inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
-			(inbound.Protocol == xrayconfig.VLESS && inbound.Stream.Security == "reality")
-		if inbound.Listen != xrayconfig.PublicListenAddress || !ok || !encrypted || inbound.Port < 1024 || inbound.Port > 65535 {
+		supported := (inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
+			(inbound.Protocol == xrayconfig.VLESS && (inbound.Stream.Security == "reality" || inbound.Stream.Security == ""))
+		if inbound.Listen != xrayconfig.PublicListenAddress || !ok || !supported || inbound.Port < 1024 || inbound.Port > 65535 {
 			return nil, nil, errors.New("invalid saved Xray public listener")
 		}
 		published = append(published, publishedInbound{port: inbound.Port, endpoint: endpoint})

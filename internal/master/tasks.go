@@ -808,6 +808,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		Routing:          query.Get("xray_routing") == "v1",
 		PanelInbounds:    query.Get("xray_panel_inbounds") == "v1",
 		PanelTrojan:      query.Get("xray_panel_trojan") == "v1",
+		PublicVLESS:      query.Get("xray_public_vless") == "v1",
 		PanelMultiClient: query.Get("xray_panel_multi_client") == "v1",
 		PanelMultiRoute:  query.Get("xray_panel_multi_route") == "v1",
 		PanelStatistics:  query.Get("xray_panel_statistics") == "v1",

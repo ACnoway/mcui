@@ -165,7 +165,7 @@ func (c Catalog) Valid() bool {
 	}
 	endpoints := make(map[PublicEndpoint]bool)
 	for port, endpoint := range c.PublicEndpoints {
-		if !Publishable(c.PortProtocols[port]) || !endpoint.Valid() || endpoints[endpoint] {
+		if !Publishable(c.PortProtocols[port]) || c.PortProtocols[port] == VLESS || !endpoint.Valid() || endpoints[endpoint] {
 			return false
 		}
 		endpoints[endpoint] = true

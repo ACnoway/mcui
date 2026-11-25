@@ -45,7 +45,7 @@ type PanelXrayOptions = {
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
     catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
-    panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean
+    panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean; panel_public_vless?: boolean
     panel_multi_route?: boolean
     panel_statistics?: boolean; statistics_active?: boolean
   }
@@ -936,6 +936,25 @@ async function saveXrayDraft(statistics?: boolean) {
   }
 }
 
+async function resetXrayTraffic(key: string, counter: { up: number; down: number }) {
+  const node = selectedNode.value
+  const options = panelXray.value
+  if (!node || !options?.traffic || !options.current.config_revision || xrayDraftSaving.value) return
+  if (!confirm(`清零此节点的 ${trafficScopeNames[key.split(':')[0]]} ${key.split(':')[1]} 流量？`)) return
+  xrayDraftSaving.value = true
+  panelXrayError.value = ''
+  try {
+    await apiWithStepUp(panelXrayPath(node.id) + '/traffic/reset', {
+      key, revision: options.current.config_revision, sampled_at: options.traffic.at_ms, expected: counter,
+    })
+    await loadPanelXray(node.id)
+  } catch (e) {
+    panelXrayError.value = e instanceof Error ? e.message : '清零流量失败'
+  } finally {
+    xrayDraftSaving.value = false
+  }
+}
+
 async function savePanelInbound(port: number, change: PanelInboundChange) {
   const node = selectedNode.value
   const options = panelXray.value
@@ -1384,6 +1403,7 @@ onMounted(async () => {
           <p v-if="panelXray.panel_inbounds && draftTab === 'inbound' && xrayDraftDirty" class="feedback">编辑入站前，请保存或放弃未保存的路由和出站修改。</p>
           <XrayPanelInbounds v-if="panelXray.panel_inbounds && draftTab === 'inbound'" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
             :multi-client="!!panelXray.current.panel_multi_client"
+            :public-vless="!!panelXray.current.panel_public_vless" :applied-verified="appliedConfigVerified"
             :network="panelXray.draft_network ?? null" :busy="draftDisabled || xrayDraftDirty" :save="savePanelInbound"
             :managed-bindings="panelXray.managed_bindings ?? []"
             :trojan="!!panelXray.current.panel_trojan" :addresses="panelXray.current.panel_addresses ?? []"
@@ -1477,12 +1497,14 @@ onMounted(async () => {
               </p>
               <div v-if="Object.keys(panelXray.traffic.totals).length" class="table-wrap">
                 <table class="data-table" aria-label="当前节点流量">
-                  <thead><tr><th scope="col">范围</th><th scope="col">标识</th><th scope="col">上行（字节）</th><th scope="col">下行（字节）</th></tr></thead>
+                  <thead><tr><th scope="col">范围</th><th scope="col">标识</th><th scope="col">上行（字节）</th><th scope="col">下行（字节）</th><th scope="col">操作</th></tr></thead>
                   <tbody><tr v-for="(counter, key) in panelXray.traffic.totals" :key="key">
                     <td>{{ trafficScopeNames[key.split(':')[0]] }}</td>
                     <th scope="row">{{ key.split(':')[1] }}</th>
                     <td>{{ byteFormat.format(counter.up) }}</td>
                     <td>{{ byteFormat.format(counter.down) }}</td>
+                    <td><button type="button" class="quiet" :disabled="xrayDraftSaving || (!counter.up && !counter.down)"
+                      @click="resetXrayTraffic(key, counter)">清零</button></td>
                   </tr></tbody>
                 </table>
               </div>

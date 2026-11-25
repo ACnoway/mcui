@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/xraytraffic"
 )
 
@@ -133,5 +134,47 @@ func TestXrayTrafficSurvivesNodeUpdates(t *testing.T) {
 	usage, err := s.XrayTraffic(ctx, id)
 	if err != nil || usage.Totals[key] != (xraytraffic.Bytes{Up: 12, Down: 34}) {
 		t.Fatalf("node update lost or changed usage: %+v (%v)", usage, err)
+	}
+}
+
+func TestXrayTrafficResetPreservesBaseline(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "reset.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	if err := s.Update(func(st *State) error {
+		st.Nodes["node"] = Node{ID: "node", TokenHash: "token", Inventory: &lifecycleauth.NodeInventory{
+			Xray: &lifecycleauth.XrayInventory{StatisticsActive: true, ConfigRevision: 1},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sample := xraytraffic.Sample{Revision: 1, Epoch: strings.Repeat("a", 64), At: 100,
+		Counters: map[string]xraytraffic.Bytes{"user:alice": {Up: 10, Down: 20}, "user:bob": {Up: 5, Down: 8}}}
+	if err := s.RecordXrayTraffic(ctx, "node", "token", sample); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResetXrayTraffic(ctx, "node", "admin", "user:alice", 1, 100, sample.Counters["user:alice"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResetXrayTraffic(ctx, "node", "admin", "user:alice", 1, 100, sample.Counters["user:alice"]); !errors.Is(err, ErrXrayTrafficChanged) {
+		t.Fatalf("retry reset accepted: %v", err)
+	}
+	sample.At = 101
+	sample.Counters["user:alice"] = xraytraffic.Bytes{Up: 13, Down: 24}
+	if err := s.RecordXrayTraffic(ctx, "node", "token", sample); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := s.XrayTraffic(ctx, "node")
+	if err != nil || usage.Totals["user:alice"] != (xraytraffic.Bytes{Up: 3, Down: 4}) ||
+		usage.Totals["user:bob"] != (xraytraffic.Bytes{Up: 5, Down: 8}) {
+		t.Fatalf("reset lost baseline or changed another user: %+v (%v)", usage, err)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_logs WHERE action = 'xray.traffic.reset'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("reset audit count %d (%v)", count, err)
 	}
 }

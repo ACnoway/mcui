@@ -27,7 +27,7 @@ func (e PublicEndpoint) String() string {
 }
 
 func Publishable(protocol string) bool {
-	return protocol == Trojan || protocol == VLESSReality
+	return protocol == Trojan || protocol == VLESSReality || protocol == VLESS
 }
 
 // PublishedEndpoint reads the public endpoint bound into an Xray inbound tag.

@@ -66,7 +66,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
     if (!published.length || published.some(([key, endpoint]) => {
       const port = Number(key)
       const protocol = port_protocols[port]
-      if (String(port) !== key || !ports.includes(port) || (protocol !== 'trojan' && protocol !== 'vless-reality') ||
+      if (String(port) !== key || !ports.includes(port) || (protocol !== 'trojan' && protocol !== 'vless-reality' && protocol !== 'vless') ||
         !validPublishedEndpoint(endpoint)) return true
       const address = `${endpoint.address}:${endpoint.port}`
       if (seen.has(address)) return true

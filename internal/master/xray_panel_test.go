@@ -798,6 +798,32 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		direct.PanelMultiRoute = true
 		heartbeat(&direct)
 		expect(saveNetwork(config.Inbounds, network), http.StatusOK)
+		copyChange := panelInboundChange{
+			State: options(), Protocol: xrayconfig.Trojan, CopyRoutesFrom: 1080,
+			Clients: []panelInboundClient{{Username: "alice", Credential: strings.Repeat("I", 43)},
+				{Username: "bob", Credential: strings.Repeat("M", 43)}},
+		}
+		copyInbound := func(change panelInboundChange) *httptest.ResponseRecorder {
+			return subscriptionAdmin(http.MethodPut, "https://panel.example.test"+path+"/inbounds/1081", client.csrf, change)
+		}
+		expect(copyInbound(copyChange), http.StatusOK)
+		copiedNode, err := s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copied, err := xrayconfig.ParseConfiguration(copiedNode.XrayDraft)
+		if err != nil || len(copied.Inbounds) != 2 || len(copied.Network.Routes) != 4 ||
+			copied.Network.Routes[2] != (xrayconfig.Route{InboundPort: 1081, OutboundTag: "primary"}) ||
+			copied.Network.Routes[3] != (xrayconfig.Route{InboundPort: 1081, OutboundTag: "spare"}) ||
+			copied.Panel.Credentials[0] == copied.Panel.Credentials[2] {
+			t.Fatalf("copied inbound did not preserve routes and independent credentials: %v", err)
+		}
+		if _, _, err := copied.RenderPanel(private); err != nil {
+			t.Fatalf("copied credentials did not decrypt on the new port: %v", err)
+		}
+		copyChange.State = options()
+		expect(copyInbound(copyChange), http.StatusConflict)
+		expect(copyInbound(panelInboundChange{State: options(), Remove: true}), http.StatusOK)
 		change.State, change.Destination = options(), xrayconfig.Destination{}
 		change.Clients[0].Credential = ""
 		expect(write(client.csrf), http.StatusOK)
@@ -920,6 +946,20 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 			!strings.Contains(trafficReply.Body.String(), `"user_statistics":"SAMPLED"`) ||
 			!strings.Contains(trafficReply.Body.String(), `"exact_quota":"UNSUPPORTED"`) {
 			t.Fatal("sample retry changed observed bytes or enabled exact quotas")
+		}
+		resetBody := map[string]any{"key": "user:alice", "revision": issued.Sequence, "sampled_at": sample.At,
+			"expected": sample.Counters["user:alice"]}
+		resetURL := "https://panel.example.test" + path + "/traffic/reset"
+		expect(subscriptionAdmin(http.MethodPost, resetURL, "", resetBody), http.StatusForbidden)
+		expect(subscriptionAdmin(http.MethodPost, resetURL, client.csrf, resetBody), http.StatusOK)
+		expect(subscriptionAdmin(http.MethodPost, resetURL, client.csrf, resetBody), http.StatusConflict)
+		sample.At++
+		sample.Counters["user:alice"] = xraytraffic.Bytes{Up: 13, Down: 24}
+		expect(reportStats(sample), http.StatusOK)
+		trafficReply = admin(http.MethodGet, nil, "")
+		expect(trafficReply, http.StatusOK)
+		if !strings.Contains(trafficReply.Body.String(), `"user:alice":{"up":3,"down":4}`) {
+			t.Fatal("traffic reset failed to retain the Xray sampling baseline")
 		}
 		reportedTrust := func() *xrayconfig.TrojanTrust {
 			r := admin(http.MethodGet, nil, "")
@@ -1082,6 +1122,18 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || !slices.Equal(extended.Inbounds[0].Users, []string{"bob", "charlie"}) ||
 			extended.Panel.Credentials[0] != revoked.Panel.Credentials[0] {
 			t.Fatalf("adding a client altered another credential: %v", err)
+		}
+		expect(central(http.MethodPost, "/charlie/delete", map[string]any{"revision": 1}), http.StatusConflict)
+		expect(central(http.MethodPost, "/charlie/delete", map[string]any{"revision": 2}), http.StatusOK)
+		expect(fetch(aggregateURL, added.Deliveries[0].Token, ""), http.StatusNotFound)
+		registered, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deleted, err := xrayconfig.ParseConfiguration(registered.XrayDraft)
+		if err != nil || !slices.Equal(deleted.Inbounds[0].Users, []string{"bob"}) ||
+			!reflect.DeepEqual(deleted.Network, network) {
+			t.Fatalf("client deletion changed another user or routes: %v", err)
 		}
 	})
 	if err := s.ReconcileTaskRuntime(); err != nil {

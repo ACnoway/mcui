@@ -132,7 +132,7 @@
 
 当前目标是节点只执行一次 Agent 安装命令。随后从主控安装 Core，添加和应用入站，管理客户端凭据、订阅、出站与路由，并执行日常升级和恢复。面板的保存操作发起后台签发、节点预检与应用，显示节点实际应用状态。验收在干净节点上执行一次接入，之后通过主控跑通连接、撤销、重启、回滚和远程升级。
 
-- [ ] 扩展 Agent 安装器与节点管理能力。新 Debian amd64 节点可由主控定义回环 SOCKS5、HTTP、VLESS、VMess 和 Trojan/TLS 入站，也可开通和撤销 Trojan/TLS 公网监听。主控定义模式支持跨节点订阅、凭据交付和受控路由。已提供维护窗口迁移入口和首次接入时的 Agent/Helper 成对更新初始化。 [安装包构建](./phase-1-operations.md#构建包含-xray-引导的安装包) · [主控入站](./phase-4-xray-inbound.md#从主控添加入站)
+- [ ] 扩展 Agent 安装器与节点管理能力。新 Debian amd64 节点可由主控定义回环 SOCKS5、HTTP、VLESS、VMess 和 Trojan/TLS 入站，也可开通和撤销 Trojan/TLS 与 VLESS RAW 公网监听。主控定义模式支持跨节点订阅、凭据交付和受控路由。已提供维护窗口迁移入口和首次接入时的 Agent/Helper 成对更新初始化。 [安装包构建](./phase-1-operations.md#构建包含-xray-引导的安装包) · [主控入站](./phase-4-xray-inbound.md#从主控添加入站)
 
 - [x] 为 Xray `v26.10.31` 的首个受控 SOCKS5 模板接入双签名配置修订、节点本地语义校验、低权限预检、切换、对账和 LKG 回滚。[受控入站部署](./phase-4-xray-inbound.md)
 - [x] 在面板保存受控 SOCKS5 端口与用户授权草稿，查看节点已应用配置和候选，复用 MFA、精确签发和回滚。凭据由节点 root 创建和轮换。[面板管理](./phase-4-xray-inbound.md#面板管理入站与授权)

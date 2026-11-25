@@ -12,15 +12,16 @@ import (
 )
 
 type panelInboundChange struct {
-	State       string                    `json:"state"`
-	Remove      bool                      `json:"remove,omitempty"`
-	Protocol    string                    `json:"protocol,omitempty"`
-	Username    string                    `json:"username,omitempty"`
-	Credential  string                    `json:"credential,omitempty"`
-	Clients     []panelInboundClient      `json:"clients,omitempty"`
-	Destination xrayconfig.Destination    `json:"destination,omitzero"`
-	Public      xrayconfig.PublicEndpoint `json:"public_endpoint,omitzero"`
-	RotateTLS   bool                      `json:"rotate_tls,omitempty"`
+	State          string                    `json:"state"`
+	Remove         bool                      `json:"remove,omitempty"`
+	Protocol       string                    `json:"protocol,omitempty"`
+	Username       string                    `json:"username,omitempty"`
+	Credential     string                    `json:"credential,omitempty"`
+	Clients        []panelInboundClient      `json:"clients,omitempty"`
+	CopyRoutesFrom int                       `json:"copy_routes_from,omitempty"`
+	Destination    xrayconfig.Destination    `json:"destination,omitzero"`
+	Public         xrayconfig.PublicEndpoint `json:"public_endpoint,omitzero"`
+	RotateTLS      bool                      `json:"rotate_tls,omitempty"`
 }
 
 type panelInboundClient struct {
@@ -149,9 +150,11 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 	port, err := strconv.Atoi(r.PathValue("port"))
 	if err != nil || strconv.Itoa(port) != r.PathValue("port") || port < 1024 || port > 65535 ||
 		readJSON(r, &in) != nil || len(in.State) != 64 ||
-		(in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}))) ||
+		(in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0)) ||
+		(in.CopyRoutesFrom != 0 && (in.CopyRoutesFrom < 1024 || in.CopyRoutesFrom > 65535 || in.CopyRoutesFrom == port || in.Destination != (xrayconfig.Destination{}))) ||
 		(in.Clients != nil && (len(in.Clients) < 1 || len(in.Clients) > xrayconfig.MaxInboundUsers || in.Username != "" || in.Credential != "")) ||
-		(in.Protocol != xrayconfig.Trojan && (in.RotateTLS || in.Public != (xrayconfig.PublicEndpoint{}))) {
+		(in.Protocol != xrayconfig.Trojan && in.RotateTLS) ||
+		(in.Protocol != xrayconfig.Trojan && in.Protocol != xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{})) {
 		http.Error(w, "invalid panel Xray inbound", http.StatusBadRequest)
 		return
 	}
@@ -191,8 +194,9 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 			if err := checkXrayDraftReservation(st, nodeID, now); err != nil {
 				return err
 			}
-			if in.Protocol == xrayconfig.Trojan && (!inv.Xray.PanelTrojan ||
-				(in.Public != (xrayconfig.PublicEndpoint{}) && (!in.Public.Valid() || !slices.Contains(inv.Xray.PanelAddresses, in.Public.Address)))) {
+			if in.Protocol == xrayconfig.Trojan && !inv.Xray.PanelTrojan ||
+				in.Protocol == xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{}) && !inv.Xray.PanelPublicVLESS ||
+				in.Public != (xrayconfig.PublicEndpoint{}) && (!in.Public.Valid() || !slices.Contains(inv.Xray.PanelAddresses, in.Public.Address)) {
 				return lifecycleauth.ErrDenied
 			}
 			if node.XrayPanelKey == "" && (inv.Xray.ConfigRevision != 0 || len(clientBindingsForNode(st, nodeID)) != 0) {
@@ -217,6 +221,11 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			index := slices.IndexFunc(entries, func(entry panelInbound) bool { return entry.Inbound.Port == port })
+			if in.CopyRoutesFrom != 0 && (index >= 0 || !slices.ContainsFunc(entries, func(entry panelInbound) bool {
+				return entry.Inbound.Port == in.CopyRoutesFrom
+			})) {
+				return errXrayInventory
+			}
 			var previous panelInbound
 			if index >= 0 {
 				previous = entries[index]
@@ -261,7 +270,18 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 						routes++
 					}
 				}
-				if routes <= 1 {
+				if in.CopyRoutesFrom != 0 {
+					var copies []xrayconfig.Route
+					for _, route := range network.Routes {
+						if route.InboundPort == in.CopyRoutesFrom {
+							copies = append(copies, xrayconfig.Route{InboundPort: port, OutboundTag: route.OutboundTag})
+						}
+					}
+					if len(copies) > 1 && !inv.Xray.PanelMultiRoute {
+						return errXrayInventory
+					}
+					network.Routes = append(network.Routes, copies...)
+				} else if routes <= 1 {
 					updatePanelInboundRoute(network, port, in.Destination)
 				} else if in.Destination != (xrayconfig.Destination{}) {
 					return errXrayInventory

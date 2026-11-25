@@ -109,6 +109,7 @@ func (c *Client) processStatusTask(state localState) error {
 			if c.xrayInstallMode != "xray-v1" {
 				endpoint += "&xray_plan=v1&xray_http=v1&xray_protocols=v1&xray_trojan_tls=v1&xray_reality=v1&xray_public=v1&xray_routing=v1&xray_panel_inbounds=v1&xray_panel_trojan=v1"
 				endpoint += "&xray_panel_multi_client=v1&xray_panel_multi_route=v1&xray_panel_statistics=v1"
+				endpoint += "&xray_public_vless=v1"
 			}
 		}
 	}

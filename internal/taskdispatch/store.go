@@ -75,6 +75,7 @@ type XrayDeliveryCapabilities struct {
 	Routing          bool
 	PanelInbounds    bool
 	PanelTrojan      bool
+	PublicVLESS      bool
 	PanelMultiClient bool
 	PanelMultiRoute  bool
 	PanelStatistics  bool
@@ -114,6 +115,9 @@ func (c XrayDeliveryCapabilities) supportsTask(task lifecycleauth.InstallTask) b
 		return false
 	}
 	for _, inbound := range plan.Inbounds {
+		if inbound.Protocol == xrayconfig.VLESS && inbound.PublicEndpoint != (xrayconfig.PublicEndpoint{}) && !c.PublicVLESS {
+			return false
+		}
 		if plan.Panel != nil && len(inbound.Users) > 1 && !c.PanelMultiClient {
 			return false
 		}

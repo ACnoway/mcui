@@ -131,6 +131,13 @@ func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 	}
 	if i.PanelKey != "" {
 		plan, err := xrayconfig.ParseConfiguration(draft)
+		if err == nil && !i.PanelPublicVLESS {
+			for _, inbound := range plan.Inbounds {
+				if inbound.Protocol == xrayconfig.VLESS && inbound.PublicEndpoint != (xrayconfig.PublicEndpoint{}) {
+					return false
+				}
+			}
+		}
 		return err == nil && plan.Panel != nil && (!plan.Panel.Statistics || i.PanelStatistics) &&
 			(i.PanelMultiRoute || !plan.Network.HasMultipleRoutes()) && xrayDraftPreviewed(i, draft)
 	}
