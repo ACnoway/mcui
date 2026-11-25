@@ -3,19 +3,76 @@ package master
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ACnoway/mcui/internal/store"
 )
+
+func TestInstallCommandOneLineAndVerifyBeforeExecution(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("shell execution requires Linux")
+	}
+	dir := t.TempDir()
+	installer := filepath.Join(dir, "installer")
+	result := filepath.Join(dir, "result")
+	contents := []byte("#!/bin/bash\nread -r code\nprintf '%s\\n' \"$code\" \"$@\" >\"$RESULT\"\n")
+	if err := os.WriteFile(installer, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the download while retaining the real checksum and shell execution.
+	curl := "#!/bin/sh\nwhile [ \"$1\" != --output ]; do shift; done\ncp -- \"$INSTALLER\" \"$2\"\n"
+	for name, script := range map[string]string{"curl": curl, "id": "#!/bin/sh\necho 0\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest := sha256.Sum256(contents)
+	i := agentInstaller{masterURL: "https://master.example.com", url: "https://example.com/install.sh", sha256: fmt.Sprintf("%x", digest)}
+	run := func() error {
+		command := i.command("node-1", "one-time-code", false)
+		if strings.ContainsAny(command, "\r\n") {
+			t.Fatal("installation command spans multiple lines")
+		}
+		cmd := exec.Command("/bin/bash", "-c", command)
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "INSTALLER="+installer, "RESULT="+result)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("command output: %s", output)
+		}
+		return err
+	}
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(result)
+	if err != nil || string(got) != "one-time-code\n--master\nhttps://master.example.com\n--node-id\nnode-1\n" {
+		t.Fatalf("unexpected installer input: %q, %v", got, err)
+	}
+	if err := os.Remove(result); err != nil {
+		t.Fatal(err)
+	}
+	i.sha256 = strings.Repeat("0", 64)
+	if err := run(); err == nil {
+		t.Fatal("checksum mismatch succeeded")
+	}
+	if _, err := os.Stat(result); !os.IsNotExist(err) {
+		t.Fatal("installer ran despite checksum mismatch")
+	}
+}
 
 func TestAgentInstallCommandIncludesExplicitTaskTrust(t *testing.T) {
 	s, _ := testServer(t)

@@ -123,31 +123,19 @@ func (i agentInstaller) command(nodeID, installCode string, preserve bool) strin
 	if i.coreKeyID != "" {
 		trustFlags += " --core-key-id " + shellQuote(i.coreKeyID) + " --core-public-key " + shellQuote(base64.StdEncoding.EncodeToString(i.coreKey))
 	}
-	return fmt.Sprintf(`(
-  set +x
-  set -eu
-  umask 077
-  as_root() {
-    if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -- "$@"; fi
-  }
-  if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
-    printf 'Run this command as root or install sudo.\n' >&2
-    exit 1
-  fi
-  if ! command -v curl >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
-    if [ ! -f /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1; then
-      printf 'Install curl and the system CA certificates first.\n' >&2
-      exit 1
-    fi
-    as_root apt-get update
-    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
-  fi
-  tmp=$(mktemp -d)
-  trap 'rm -rf -- "$tmp"' EXIT
-  curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --output "$tmp/install.sh" -- %s
-  printf '%%s  %%s\n' %s "$tmp/install.sh" | sha256sum --check --status
-  printf '%%s\n' %s | as_root /bin/bash "$tmp/install.sh" --master %s --node-id %s%s%s
-)`, shellQuote(i.url), shellQuote(i.sha256), shellQuote(installCode), shellQuote(i.masterURL), shellQuote(nodeID), stateFlag, trustFlags)
+	command := strings.Join([]string{
+		`( set +x; set -eu; umask 077;`,
+		`as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -- "$@"; fi; };`,
+		`if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then printf 'Run this command as root or install sudo.\n' >&2; exit 1; fi;`,
+		`if ! command -v curl >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then`,
+		`if [ ! -f /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1; then printf 'Install curl and the system CA certificates first.\n' >&2; exit 1; fi;`,
+		`as_root apt-get update; as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates; fi;`,
+		`tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT;`,
+		`curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --output "$tmp/install.sh" -- %s;`,
+		`printf '%%s  %%s\n' %s "$tmp/install.sh" | sha256sum --check --status;`,
+		`printf '%%s\n' %s | as_root /bin/bash "$tmp/install.sh" --master %s --node-id %s%s%s )`,
+	}, " ")
+	return fmt.Sprintf(command, shellQuote(i.url), shellQuote(i.sha256), shellQuote(installCode), shellQuote(i.masterURL), shellQuote(nodeID), stateFlag, trustFlags)
 }
 
 func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {

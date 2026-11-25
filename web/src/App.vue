@@ -525,11 +525,6 @@ function openCoreInstallation(node: NodeRecord) {
   openCore(node)
 }
 
-function shareNode(node: NodeRecord) {
-  clientNodeFilter.value = node.id
-  page.value = 'clients'
-}
-
 function configureClientNode(id: string) {
   const node = nodes.value.find(node => node.id === id)
   if (!node) return
@@ -1353,7 +1348,6 @@ onMounted(async () => {
                 <td><div class="actions">
                   <button v-if="admin?.can_manage_xray || admin?.can_prepare_xray_installs" type="button" class="outline" @click="openCore(node)">管理 Core</button>
                   <button v-if="admin?.can_manage_xray && !node.disabled" type="button" class="quiet" @click="openPage('config', node)">代理配置</button>
-                  <button v-if="admin?.can_manage_xray && !node.disabled" type="button" class="quiet" @click="shareNode(node)">分享</button>
                   <button v-if="admin?.can_install_agents && !node.disabled" type="button" class="quiet"
                     :disabled="generatingCommand" @click="generateInstallCommand(node)">生成安装命令</button>
                   <button v-if="admin?.can_disable_nodes && !node.disabled" type="button" class="danger" @click="disableNode(node.id)">禁用</button>
