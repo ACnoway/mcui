@@ -87,13 +87,13 @@ jobs:
       - name: Publish GitHub Release with installers and Compose files
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ steps.channel.outputs.value }}
         working-directory: ${{ runner.temp }}/mcui-release
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             install-mcui-agent.sh install-mcui-master.sh compose.yaml compose.https.yaml SHA256SUMS
-          channel=$(bash scripts/release-channel.sh "$RELEASE_TAG")
-          if [[ "$channel" == stable ]]; then
+          if [[ "$RELEASE_CHANNEL" == stable ]]; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --latest
           else
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --prerelease --latest=false
