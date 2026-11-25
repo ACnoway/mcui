@@ -17,7 +17,7 @@ SOCKS5 使用隔离网络内的 slirp4netns DNS 转发器解析 IPv4 域名，�
 
 可用 `curl --socks5-hostname <节点公网IPv4>:<公网端口> --proxy-user '<用户名>:<密码>' https://example.com/` 验证域名代理；在可信终端执行，避免泄露凭据。失败时先检查节点心跳、Core 安装及配置任务、NTS 同步、DNS、云安全组和宿主防火墙，再检查 `mcui-xray-network.service` 与 `mcui-xray.service` 的日志。
 
-2026-11-25 在 `ro` 的 Linux amd64 临时检出验证本轮 SOCKS5 修复：`scripts/check-static.sh` 通过；使用 SHA-256 核对为 `e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214` 的官方 Xray `v26.10.31`，在隔离命名空间验证认证、IPv4 和域名转发，以及阻止连接可达的模拟元数据地址。另以 slirp4netns 1.2.1 和同一生成配置，通过 SOCKS5 域名请求取得公网 HTTPS 响应。本轮真实网络验证针对 SOCKS 数据面；节点接入、Core 安装和签名下发仍由现有集成测试及上文历史验收覆盖。
+2026-11-25 在 `ro` 的 Linux amd64 临时检出验证本轮 SOCKS5 修复：`scripts/check-static.sh` 通过；使用 SHA-256 核对为 `e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214` 的官方 Xray `v26.10.31`，在隔离命名空间验证认证、IPv4 和域名转发，以及阻止连接可达的模拟元数据地址。另以 slirp4netns 1.2.1 和同一生成配置，通过 SOCKS5 域名请求取得公网 HTTPS 响应；以临时 systemd 单元核对地址策略加载和显示格式。本轮真实网络验证针对 SOCKS 数据面；节点接入、Core 安装和签名下发仍由现有集成测试及上文历史验收覆盖。
 
 支持多客户端的节点在入站表单显示「添加客户端」。同一入站最多八名客户端，仍受节点总授权数和签名草稿大小约束。新增客户端填写独立凭据，编辑时留空保留原凭据。已在「客户端」页绑定的账号从该页解绑或轮换，其他账号可直接在入站表单编辑。下载公网 Trojan 配置时选择对应客户端。已有单客户端草稿可直接编辑。
 

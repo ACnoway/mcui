@@ -70,6 +70,11 @@ func TestValidCurrentNetworkPolicy(t *testing.T) {
 	if !validCurrentNetworkPolicy(panel) {
 		t.Fatal("rejected the SOCKS direct-outbound policy")
 	}
+	// systemd renders IPv4-mapped IPv6 prefixes in dotted notation.
+	panel["IPAddressDeny"] = strings.Replace(panel["IPAddressDeny"], "::ffff:0.0.0.0/96", "::ffff:0:0/96", 1)
+	if validCurrentNetworkPolicy(panel) {
+		t.Fatal("expected the loaded systemd address notation")
+	}
 	for name, values := range map[string]map[string]string{
 		"private allowance": {"IPAddressDeny": base["IPAddressDeny"], "IPAddressAllow": "10.0.0.1/32"},
 		"broad allowance":   {"IPAddressDeny": base["IPAddressDeny"], "IPAddressAllow": "93.184.216.0/24"},
