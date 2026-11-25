@@ -16,6 +16,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -704,10 +705,26 @@ func newRuntime(t *testing.T, svc service) *Runtime {
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
 		t.Skip("Xray release platform is unsupported")
 	}
-	instance, err := openRuntime(filepath.Join(t.TempDir(), "xray"), svc, true)
+	dir := filepath.Join(t.TempDir(), "xray")
+	instance, err := openRuntime(dir, svc, true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Staged release directories are intentionally immutable (0555). Make
+	// the test-owned tree writable before TempDir's cleanup removes it.
+	t.Cleanup(func() {
+		if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return os.Chmod(path, 0700)
+			}
+			return nil
+		}); err != nil {
+			t.Errorf("make Xray test directory removable: %v", err)
+		}
+	})
 	t.Cleanup(func() { _ = instance.Close() })
 	return instance
 }
