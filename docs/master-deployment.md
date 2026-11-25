@@ -74,6 +74,8 @@ docker compose up -d
 
 验证记录：2026-11-25 在 `ro` 以提交 `3803766` 构建的发布镜像运行隔离容器，确认 Cloudflare NTS 认证和时间源选中；终止容器内 chronyd 后观察到新进程启动并重新选中时间源。此记录不覆盖 `uk` 的宿主机校时和面板安装验收。
 
+2026-11-25 在 `ro` 对提交 `5431867` 执行完整静态检查，模拟验证复用活动服务、启用已安装服务、安装缺失服务及同步超时；并构建发布包，核验全部摘要和两种 Compose 配置。尚未在真实未同步主机验证安装和校时。
+
 ```sh
 docker compose logs master
 docker compose exec master chronyc -h /run/chrony/chronyd.sock -N sources
