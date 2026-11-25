@@ -62,16 +62,25 @@ func (c *Chrony) Now() (time.Time, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	sources, err := c.run(ctx, "chronyc", "-h", c.commandHost, "-N", "sources")
-	if err != nil || !selectedSourceFresh(string(sources), c.source) {
-		return time.Time{}, ErrUntrusted
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: chronyc sources query failed: %v", ErrUntrusted, err)
+	}
+	if !selectedSourceFresh(string(sources), c.source) {
+		return time.Time{}, fmt.Errorf("%w: configured source is not selected or its sample is stale", ErrUntrusted)
 	}
 	auth, err := c.run(ctx, "chronyc", "-h", c.commandHost, "-N", "authdata")
-	if err != nil || !sourceAuthenticated(string(auth), c.source) {
-		return time.Time{}, ErrUntrusted
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: chronyc authdata query failed: %v", ErrUntrusted, err)
+	}
+	if !sourceAuthenticated(string(auth), c.source) {
+		return time.Time{}, fmt.Errorf("%w: NTS authentication is unavailable", ErrUntrusted)
 	}
 	tracking, err := c.run(ctx, "chronyc", "-h", c.commandHost, "-N", "tracking")
-	if err != nil || !trackingHealthy(string(tracking)) {
-		return time.Time{}, ErrUntrusted
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: chronyc tracking query failed: %v", ErrUntrusted, err)
+	}
+	if !trackingHealthy(string(tracking)) {
+		return time.Time{}, fmt.Errorf("%w: chrony tracking is not within the allowed bounds", ErrUntrusted)
 	}
 	now := c.now().UTC()
 	if now.IsZero() {

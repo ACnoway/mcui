@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/master"
@@ -44,7 +46,27 @@ func configureManagedRuntime(srv *master.Server, dataDir, releaseDir, publicURL,
 		return nil, err
 	}
 	clock := trustedtime.NewChronyUnix(trustedtime.DefaultNTSSource)
-	taskRuntime := master.TaskRuntime{Signer: statusSigner, KeyID: statusID, PublicKey: statusPublic, TrustedNow: clock.Now}
+	var clockMu sync.Mutex
+	var lastClockError string
+	trustedNow := func() (time.Time, error) {
+		now, err := clock.Now()
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		message := ""
+		if err != nil {
+			message = err.Error()
+		}
+		if message != lastClockError {
+			if message == "" {
+				log.Print("trusted task clock recovered")
+			} else {
+				log.Printf("trusted task clock unavailable: %s", message)
+			}
+			lastClockError = message
+		}
+		return now, err
+	}
+	taskRuntime := master.TaskRuntime{Signer: statusSigner, KeyID: statusID, PublicKey: statusPublic, TrustedNow: trustedNow}
 
 	var coreSigner *lifecycleauth.PanelSigner
 	closeCore := func() {}
@@ -81,7 +103,7 @@ func configureManagedRuntime(srv *master.Server, dataDir, releaseDir, publicURL,
 		if err != nil {
 			return nil, err
 		}
-		coreSigner, err = lifecycleauth.NewPanelSigner(policy, ledger, coreKey, clock.Now)
+		coreSigner, err = lifecycleauth.NewPanelSigner(policy, ledger, coreKey, trustedNow)
 		if err != nil {
 			_ = ledger.Close()
 			return nil, err

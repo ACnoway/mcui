@@ -48,7 +48,7 @@ Release 附带的 `compose.yaml` 默认固定到该 Release 对应的 `ghcr.io/a
 
 `master-data` 卷保存面板数据库、任务和签发账本、发布清单验收状态以及两套签发私钥。升级保留该卷。备份时停止主控并备份整个卷，恢复时保留一致的数据库与密钥。Compose 默认由同一进程使用两套密钥，独立签发进程的部署方式见[高级签发配置](./phase-3-approval.md)。
 
-容器内的 chrony 通过 Cloudflare NTS 检查宿主机时间，需要出站 TCP 4460 和 UDP 123。宿主机应保持时钟同步。容器启动后，主控等到 chrony 积累足够的认证样本，并确认时钟误差在允许范围内，才签发任务。
+Compose 主控镜像内置 chrony 和 Cloudflare NTS 配置。运行 `docker compose up -d` 时，容器自动启动 chronyd，无需在宿主机安装 chrony、填写 NTS 服务器或挂载时间配置。HTTPS 覆盖文件沿用同一套机制。宿主机仍需保持系统时间准确，并允许容器解析 `time.cloudflare.com` 和访问出站 TCP 4460、UDP 123。容器内的 chrony 只校验时间，主控取得有效的认证样本且误差达标后自动开放任务签发。
 
 若初始密码丢失且尚未绑定 MFA，使用当前镜像对同一个卷运行恢复命令。
 
@@ -61,9 +61,13 @@ docker compose up -d
 
 ### 可信任务时间排查
 
-当前反馈是在已配置 Cloudflare NTS 的部署上，面板仍返回 `trusted task clock unavailable`，导致 Core 安装等需要签名的任务无法签发。具体原因待在该部署复现。配置 NTS 服务器后，主控仍须通过实际使用的 chrony 监控接口，确认所选来源、认证、样本新鲜度和时钟误差。
+面板返回 `trusted task clock unavailable` 时，Core 安装等需要签名的任务无法签发。如果启动后一直未能签发任务，用下列步骤诊断 Compose 自带的时间服务。
+
+2026-11-25 在 `uk` 上确认：NTS 已认证并选中，但容器的 `tracking` 显示系统时间比 NTP 快约 14.5 秒；宿主机没有活动的时间同步服务。容器中的 chronyd 以 `-x` 运行，仅校验系统时间，不能修正宿主机时钟。应由宿主机管理员配置时间同步，并确认调整系统时间对该机器上的其他服务的影响；同步后重新检查误差界限和任务签发。
 
 默认 Compose 部署在 Master 容器内启动 chronyd，并使用容器内的 Unix 套接字读取时间状态。在启动部署的目录执行下列命令。使用 HTTPS 覆盖文件时，带上启动时相同的 `-f` 参数。
+
+容器会在 chronyd 意外退出后等待 5 秒重新启动；可信时间恢复前任务仍暂停。托管模式在任务请求触发时间检查时记录失败阶段和恢复事件，相同失败不会重复刷屏。查看日志时注意保护初始管理员凭据。
 
 ```sh
 docker compose logs master
@@ -74,7 +78,7 @@ docker compose exec master chronyc -h /run/chrony/chronyd.sock -N tracking
 
 先确认 chronyd 已启动且套接字可读。检查 `sources` 中 `time.cloudflare.com` 是否被选中（`^*`），最近有效样本是否在 300 秒内。`authdata` 须显示 NTS、有效 AEAD 类型和非零 cookie。`tracking` 须显示 `Leap status` 为 `Normal`，应用计算的时钟误差界限不超过 1 秒。若源未同步，检查容器的 DNS、出站 TCP 4460 和 UDP 123，以及宿主机时钟。原生或独立签发部署按实际使用的监控接口核对。[认证 NTS 时间配置](./phase-2-operations.md#11-配置认证-nts-时间)
 
-修复后先从面板发起只读 Core 状态任务，再在测试节点验证 Core 安装任务签发、执行及结果回报。若主控已成功签发但节点执行失败，再核对节点侧的认证时间和任务日志。时间无法验证时继续暂停签发。
+修复后先从面板发起只读 Core 状态任务，再在测试节点验证 Core 安装任务签发、执行及结果回报。若主控已成功签发但节点执行失败，再核对节点侧的认证时间和任务日志。时间校验失败时暂停签发，恢复校验后可从面板重试。
 
 ## HTTPS 接入
 

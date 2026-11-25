@@ -2,10 +2,34 @@ package trustedtime
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestChronyReportsFailureStage(t *testing.T) {
+	for _, tc := range []struct {
+		name, sources, auth, tracking, want string
+	}{
+		{"source", "", "", "", "source is not selected"},
+		{"auth", "^* time.cloudflare.com 3 6 377 23 0\n", "", "", "NTS authentication"},
+		{"tracking", "^* time.cloudflare.com 3 6 377 23 0\n", "time.cloudflare.com NTS 1 30 128 0 0 0 8 64\n", "", "tracking"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := NewChronyUnix(DefaultNTSSource)
+			replies := map[string]string{"sources": tc.sources, "authdata": tc.auth, "tracking": tc.tracking}
+			clock.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				return []byte(replies[args[3]]), nil
+			}
+			_, err := clock.Now()
+			if !errors.Is(err, ErrUntrusted) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want ErrUntrusted with %q", err, tc.want)
+			}
+		})
+	}
+}
 
 func TestChronyUnixQueriesAuthenticatedStatus(t *testing.T) {
 	clock := NewChronyUnix(DefaultNTSSource)
