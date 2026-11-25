@@ -25,6 +25,8 @@ Updated panel-defined nodes support multiple clients per inbound. An administrat
 
 Proxy Configuration shows sampled inbound, client, and outbound bytes for the node's applied revision. The client list combines available samples across nodes. [Xray traffic](docs/phase-4-xray-inbound.md#用户级统计与额度) · [3x-ui feature roadmap](docs/phased-development-workflow.md#阶段-4xray-完整业务闭环与最小演示)
 
+The next configuration milestone will let supported Cores listen directly on the node's host network and reach public destinations through its DNS and routes. Xray inbound creation and editing will follow 3x-ui's workflow and option model. sing-box will use its native configuration, with S-UI as a workflow reference, and Mieru will use mita's native port bindings and users. [Multi-Core configuration roadmap](docs/phased-development-workflow.md#多-core-节点网络与配置改造)
+
 ## Releases
 
 Push a tag such as `v0.1.0-alpha.1` to build the Linux amd64 and arm64 Master and Agent packages and publish a GitHub pre-release. Stable deployment releases use the same workflow without a separate Core manifest release. [Release tags and publishing](docs/phase-3-release.md#标签和预发布)
