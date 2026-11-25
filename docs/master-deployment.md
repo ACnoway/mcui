@@ -69,6 +69,8 @@ docker compose up -d
 
 容器会在 chronyd 意外退出后等待 5 秒重新启动；可信时间恢复前任务仍暂停。托管模式在任务请求触发时间检查时记录失败阶段和恢复事件，相同失败不会重复刷屏。查看日志时注意保护初始管理员凭据。
 
+验证记录：2026-11-25 在 `ro` 以提交 `3803766` 构建的发布镜像运行隔离容器，确认 Cloudflare NTS 认证和时间源选中；终止容器内 chronyd 后观察到新进程启动并重新选中时间源。此记录不覆盖 `uk` 的宿主机校时和面板安装验收。
+
 ```sh
 docker compose logs master
 docker compose exec master chronyc -h /run/chrony/chronyd.sock -N sources
