@@ -29,7 +29,7 @@ The next configuration milestone will let supported Cores listen directly on the
 
 ## Releases
 
-Push a tag such as `v0.1.0-alpha.1` to build the Linux amd64 and arm64 Master and Agent packages and publish a GitHub pre-release. Stable deployment releases use the same workflow without a separate Core manifest release. [Release tags and publishing](docs/phase-3-release.md#标签和预发布)
+Push a tag such as `v0.1.0-alpha.1` to build the Linux amd64 and arm64 Master and Agent packages, Compose images, and Agent installer, then publish a GitHub pre-release. Stable releases use the same workflow and promote their image to `latest`. [Release tags and publishing](docs/phase-3-release.md#标签和预发布)
 
 ## Development checks
 

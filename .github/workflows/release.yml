@@ -92,10 +92,9 @@ jobs:
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             "$assets"/mcui-master-linux-*.tar.gz "$assets"/mcui-agent-linux-*.zip "$assets/SHA256SUMS-binaries"
           if [[ "$preview" == true ]]; then
-            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --prerelease --latest=false
-          else
-            echo 'deployment_ready=true' >> "$GITHUB_OUTPUT"
+            echo "Staged preview release $RELEASE_TAG for Compose deployment."
           fi
+          echo 'deployment_ready=true' >> "$GITHUB_OUTPUT"
 
   deployment:
     needs: binaries

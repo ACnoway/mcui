@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: Stable draft Release tag
+        description: Draft stable or preview Release tag
         required: true
         type: string
       commit:
@@ -28,19 +28,31 @@ jobs:
     permissions:
       contents: write
       packages: write
+    outputs:
+      channel: ${{ steps.channel.outputs.value }}
     steps:
-      - name: Check stable draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName |
-            jq -e --arg tag "$RELEASE_TAG" '.isDraft and (.isPrerelease | not) and .tagName == $tag'
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit }}
           persist-credentials: false
+
+      - name: Identify release channel
+        id: channel
+        run: |
+          channel=$(bash scripts/release-channel.sh "$RELEASE_TAG")
+          printf 'value=%s\n' "$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Check matching draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          channel=$(bash scripts/release-channel.sh "$RELEASE_TAG")
+          preview=false
+          [[ "$channel" == stable ]] || preview=true
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName |
+            jq -e --arg tag "$RELEASE_TAG" --argjson preview "$preview" \
+              '.isDraft and .isPrerelease == $preview and .tagName == $tag'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -80,10 +92,16 @@ jobs:
           set -euo pipefail
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             install-mcui-agent.sh install-mcui-master.sh compose.yaml compose.https.yaml SHA256SUMS
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --latest
+          channel=$(bash scripts/release-channel.sh "$RELEASE_TAG")
+          if [[ "$channel" == stable ]]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --latest
+          else
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --prerelease --latest=false
+          fi
 
   promote-image:
     needs: publish
+    if: needs.publish.outputs.channel == 'stable'
     runs-on: ubuntu-24.04
     permissions:
       packages: write

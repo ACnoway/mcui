@@ -44,7 +44,7 @@ docker compose up -d
 docker compose logs master
 ```
 
-默认镜像是 `ghcr.io/acnoway/mcui-master:latest`。本机打开 `http://127.0.0.1:8080`，首次登录时设置自己的密码并绑定 TOTP MFA。可通过 `MCUI_MASTER_PORT` 调整本机端口，通过 `MCUI_MASTER_IMAGE` 固定镜像版本或摘要。使用默认标签更新时，先执行 `docker compose pull`，再执行 `docker compose up -d`。
+Release 附带的 `compose.yaml` 默认固定到该 Release 对应的 `ghcr.io/acnoway/mcui-master:<tag>`，包括 alpha 和 beta 预发布版本。本机打开 `http://127.0.0.1:8080`，首次登录时设置自己的密码并绑定 TOTP MFA。可通过 `MCUI_MASTER_PORT` 调整本机端口，通过 `MCUI_MASTER_IMAGE` 覆盖默认镜像版本或摘要。更新时下载目标 Release 的 Compose 文件，或显式调整镜像变量后执行 `docker compose pull` 和 `docker compose up -d`。仓库内开发用的 `compose.yaml` 默认仍使用 `latest`。
 
 `master-data` 卷保存面板数据库、任务和签发账本、发布清单验收状态以及两套签发私钥。升级保留该卷。备份时停止主控并备份整个卷，恢复时保留一致的数据库与密钥。Compose 默认由同一进程使用两套密钥，独立签发进程的部署方式见[高级签发配置](./phase-3-approval.md)。
 

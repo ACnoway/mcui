@@ -37,11 +37,11 @@ git push origin refs/tags/v0.1.0-alpha.1
 
 ### 发布 Compose 和通用 Agent
 
-1. 推送 `vX.Y.Z` 标签。工作流在该版本的 Release 草稿上传二进制，无需准备 Core 清单或发布公钥。
-2. 工作流完成后，从 `master` 手动运行 **Publish MCUI release** 并输入已有标签。工作流构建两架构主控镜像，上传安装器、Compose 文件和摘要，然后发布 Release 并更新镜像的 `latest` 标签。
-3. 首次发布后，将 GHCR 的 `mcui-master` 包设为公开。检查镜像可匿名拉取，Release 安装器摘要与配套镜像中 `/opt/mcui/release/agent-release` 的摘要一致。
+1. 推送 `vX.Y.Z-alpha.N`、`vX.Y.Z-beta.N` 或 `vX.Y.Z` 标签。工作流先在 Release 草稿中准备对应提交的主控和 Agent 二进制。
+2. Alpha、Beta 和稳定版都会自动构建 amd64/arm64 Compose 镜像、通用 Agent 安装器、Compose 文件和摘要，再上传到对应 Release。每个 Release 附带的 Compose 文件默认固定到自己的镜像版本；预发布镜像不改动 `latest`，稳定版成功后才更新 `latest`。可设置 `MCUI_MASTER_IMAGE` 覆盖默认镜像标签。
+3. 首次发布后，将 GHCR 的 `mcui-master` 包设为公开。后续 Actions 用仓库自动提供的 `GITHUB_TOKEN` 和 `packages: write` 发布，不需要 PAT 或额外密钥。检查镜像可匿名拉取，Release 安装器摘要与配套镜像中 `/opt/mcui/release/agent-release` 的摘要一致。
 
-可用 `bash scripts/build-compose-release.sh NEW_DIRECTORY vX.Y.Z` 在隔离环境构建同样的制品。通用安装器从面板命令接收 Xray 生命周期任务公钥；Core 发布公钥不再随安装器分发。[发布工作流](../.github/workflows/release-deployment.yml)
+可用 `bash scripts/build-compose-release.sh NEW_DIRECTORY vX.Y.Z-alpha.N`（或 `beta.N`、稳定标签）在隔离环境构建同样的制品。通用安装器从面板命令接收 Xray 生命周期任务公钥；Core 发布公钥不再随安装器分发。[发布工作流](../.github/workflows/release-deployment.yml)
 
 ### 生产发布验收
 
