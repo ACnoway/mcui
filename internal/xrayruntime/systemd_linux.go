@@ -268,11 +268,11 @@ func panelNetworkPolicyMatches(values map[string]string) bool {
 }
 
 func validCurrentNetworkPolicy(values map[string]string) bool {
-	if !deniesAllIP(values) {
-		return false
-	}
 	if panelNetworkPolicyMatches(values) {
 		return true
+	}
+	if !deniesAllIP(values) {
+		return false
 	}
 	for _, entry := range strings.Fields(values["IPAddressAllow"]) {
 		prefix, err := netip.ParsePrefix(entry)

@@ -47,6 +47,7 @@ func TestPublicEndpointBindsEncryptedPlanToDedicatedLoopback(t *testing.T) {
 	if view.Allows(plan) {
 		t.Fatal("accepted endpoint outside the current node policy")
 	}
+	plan[1].Protocol = HTTP
 	plan[1].PublicEndpoint = endpoint
 	if plan.Valid() {
 		t.Fatal("accepted a public endpoint for a plaintext protocol")
