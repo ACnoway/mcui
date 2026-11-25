@@ -70,7 +70,7 @@ func TestPublicVLESSWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := configurationNetwork(serverConfig); err != nil {
+	if _, _, _, err := configurationNetwork(serverConfig); err != nil {
 		t.Fatal(err)
 	}
 	clientConfig, err := json.Marshal(map[string]any{

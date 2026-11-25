@@ -65,3 +65,11 @@ func TestPublicVLESSPlan(t *testing.T) {
 		t.Fatal("public VLESS plan was rejected")
 	}
 }
+
+func TestPublicSocksPlan(t *testing.T) {
+	endpoint := PublicEndpoint{Address: "93.184.216.35", Port: 1080}
+	plan := Plan{{Port: 1080, PublicEndpoint: endpoint, Users: []string{"alice"}}}
+	if !plan.Valid() {
+		t.Fatal("public SOCKS plan was rejected")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/ACnoway/mcui/internal/security"
 )
@@ -14,6 +15,7 @@ import (
 // A plan with one user per inbound retains its original wire encoding.
 type PanelConfiguration struct {
 	Credentials []string  `json:"credentials"`
+	DirectPorts []int     `json:"direct_ports,omitempty"`
 	TLS         *PanelTLS `json:"tls,omitempty"`
 	Statistics  bool      `json:"statistics,omitempty"`
 }
@@ -24,8 +26,19 @@ func (p PanelConfiguration) valid(plan Plan) bool {
 	}
 	usesTLS := false
 	offset := 0
+	lastDirectPort := 0
+	for _, port := range p.DirectPorts {
+		index := slices.IndexFunc(plan, func(inbound Inbound) bool { return inbound.Port == port })
+		if port <= lastDirectPort || index < 0 || plan[index].Protocol != "" {
+			return false
+		}
+		lastDirectPort = port
+	}
 	for _, inbound := range plan {
 		if !PanelProtocol(inbound.Protocol) || len(p.Credentials)-offset < len(inbound.Users) {
+			return false
+		}
+		if inbound.Protocol == "" && !slices.Contains(p.DirectPorts, inbound.Port) {
 			return false
 		}
 		if inbound.Protocol == Trojan {
@@ -184,5 +197,9 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 		inbounds = append(inbounds, entry)
 		tags[inbound.Port] = tag
 	}
-	return c.Network.render(inbounds, tags, port, c.Panel.Statistics)
+	directTags := make([]string, 0, len(c.Panel.DirectPorts))
+	for _, directPort := range c.Panel.DirectPorts {
+		directTags = append(directTags, tags[directPort])
+	}
+	return c.Network.render(inbounds, tags, port, c.Panel.Statistics, directTags)
 }

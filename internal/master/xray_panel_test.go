@@ -908,7 +908,7 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || issued.Plan != registered.XrayDraft || issued.Config != direct.Candidate {
 			t.Fatalf("signed task does not bind the preview and sealed draft: %v", err)
 		}
-		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1&xray_public=v1&xray_trojan_tls=v1&xray_panel_inbounds=v1", issued.Sequence)
+		next := fmt.Sprintf("/api/v1/agent/tasks/next?next_sequence=%d&install=xray-official-v1&xray_config=v1&xray_plan=v1&xray_protocols=v1&xray_routing=v1&xray_public=v1&xray_trojan_tls=v1&xray_panel_inbounds=v2", issued.Sequence)
 		expect(client.request(http.MethodGet, next, nil, true), http.StatusNoContent)
 		expect(client.request(http.MethodGet, next+"&xray_panel_multi_client=v1", nil, true), http.StatusNoContent)
 		expect(client.request(http.MethodGet, next+"&xray_panel_trojan=v1", nil, true), http.StatusNoContent)

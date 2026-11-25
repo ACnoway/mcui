@@ -380,7 +380,7 @@ func (c LocalCatalog) RenderConfiguration(releaseSHA256 string, draft Configurat
 		port = plan[0].Port
 	}
 	if draft.Network != nil {
-		return draft.Network.render(inbounds, inboundTags, port, false)
+		return draft.Network.render(inbounds, inboundTags, port, false, nil)
 	}
 	return render(inbounds, tags, port, c.DestinationIP, c.DestinationPort)
 }

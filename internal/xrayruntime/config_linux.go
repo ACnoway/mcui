@@ -251,8 +251,18 @@ func (r *Runtime) configure(ctx context.Context, path string, release Release, r
 	return r.change(ctx, state, intent{Action: Configure, Next: next, ConfigHash: hash})
 }
 
-func configurationNetwork(data []byte) ([]string, []publishedInbound, error) {
+func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, error) {
 	var config struct {
+		Outbounds []struct {
+			Tag      string `json:"tag"`
+			Protocol string `json:"protocol"`
+			Settings struct {
+				FinalRules []struct {
+					Action string   `json:"action"`
+					IP     []string `json:"ip"`
+				} `json:"finalRules"`
+			} `json:"settings"`
+		} `json:"outbounds"`
 		Inbounds []struct {
 			Listen   string `json:"listen"`
 			Tag      string `json:"tag"`
@@ -264,29 +274,78 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, error) {
 		} `json:"inbounds"`
 		Routing struct {
 			Rules []struct {
-				IP      []string `json:"ip"`
-				Network string   `json:"network"`
+				IP       []string `json:"ip"`
+				Network  string   `json:"network"`
+				Tags     []string `json:"inboundTag"`
+				Outbound string   `json:"outboundTag"`
+				Port     int      `json:"port"`
 			} `json:"rules"`
 		} `json:"routing"`
 	}
 	if json.Unmarshal(data, &config) != nil {
-		return nil, nil, errors.New("invalid saved Xray configuration")
+		return nil, nil, false, errors.New("invalid saved Xray configuration")
 	}
 	if config.Inbounds == nil || (len(config.Inbounds) == 0 && len(config.Routing.Rules) != 0) {
-		return nil, nil, errors.New("invalid saved Xray route")
+		return nil, nil, false, errors.New("invalid saved Xray route")
+	}
+	direct := false
+	for _, outbound := range config.Outbounds {
+		if outbound.Tag == "direct" {
+			if direct || outbound.Protocol != "freedom" || len(outbound.Settings.FinalRules) != 1 ||
+				outbound.Settings.FinalRules[0].Action != "block" ||
+				!slices.Equal(outbound.Settings.FinalRules[0].IP, xrayconfig.PanelDirectBlockedIPs()) {
+				return nil, nil, false, errors.New("invalid saved Xray direct outbound")
+			}
+			direct = true
+		}
+	}
+	inboundProtocols := make(map[string]string, len(config.Inbounds))
+	for _, inbound := range config.Inbounds {
+		if inbound.Tag == "" || inboundProtocols[inbound.Tag] != "" {
+			return nil, nil, false, errors.New("invalid saved Xray inbound tag")
+		}
+		inboundProtocols[inbound.Tag] = inbound.Protocol
 	}
 	var destinations []string
+	var socksTags []string
+	for tag, protocol := range inboundProtocols {
+		if protocol == "socks" {
+			socksTags = append(socksTags, tag)
+		}
+	}
+	slices.Sort(socksTags)
+	directRules := 0
 	for _, rule := range config.Routing.Rules {
+		if rule.Outbound == "direct" {
+			if !direct || directRules != 0 || len(rule.Tags) == 0 || rule.Network != "" || len(rule.IP) != 0 || rule.Port != 0 {
+				return nil, nil, false, errors.New("invalid saved Xray direct route")
+			}
+			tags := slices.Clone(rule.Tags)
+			slices.Sort(tags)
+			if len(tags) != len(socksTags) || !slices.Equal(tags, socksTags) {
+				return nil, nil, false, errors.New("Xray direct route must cover every SOCKS inbound")
+			}
+			for _, tag := range rule.Tags {
+				if inboundProtocols[tag] != "socks" {
+					return nil, nil, false, errors.New("Xray direct outbound is reserved for SOCKS inbounds")
+				}
+			}
+			directRules++
+			continue
+		}
 		if len(rule.IP) != 1 || rule.Network != "tcp" {
-			return nil, nil, errors.New("invalid saved Xray route")
+			return nil, nil, false, errors.New("invalid saved Xray route")
 		}
 		prefix, err := netip.ParsePrefix(rule.IP[0])
 		if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
-			return nil, nil, errors.New("invalid saved Xray route destination")
+			return nil, nil, false, errors.New("invalid saved Xray route destination")
 		}
 		if !slices.Contains(destinations, rule.IP[0]) {
 			destinations = append(destinations, rule.IP[0])
 		}
+	}
+	if direct != (directRules == 1) {
+		return nil, nil, false, errors.New("Xray direct outbound and route do not match")
 	}
 	var published []publishedInbound
 	for _, inbound := range config.Inbounds {
@@ -294,18 +353,19 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, error) {
 		if inbound.Listen == "127.0.0.1" && !ok {
 			continue
 		}
-		supported := (inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
+		supported := (inbound.Protocol == "socks" && inbound.Stream.Security == "") ||
+			(inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
 			(inbound.Protocol == xrayconfig.VLESS && (inbound.Stream.Security == "reality" || inbound.Stream.Security == ""))
 		if inbound.Listen != xrayconfig.PublicListenAddress || !ok || !supported || inbound.Port < 1024 || inbound.Port > 65535 {
-			return nil, nil, errors.New("invalid saved Xray public listener")
+			return nil, nil, false, errors.New("invalid saved Xray public listener")
 		}
 		published = append(published, publishedInbound{port: inbound.Port, endpoint: endpoint})
 	}
-	return destinations, published, nil
+	return destinations, published, direct, nil
 }
 
 func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool) error {
-	destinations, published, err := configurationNetwork(data)
+	destinations, published, _, err := configurationNetwork(data)
 	if err != nil {
 		return err
 	}
@@ -318,19 +378,19 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool)
 			return err
 		}
 		// Check the sandbox without altering the running revision's policy.
-		return r.checkServiceUnits(ctx, nil, nil, false)
+		return r.checkServiceUnits(ctx, nil, nil, false, networkPolicyBase)
 	}
-	return r.checkServiceUnits(ctx, destinations, published, true)
+	return r.checkServiceUnits(ctx, destinations, published, true, networkPolicyBase)
 }
 
-func (r *Runtime) checkServiceUnits(ctx context.Context, destinations []string, published []publishedInbound, sockets bool) error {
+func (r *Runtime) checkServiceUnits(ctx context.Context, destinations []string, published []publishedInbound, sockets bool, policy networkPolicy) error {
 	service, ok := r.service.(interface {
-		checkConfigUnits(context.Context, []string, []publishedInbound, bool) error
+		checkConfigUnits(context.Context, []string, []publishedInbound, bool, networkPolicy) error
 	})
 	if !ok {
 		return errors.New("Xray service does not support isolated configuration")
 	}
-	return service.checkConfigUnits(ctx, destinations, published, sockets)
+	return service.checkConfigUnits(ctx, destinations, published, sockets, policy)
 }
 
 func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]publishedInbound, error) {
@@ -340,6 +400,7 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]p
 	data := []byte(bootstrapConfig)
 	var destinations []string
 	var published []publishedInbound
+	direct := false
 	if next.Revision != 0 {
 		var err error
 		data, err = r.savedConfig(next.Config)
@@ -347,17 +408,19 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]p
 			return nil, err
 		}
 		if next.Running {
-			destinations, published, err = configurationNetwork(data)
+			destinations, published, direct, err = configurationNetwork(data)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
 	panel := false
+	policy := networkPolicyRestricted
 	if next.Running {
 		_, err := r.panelKey()
 		if err == nil {
 			panel = true
+			policy = networkPolicyPanel
 			controller, ok := r.service.(panelNetworkService)
 			if !ok {
 				return nil, errors.New("Xray service cannot apply panel network policy")
@@ -365,14 +428,17 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]p
 			if err := validatePanelAddresses(controller, published); err != nil {
 				return nil, err
 			}
-			if err := controller.setPanelDestinations(ctx, destinations, len(published) > 0); err != nil {
+			if err := controller.setPanelDestinations(ctx, destinations, len(published) > 0, direct); err != nil {
 				return nil, err
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 		if next.Revision != 0 {
-			if err := r.checkServiceUnits(ctx, destinations, published, false); err != nil {
+			if direct {
+				policy = networkPolicyPanel
+			}
+			if err := r.checkServiceUnits(ctx, destinations, published, false, policy); err != nil {
 				return nil, err
 			}
 		}

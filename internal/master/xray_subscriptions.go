@@ -55,6 +55,12 @@ func (g subscriptionGrant) allowedPorts(user string, port int) subscriptionPorts
 				result.protocols[inbound.Port] = inbound.Protocol
 			}
 			if inbound.PublicEndpoint != (xrayconfig.PublicEndpoint{}) {
+				if inbound.Protocol == "" {
+					if result.protocols == nil {
+						result.protocols = make(map[int]string)
+					}
+					result.protocols[inbound.Port] = "socks"
+				}
 				if result.published == nil {
 					result.published = make(map[int]xrayconfig.PublicEndpoint)
 				}
@@ -348,9 +354,11 @@ func (g subscriptionGrant) payload(username string, ports subscriptionPorts, exp
 		"schema_version": 1, "username": username, "address": "127.0.0.1", "ports": ports.ports,
 		"revision": g.revision, "expires_at": expiresAt,
 	}
-	if len(ports.protocols) > len(ports.httpPorts) {
+	if len(ports.protocols) > len(ports.httpPorts) || len(ports.published) > 0 {
 		result["schema_version"] = 3
-		result["port_protocols"] = ports.protocols
+		if len(ports.protocols) > 0 {
+			result["port_protocols"] = ports.protocols
+		}
 		for _, protocol := range ports.protocols {
 			switch protocol {
 			case xrayconfig.Trojan:

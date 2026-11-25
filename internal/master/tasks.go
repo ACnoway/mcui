@@ -806,7 +806,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		Reality:          query.Get("xray_reality") == "v1",
 		Public:           query.Get("xray_public") == "v1",
 		Routing:          query.Get("xray_routing") == "v1",
-		PanelInbounds:    query.Get("xray_panel_inbounds") == "v1",
+		PanelInbounds:    query.Get("xray_panel_inbounds") == "v2",
 		PanelTrojan:      query.Get("xray_panel_trojan") == "v1",
 		PublicVLESS:      query.Get("xray_public_vless") == "v1",
 		PanelMultiClient: query.Get("xray_panel_multi_client") == "v1",

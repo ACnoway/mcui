@@ -98,7 +98,7 @@ async function submit() {
       protocol: draft.protocol, clients: draft.clients.map(({ username, credential }) => ({ username, credential })),
       destination: !draft.copyFrom && draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
       copy_routes_from: draft.copyFrom,
-      public_endpoint: (draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
+      public_endpoint: (draft.protocol === '' || draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
       rotate_tls: draft.protocol === 'trojan' && draft.rotateTLS ? true : undefined,
     })
     form.value = null
@@ -119,7 +119,7 @@ function downloadFile(contents: string, type: string, filename: string) {
 function appliedPublic(port: number) {
   if (!props.appliedVerified) return undefined
   return props.applied.find(entry => entry.port === port && entry.public_endpoint &&
-    (entry.protocol === 'vless' || (entry.protocol === 'trojan' && props.trust && entry.tls_cert_sha256 === props.trust.sha256)))
+    (!entry.protocol || entry.protocol === 'vless' || (entry.protocol === 'trojan' && props.trust && entry.tls_cert_sha256 === props.trust.sha256)))
 }
 
 function openDownload(port: number) {
@@ -142,7 +142,7 @@ function downloadClient() {
   try {
     const metadata: XraySubscription = {
       schema_version: 4, username, address: '127.0.0.1', ports: [active.port],
-      port_protocols: { [active.port]: active.protocol === 'trojan' ? 'trojan' : 'vless' },
+      port_protocols: { [active.port]: active.protocol === '' ? 'socks' : active.protocol === 'trojan' ? 'trojan' : 'vless' },
       public_endpoints: { [active.port]: active.public_endpoint },
       ...(active.protocol === 'trojan' ? { trojan_trust: props.trust } : {}),
       revision: props.revision, expires_at: Math.floor(Date.now() / 1000) + 60,
@@ -174,12 +174,12 @@ async function remove(port: number) {
   <p v-if="error && !form" class="notice" role="alert">{{ error }}</p>
   <div v-if="inbounds.length" class="table-wrap">
     <table class="data-table" aria-label="主控入站草稿">
-      <thead><tr><th scope="col">监听</th><th scope="col">协议</th><th scope="col">客户端</th><th scope="col">TCP 目标</th><th scope="col">操作</th></tr></thead>
+      <thead><tr><th scope="col">监听</th><th scope="col">协议</th><th scope="col">客户端</th><th scope="col">出站</th><th scope="col">操作</th></tr></thead>
       <tbody><tr v-for="inbound in inbounds" :key="inbound.port">
         <th scope="row">{{ inbound.public_endpoint ? destinationLabel(inbound.public_endpoint) : `127.0.0.1:${inbound.port}` }}</th>
         <td>{{ protocolLabel(inbound.protocol) }}</td>
         <td>{{ inbound.users.join('、') }}<template v-if="centrallyBound(inbound.port)"> · 已在「客户端」绑定</template></td>
-        <td>{{ targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
+        <td>{{ !inbound.protocol ? '直连公网（内网目标拒绝）' : targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
         <td><div class="actions">
           <button type="button" class="outline" :disabled="busy" @click="open(inbound)">编辑</button>
           <button type="button" class="outline" :disabled="busy || inbounds.length >= 4" @click="open(inbound, true)">复制</button>
@@ -215,9 +215,10 @@ async function remove(port: number) {
       <div v-if="multiClient && form.clients.length < 8" class="actions">
         <button type="button" class="outline" :disabled="busy" @click="form.clients.push({ username: '', credential: '' })">添加客户端</button>
       </div>
-      <template v-if="form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
+      <template v-if="form.protocol === '' || form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
         <p v-if="form.protocol === 'vless' && form.published" class="feedback">此 VLESS 入口使用明文 RAW TCP，请在可信网络或受保护的传输通道中使用。</p>
+        <p v-if="form.protocol === '' && form.published" class="feedback">公网 SOCKS5 使用明文 TCP。认证密码和代理流量没有传输加密，请仅在可信网络或受保护的隧道中使用。</p>
         <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
         <template v-if="form.published">
           <label>宿主公网 IPv4 <select v-model="form.publicAddress" required>
@@ -231,6 +232,7 @@ async function remove(port: number) {
         </label>
       </template>
       <p v-if="form.copyFrom">复制源入站的路由。请为新端口生成并保存各客户端凭据。</p>
+      <p v-else-if="form.protocol === ''">SOCKS5 使用公网直连出站；节点策略会拒绝回环、私网、链路本地和元数据目标。</p>
       <p v-else-if="form.editing && targets(form.port).length > 1">此入站有多条放行规则。到「路由」编辑目标和顺序。</p>
       <template v-else>
         <label>允许的目标 IPv4 <input v-model.trim="form.address" inputmode="decimal" placeholder="留空拒绝全部" /></label>

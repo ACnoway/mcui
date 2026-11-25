@@ -13,7 +13,7 @@ export type XraySubscription = {
   address: '127.0.0.1'
   ports: number[]
   http_ports?: number[]
-  port_protocols?: Record<number, Exclude<XrayProtocol, 'socks'>>
+  port_protocols?: Record<number, XrayProtocol>
   trojan_trust?: { certificate: string; sha256: string }
   reality_public_key?: string
   public_endpoints?: Record<number, XrayPublicEndpoint>
@@ -66,7 +66,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
     if (!published.length || published.some(([key, endpoint]) => {
       const port = Number(key)
       const protocol = port_protocols[port]
-      if (String(port) !== key || !ports.includes(port) || (protocol !== 'trojan' && protocol !== 'vless-reality' && protocol !== 'vless') ||
+      if (String(port) !== key || !ports.includes(port) || (protocol !== 'socks' && protocol !== 'trojan' && protocol !== 'vless-reality' && protocol !== 'vless') ||
         !validPublishedEndpoint(endpoint)) return true
       const address = `${endpoint.address}:${endpoint.port}`
       if (seen.has(address)) return true
@@ -83,7 +83,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
     if (typeof reality_public_key !== 'string' || !passwordPattern.test(reality_public_key)) return false
   } else if (reality_public_key !== undefined) return false
   return entries.some(([, protocol]) => protocol !== 'http') && entries.every(([port, protocol]) =>
-    String(Number(port)) === port && ports.includes(Number(port)) && ['http', 'vless', 'vless-reality', 'vmess', 'shadowsocks', 'trojan'].includes(protocol),
+    String(Number(port)) === port && ports.includes(Number(port)) && ['socks', 'http', 'vless', 'vless-reality', 'vmess', 'shadowsocks', 'trojan'].includes(protocol),
   )
 }
 

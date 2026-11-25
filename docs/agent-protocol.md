@@ -75,7 +75,7 @@ VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之�
 
 自定义网络草稿使用 `{"inbounds":[...],"network":{"outbounds":[...],"routes":[...]}}` 格式，最大 3072 字节。出站项绑定 `tag` 及 `destination`，目的含 `address` 和 `port`。路由条目按匹配顺序排列，各自绑定 `inbound_port` 和 `outbound_tag`。领取时须声明 `xray_routing=v1` 并具有草稿中入站的相应能力。心跳的 `catalog.routing_destinations` 携带节点批准的目的，`applied_network` 从已提交配置复原。旧入站草稿继续使用数组格式和原能力声明。
 
-主控定义的草稿在 `network` 后附加 `panel.credentials` 数组，元素按入站端口顺序排列，每项是接收节点的 HPKE 密文。每入站允许一个客户端和至多一个 TCP 目标。心跳用 `panel_key` 通告节点的 X25519 公钥，主控首次保存时绑定该公钥。新草稿仍在 3072 字节限制内，并额外要求领取方声明 `xray_panel_inbounds=v1`。 [主控入站流程](./phase-4-xray-inbound.md#从主控添加入站)
+主控定义的草稿在 `network` 后附加 `panel.credentials` 数组，元素按入站端口顺序排列，每项是接收节点的 HPKE 密文；`panel.direct_ports` 只允许标记 SOCKS5 入站使用受保护的公网 Freedom 出站。心跳用 `panel_key` 通告节点的 X25519 公钥，主控首次保存时绑定该公钥。新草稿仍在 3072 字节限制内，并额外要求领取方声明 `xray_panel_inbounds=v2`。不支持旧版主控入站草稿节点。[主控入站流程](./phase-4-xray-inbound.md#从主控添加入站)
 
 主控 Trojan 另要求 `xray_panel_trojan=v1`。`panel.tls` 包含公开证书 `trust` 和密封的 Ed25519 私钥种子 `key`，其解密上下文绑定证书摘要。各 Trojan 入站引用同一摘要，可附带 `public_endpoint`。具备能力的节点心跳通告 `panel_trojan` 与 `panel_addresses`，应用后上报 `panel_tls`。主控只有在配置摘要、修订、端点和证书均与成功任务的签名草稿一致时才导出客户端元数据。 [主控公网接入](./phase-4-xray-inbound.md#从主控开通-trojantls-公网入口)
 

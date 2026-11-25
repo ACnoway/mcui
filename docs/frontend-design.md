@@ -28,6 +28,8 @@
 
 代理配置页的页头提供 Agent 和 Core 类型选择。选择 Agent 后，Core 列表显示其上报的已安装版本。Agent 确认未安装可配置的 Core 时可直接前往节点管理安装。选定 Core 后，页面展示已生效修订和草稿状态。Xray 配置的四个标签页共用同一份草稿。
 
+Xray 入站第一步按 3x-ui 的入站列表与添加表单组织，先完成 SOCKS5 创建闭环：监听端口、客户端用户名与密码、默认公网直连出站，以及可选的公网 TCP 入口。SOCKS5 不显示固定目标字段；节点同时用 Xray Freedom 最终规则与 systemd 地址策略拒绝内网、回环和元数据目标。公网 SOCKS5 表单明确提示没有传输加密。其他协议、传输、安全和高级字段仍按后续路线图逐步接入。[3x-ui SOCKS 入站表单](https://github.com/MHSanaei/3x-ui/blob/main/frontend/src/schemas/forms/inbound-form.ts) · [Xray SOCKS 入站](https://xtls.github.io/config/inbounds/socks.html)
+
 | 标签页 | 页面内容 |
 | --- | --- |
 | 入站 | 列出入站名称、协议、监听端口和用户授权，点一行查看或编辑详情。 |

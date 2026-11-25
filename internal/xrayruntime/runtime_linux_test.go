@@ -664,7 +664,7 @@ type fakeService struct {
 }
 
 func (s *fakeService) preflight(context.Context) error { return nil }
-func (s *fakeService) checkConfigUnits(_ context.Context, destinations []string, _ []publishedInbound, _ bool) error {
+func (s *fakeService) checkConfigUnits(_ context.Context, destinations []string, _ []publishedInbound, _ bool, _ networkPolicy) error {
 	s.destinations = slices.Clone(destinations)
 	return nil
 }

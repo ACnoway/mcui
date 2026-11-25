@@ -23,6 +23,24 @@ const serviceUnit = "mcui-xray.service"
 const preflightUnit = "mcui-xray-preflight.service"
 const networkNamespace = "/run/netns/mcui-xray"
 
+type networkPolicy uint8
+
+const (
+	networkPolicyBase networkPolicy = iota
+	networkPolicyRestricted
+	networkPolicyPanel
+	networkPolicyPreflight
+)
+
+var panelNetworkAllow = []string{"10.0.2.3/32", "127.0.0.0/8"}
+var panelNetworkDeny = []string{
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+	"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",
+	"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+	"::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001::/23", "2001:db8::/32",
+	"fc00::/7", "fe80::/10", "ff00::/8",
+}
+
 type systemdService struct{}
 
 type publishedInbound struct {
@@ -32,7 +50,7 @@ type publishedInbound struct {
 
 type panelNetworkService interface {
 	panelAddresses() ([]string, error)
-	setPanelDestinations(context.Context, []string, bool) error
+	setPanelDestinations(context.Context, []string, bool, bool) error
 	startPanelIngress(context.Context, []publishedInbound) error
 }
 
@@ -69,7 +87,7 @@ func validatePanelAddresses(service panelNetworkService, published []publishedIn
 	return nil
 }
 
-func (systemdService) setPanelDestinations(ctx context.Context, destinations []string, published bool) error {
+func (systemdService) setPanelDestinations(ctx context.Context, destinations []string, published, direct bool) error {
 	local, err := net.InterfaceAddrs()
 	if err != nil {
 		return err
@@ -86,19 +104,29 @@ func (systemdService) setPanelDestinations(ctx context.Context, destinations []s
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	allow := append([]string{"127.0.0.1/32"}, destinations...)
+	deny := []string{"0.0.0.0/0", "::/0"}
 	if published {
 		allow = append(allow, xrayconfig.PublicListenAddress+"/32")
 	}
-	cmd := systemctlCommand(ctx, "set-property", "--runtime", serviceUnit, "IPAddressAllow=", "IPAddressAllow="+strings.Join(allow, " "))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("apply Xray service address policy: %w", err)
+	if direct {
+		allow = slices.Clone(panelNetworkAllow)
+		deny = slices.Clone(panelNetworkDeny)
 	}
-	raw, err := systemctlCommand(ctx, "show", "--property=IPAddressAllow", "--value", serviceUnit).Output()
-	got := strings.Fields(string(raw))
-	slices.Sort(got)
+	cmd := systemctlCommand(ctx, "set-property", "--runtime", serviceUnit,
+		"IPAddressDeny=", "IPAddressDeny="+strings.Join(deny, " "),
+		"IPAddressAllow=", "IPAddressAllow="+strings.Join(allow, " "))
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("apply Xray direct-outbound address policy: %w", err)
+	}
+	raw, err := systemctlCommand(ctx, "show", "--property=IPAddressAllow,IPAddressDeny", serviceUnit).Output()
+	values := systemdProperties(raw)
+	gotAllow, gotDeny := strings.Fields(values["IPAddressAllow"]), strings.Fields(values["IPAddressDeny"])
+	slices.Sort(gotAllow)
+	slices.Sort(gotDeny)
 	slices.Sort(allow)
-	if err != nil || !slices.Equal(got, allow) {
-		return errors.New("Xray panel service address policy differs")
+	slices.Sort(deny)
+	if err != nil || !slices.Equal(gotAllow, allow) || !slices.Equal(gotDeny, deny) {
+		return errors.New("Xray direct-outbound address policy differs")
 	}
 	return nil
 }
@@ -143,7 +171,7 @@ func startPanelSocket(ctx context.Context, inbound publishedInbound) error {
 	return systemctl(ctx, 7*time.Second, "start", socket)
 }
 
-func (systemdService) checkConfigUnits(ctx context.Context, destinations []string, published []publishedInbound, checkSockets bool) error {
+func (systemdService) checkConfigUnits(ctx context.Context, destinations []string, published []publishedInbound, checkSockets bool, policy networkPolicy) error {
 	ns, err := os.Lstat(networkNamespace)
 	if err != nil {
 		return errors.New("Xray requires a dedicated network namespace")
@@ -154,10 +182,10 @@ func (systemdService) checkConfigUnits(ctx context.Context, destinations []strin
 		unix.Statfs(networkNamespace, &fs) != nil || fs.Type != unix.NSFS_MAGIC {
 		return errors.New("invalid dedicated Xray network namespace")
 	}
-	if err := checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", nil, false); err != nil {
+	if err := checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", nil, false, networkPolicyPreflight); err != nil {
 		return err
 	}
-	if err := checkConfigUnit(ctx, serviceUnit, "current", "runtime-config.json", "", networkNamespace, destinations, len(published) > 0); err != nil {
+	if err := checkConfigUnit(ctx, serviceUnit, "current", "runtime-config.json", "", networkNamespace, destinations, len(published) > 0, policy); err != nil {
 		return err
 	}
 	if checkSockets {
@@ -170,7 +198,7 @@ func (systemdService) checkConfigUnits(ctx context.Context, destinations []strin
 	return nil
 }
 
-func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace string, destinations []string, published bool) error {
+func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace string, destinations []string, published bool, policy networkPolicy) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	cmd := systemctlCommand(ctx, "show", "--property=ExecStart,StandardInput,NeedDaemonReload,PrivateNetwork,NetworkNamespacePath,DynamicUser,NoNewPrivileges,IPAddressDeny,IPAddressAllow", unit)
@@ -183,15 +211,23 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace 
 	if values["PrivateNetwork"] != "yes" || values["NetworkNamespacePath"] != namespace ||
 		values["DynamicUser"] != "yes" || values["NoNewPrivileges"] != "yes" ||
 		values["StandardInput"] != "file" || values["NeedDaemonReload"] != "no" || !strings.Contains(values["ExecStart"], argv) ||
-		!deniesAllIP(values) ||
-		(namespace == "" && values["IPAddressAllow"] != "") {
+		(policy == networkPolicyPreflight && (!deniesAllIP(values) || values["IPAddressAllow"] != "")) ||
+		(policy == networkPolicyBase && !validCurrentNetworkPolicy(values)) ||
+		(policy == networkPolicyRestricted && !deniesAllIP(values)) {
 		return fmt.Errorf("Xray configuration sandbox does not match the required settings for %s", unit)
 	}
-	if namespace != "" {
+	if policy == networkPolicyPanel {
+		if !panelNetworkPolicyMatches(values) {
+			return errors.New("Xray panel service direct-outbound policy differs")
+		}
+	}
+	if namespace != "" && policy == networkPolicyRestricted {
 		allow := strings.Fields(values["IPAddressAllow"])
 		for _, entry := range allow {
 			prefix, err := netip.ParsePrefix(entry)
-			if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
+			if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 ||
+				(prefix.Addr().IsLoopback() && entry != "127.0.0.1/32" && entry != xrayconfig.PublicListenAddress+"/32") ||
+				(!prefix.Addr().IsLoopback() && !(xrayconfig.PublicEndpoint{Address: prefix.Addr().String(), Port: 1}).Valid()) {
 				return errors.New("Xray service IP allowances must be individual IPv4 addresses")
 			}
 		}
@@ -219,6 +255,34 @@ func checkConfigUnit(ctx context.Context, unit, bundle, config, flag, namespace 
 func deniesAllIP(values map[string]string) bool {
 	deny := strings.Fields(values["IPAddressDeny"])
 	return len(deny) == 2 && slices.Contains(deny, "0.0.0.0/0") && slices.Contains(deny, "::/0")
+}
+
+func panelNetworkPolicyMatches(values map[string]string) bool {
+	allow, deny := strings.Fields(values["IPAddressAllow"]), strings.Fields(values["IPAddressDeny"])
+	slices.Sort(allow)
+	slices.Sort(deny)
+	wantAllow, wantDeny := slices.Clone(panelNetworkAllow), slices.Clone(panelNetworkDeny)
+	slices.Sort(wantAllow)
+	slices.Sort(wantDeny)
+	return slices.Equal(allow, wantAllow) && slices.Equal(deny, wantDeny)
+}
+
+func validCurrentNetworkPolicy(values map[string]string) bool {
+	if !deniesAllIP(values) {
+		return false
+	}
+	if panelNetworkPolicyMatches(values) {
+		return true
+	}
+	for _, entry := range strings.Fields(values["IPAddressAllow"]) {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 ||
+			(prefix.Addr().IsLoopback() && entry != "127.0.0.1/32" && entry != xrayconfig.PublicListenAddress+"/32") ||
+			(!prefix.Addr().IsLoopback() && !(xrayconfig.PublicEndpoint{Address: prefix.Addr().String(), Port: 1}).Valid()) {
+			return false
+		}
+	}
+	return true
 }
 
 func checkPublishUnit(ctx context.Context, inbound publishedInbound) error {

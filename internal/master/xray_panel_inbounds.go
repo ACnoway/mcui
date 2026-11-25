@@ -59,6 +59,9 @@ func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS, 
 		}
 		draft.Inbounds = append(draft.Inbounds, entry.Inbound)
 		draft.Panel.Credentials = append(draft.Panel.Credentials, entry.Credentials...)
+		if entry.Inbound.Protocol == "" {
+			draft.Panel.DirectPorts = append(draft.Panel.DirectPorts, entry.Inbound.Port)
+		}
 	}
 	return draft
 }
@@ -154,7 +157,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 		(in.CopyRoutesFrom != 0 && (in.CopyRoutesFrom < 1024 || in.CopyRoutesFrom > 65535 || in.CopyRoutesFrom == port || in.Destination != (xrayconfig.Destination{}))) ||
 		(in.Clients != nil && (len(in.Clients) < 1 || len(in.Clients) > xrayconfig.MaxInboundUsers || in.Username != "" || in.Credential != "")) ||
 		(in.Protocol != xrayconfig.Trojan && in.RotateTLS) ||
-		(in.Protocol != xrayconfig.Trojan && in.Protocol != xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{})) {
+		(in.Protocol != "" && in.Protocol != xrayconfig.Trojan && in.Protocol != xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{})) {
 		http.Error(w, "invalid panel Xray inbound", http.StatusBadRequest)
 		return
 	}

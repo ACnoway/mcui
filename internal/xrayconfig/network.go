@@ -14,6 +14,15 @@ const MaxConfigurationSize = 3072
 
 const denyTag = "deny"
 
+var panelDirectBlockedIPs = []string{
+	"geoip:private", "0.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+	"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24",
+	"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "::ffff:0:0/96",
+	"64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001::/23", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+}
+
+func PanelDirectBlockedIPs() []string { return slices.Clone(panelDirectBlockedIPs) }
+
 // Destination is a node-approved public IPv4 TCP endpoint.
 type Destination struct {
 	Address string `json:"address"`
@@ -82,7 +91,7 @@ func (c Configuration) Valid() bool {
 	tags := make(map[string]bool, len(n.Outbounds))
 	destinations := make(map[Destination]bool, len(n.Outbounds))
 	for _, outbound := range n.Outbounds {
-		if outbound.Tag == denyTag || !ValidUsername(outbound.Tag) || tags[outbound.Tag] ||
+		if outbound.Tag == denyTag || outbound.Tag == "direct" || !ValidUsername(outbound.Tag) || tags[outbound.Tag] ||
 			!outbound.Destination.valid() || destinations[outbound.Destination] {
 			return false
 		}
@@ -141,9 +150,9 @@ func (c Catalog) AllowsConfiguration(plan Configuration) bool {
 }
 
 type renderedOutbound struct {
-	Protocol string            `json:"protocol"`
-	Tag      string            `json:"tag"`
-	Settings map[string]string `json:"settings,omitempty"`
+	Protocol string `json:"protocol"`
+	Tag      string `json:"tag"`
+	Settings any    `json:"settings,omitempty"`
 }
 
 type renderedRule struct {
@@ -154,7 +163,44 @@ type renderedRule struct {
 	OutboundTag string   `json:"outboundTag"`
 }
 
-func (n Network) render(inbounds []any, tags map[int]string, port int, statistics bool) ([]byte, Reference, error) {
+func (n Network) render(inbounds []any, tags map[int]string, port int, statistics bool, directTags []string) ([]byte, Reference, error) {
+	if len(directTags) > 0 {
+		outbounds := []renderedOutbound{{Protocol: "blackhole", Tag: denyTag}, {
+			Protocol: "freedom", Tag: "direct",
+			Settings: map[string]any{"finalRules": []any{map[string]any{
+				"action": "block",
+				"ip":     PanelDirectBlockedIPs(),
+			}}},
+		}}
+		destinations := make(map[string]Destination, len(n.Outbounds))
+		for _, outbound := range n.Outbounds {
+			destinations[outbound.Tag] = outbound.Destination
+			outbounds = append(outbounds, renderedOutbound{
+				Protocol: "freedom", Tag: outbound.Tag,
+				Settings: map[string]string{"redirect": outbound.Destination.String()},
+			})
+		}
+		rules := make([]renderedRule, 0, len(n.Routes)+1)
+		for _, route := range n.Routes {
+			destination := destinations[route.OutboundTag]
+			rules = append(rules, renderedRule{
+				InboundTags: []string{tags[route.InboundPort]}, Network: "tcp", IP: []string{destination.Address + "/32"},
+				Port: destination.Port, OutboundTag: route.OutboundTag,
+			})
+		}
+		rules = append(rules, renderedRule{InboundTags: slices.Clone(directTags), OutboundTag: "direct"})
+		config := map[string]any{
+			"log": map[string]string{"loglevel": "none"}, "inbounds": inbounds, "outbounds": outbounds,
+			"routing": map[string]any{
+				"domainStrategy": "IPOnDemand",
+				"rules":          rules,
+			},
+		}
+		if statistics {
+			enableStatistics(config)
+		}
+		return encodeConfiguration(config, port)
+	}
 	outbounds := []renderedOutbound{{Protocol: "blackhole", Tag: denyTag}}
 	destinations := make(map[string]Destination, len(n.Outbounds))
 	for _, outbound := range n.Outbounds {
@@ -197,13 +243,21 @@ func AppliedNetwork(data []byte, inboundPorts map[string]int) (*Network, error) 
 		return nil, errors.New("invalid committed Xray outbounds")
 	}
 	if len(config.Outbounds) == 2 && config.Outbounds[1].Tag == "allowed" &&
-		config.Outbounds[1].Protocol == "freedom" && len(config.Outbounds[1].Settings) == 0 {
+		config.Outbounds[1].Protocol == "freedom" && config.Outbounds[1].Settings == nil {
 		return nil, nil
 	}
 	network := &Network{Outbounds: []Outbound{}, Routes: []Route{}}
 	destinations := make(map[string]Destination, len(config.Outbounds)-1)
 	for _, out := range config.Outbounds[1:] {
-		endpoint, err := netip.ParseAddrPort(out.Settings["redirect"])
+		if out.Tag == "direct" && out.Protocol == "freedom" {
+			continue
+		}
+		settings, ok := out.Settings.(map[string]any)
+		redirect, valid := settings["redirect"].(string)
+		if !ok || !valid {
+			return nil, errors.New("invalid committed Xray outbound settings")
+		}
+		endpoint, err := netip.ParseAddrPort(redirect)
 		destination := Destination{Address: endpoint.Addr().String(), Port: int(endpoint.Port())}
 		if err != nil || out.Protocol != "freedom" || !destination.valid() {
 			return nil, errors.New("invalid committed Xray outbound destination")
@@ -212,6 +266,17 @@ func AppliedNetwork(data []byte, inboundPorts map[string]int) (*Network, error) 
 		network.Outbounds = append(network.Outbounds, Outbound{Tag: out.Tag, Destination: destination})
 	}
 	for _, rule := range config.Routing.Rules {
+		if rule.OutboundTag == "direct" {
+			if len(rule.InboundTags) == 0 || rule.Network != "" || len(rule.IP) != 0 || rule.Port != 0 {
+				return nil, errors.New("invalid committed direct Xray route")
+			}
+			for _, tag := range rule.InboundTags {
+				if inboundPorts[tag] == 0 {
+					return nil, errors.New("invalid committed direct Xray inbound")
+				}
+			}
+			continue
+		}
 		destination, ok := destinations[rule.OutboundTag]
 		if !ok || len(rule.InboundTags) != 1 || rule.Network != "tcp" || rule.Port != destination.Port ||
 			!slices.Equal(rule.IP, []string{destination.Address + "/32"}) || inboundPorts[rule.InboundTags[0]] == 0 {
