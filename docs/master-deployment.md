@@ -37,10 +37,11 @@ sudo systemctl start mcui-master
 
 ## Compose 安装
 
-从项目 GitHub Release 下载 `compose.yaml`。在文件所在目录启动主控并查看首次凭据。
+从同一 GitHub Release 下载 `compose.yaml`、`install-mcui-compose.sh`、`setup-host-clock.sh` 和 `SHA256SUMS`。核对可信的摘要后，在文件所在目录执行：
 
 ```sh
-docker compose up -d
+sha256sum --check --ignore-missing SHA256SUMS
+sudo bash ./install-mcui-compose.sh
 docker compose logs master
 ```
 
@@ -48,7 +49,9 @@ Release 附带的 `compose.yaml` 默认固定到该 Release 对应的 `ghcr.io/a
 
 `master-data` 卷保存面板数据库、任务和签发账本、发布清单验收状态以及两套签发私钥。升级保留该卷。备份时停止主控并备份整个卷，恢复时保留一致的数据库与密钥。Compose 默认由同一进程使用两套密钥，独立签发进程的部署方式见[高级签发配置](./phase-3-approval.md)。
 
-Compose 主控镜像内置 chrony 和 Cloudflare NTS 配置。运行 `docker compose up -d` 时，容器自动启动 chronyd，无需在宿主机安装 chrony、填写 NTS 服务器或挂载时间配置。HTTPS 覆盖文件沿用同一套机制。宿主机仍需保持系统时间准确，并允许容器解析 `time.cloudflare.com` 和访问出站 TCP 4460、UDP 123。容器内的 chrony 只校验时间，主控取得有效的认证样本且误差达标后自动开放任务签发。
+Compose 安装程序先检查并复用活动的宿主机时间同步服务；没有活动服务时启用已安装的服务，Debian 上缺少服务时安装并启用 systemd-timesyncd。安装程序最多等待 120 秒让宿主机报告同步，失败时打印排查提示并退出；重新执行可重试。宿主机同步服务持续维护系统时钟，调整时可能影响同机其他程序。安装程序不主动执行立即跳时，较大偏差可能需要较长时间恢复。受限容器或不允许修改时钟的虚拟环境需由宿主机或服务商提供同步。
+
+主控容器另以 chrony 和 Cloudflare NTS 独立验证时间，签发任务前仍须满足认证、样本和误差条件。宿主机报告同步不等于 MCUI 已通过认证时间检查。需要容器解析 `time.cloudflare.com` 并访问出站 TCP 4460、UDP 123；如果系统时间偏差大到 TLS 证书验证失败，需先通过可信途径校正时间。直接运行 `docker compose up -d` 不会配置宿主机同步。
 
 若初始密码丢失且尚未绑定 MFA，使用当前镜像对同一个卷运行恢复命令。
 
@@ -93,7 +96,7 @@ MCUI_DOMAIN=panel.example.net
 ```
 
 ```sh
-docker compose -f compose.yaml -f compose.https.yaml up -d
+sudo bash ./install-mcui-compose.sh -f compose.yaml -f compose.https.yaml
 ```
 
 通过该域名访问面板，添加节点后复制安装命令，在 Debian amd64 或 arm64 的 systemd 节点执行。安装命令从 GitHub 下载同版本的 `install-mcui-agent.sh`，核验镜像内配套的 SHA-256，再传入该部署的公钥并完成注册。

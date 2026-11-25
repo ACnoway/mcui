@@ -17,7 +17,9 @@ installer_sha=$(sha256sum -- "$output/install-mcui-agent.sh")
 printf '%s %s\n' "$tag" "${installer_sha%% *}" >"$output/image/release/agent-release"
 sed "s#ghcr.io/acnoway/mcui-master:latest#ghcr.io/acnoway/mcui-master:$tag#g" compose.yaml >"$output/compose.yaml"
 install -m 0644 -- compose.https.yaml "$output/"
+install -m 0755 -- deploy/master/install-compose.sh "$output/install-mcui-compose.sh"
+install -m 0755 -- deploy/master/setup-host-clock.sh "$output/setup-host-clock.sh"
 (
   cd "$output"
-  sha256sum -- install-mcui-agent.sh install-mcui-master.sh compose.yaml compose.https.yaml > SHA256SUMS
+  sha256sum -- install-mcui-agent.sh install-mcui-master.sh install-mcui-compose.sh setup-host-clock.sh compose.yaml compose.https.yaml > SHA256SUMS
 )

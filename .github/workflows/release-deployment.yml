@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            install-mcui-agent.sh install-mcui-master.sh compose.yaml compose.https.yaml SHA256SUMS
+            install-mcui-agent.sh install-mcui-master.sh install-mcui-compose.sh setup-host-clock.sh compose.yaml compose.https.yaml SHA256SUMS
           if [[ "$RELEASE_CHANNEL" == stable ]]; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft=false --latest
           else

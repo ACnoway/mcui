@@ -4,7 +4,7 @@ MCUI is a lightweight panel for managing proxy services on Linux nodes. The Mast
 
 ## V1 deployment target
 
-1. Start the Master with Docker Compose. The default image comes from GitHub Container Registry, starts on loopback, and automatically runs chrony with Cloudflare NTS for signed tasks. Give the HTTPS Compose overlay a public hostname to connect remote Agents.
+1. Start the Master with the release's Compose installer. It checks host time synchronization before starting the image, which uses Cloudflare NTS to verify time for signed tasks. Give the HTTPS Compose overlay a public hostname to connect remote Agents.
 2. Sign in as the single administrator with the generated initial credentials. The installer prints them once in its output, or in the Master container logs for Compose. First sign-in sets a new password and enrolls MFA.
 3. Add a node and copy a single installation command from the panel. On a supported Debian host, the command verifies the matching GitHub Release installer, passes the deployment's public keys, and enrolls the Core-free Agent and its restricted Helper.
 4. Manage the node from the same administrator account. Pick a Core version, defaulting to the latest verified stable release available for that node. MCUI selects and verifies the official binary package and handles task signing. The panel controls installation, start, stop, upgrade, downgrade, and uninstall.

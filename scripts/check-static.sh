@@ -32,6 +32,7 @@ node scripts/verify-protocol-v2-vectors.mjs
 for script in scripts/*.sh deploy/agent-installer.sh deploy/agent-xray-bootstrap.sh deploy/xray-network.sh deploy/master/*.sh; do
   bash -n "$script"
 done
+bash scripts/check-host-clock.sh
 
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
