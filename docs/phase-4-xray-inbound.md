@@ -1,5 +1,7 @@
 # Xray 受控入站
 
+2026-11-25 在 `ro:/root/mcui` 的隔离检出验证提交 `0cd92d08741335937c487ea23bed0e9b270d0ef3`。Linux 全量静态检查及 Master、Store、任务投递、Xray 配置与运行时的竞态测试通过。隔离网络使用 SHA-256 核验的官方 Xray `v26.10.31`，实际验证了 VLESS RAW 客户端连接和统计查询。Master、Agent 托管 Core 安装包与双架构成对运行时构建并核对 SHA-256。真实 VLESS 测试在网络命名空间内连接受控入站，公网 systemd 中继由现有运行时检查覆盖。
+
 新节点可使用主控定义入站。已有节点也可继续使用节点目录，由单管理员给预先批准的端口分配用户。节点、Master、Agent、Helper 和独立签发服务须使用支持相应模式的版本。
 
 主控定义的 VLESS 入站也可启用公网 TCP 入口。该模板使用 RAW TCP，VLESS 本身不提供传输加密。在可信网络或已有安全传输通道中使用，客户端可从已生效入站生成配置。更新 Agent、Helper 和主控后，节点上报 `panel_public_vless` 才能保存此入口。
