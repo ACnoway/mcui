@@ -169,6 +169,19 @@ func TestVLESSTransportConnections(t *testing.T) {
 				})
 			}
 			start(server)
+			serverReady := false
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+				probe, probeErr := net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", serverPort), 100*time.Millisecond)
+				if probeErr == nil {
+					_ = probe.Close()
+					serverReady = true
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if !serverReady {
+				t.Fatal("Xray server did not start listening")
+			}
 			start(client)
 			var conn net.Conn
 			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
