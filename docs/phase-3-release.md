@@ -24,7 +24,7 @@ Xray 安装选择器读取最近最多 100 条发布记录，目录响应上限�
 
 - `vX.Y.Z-alpha.N` 用于早期验证。主要功能已经可以试用，部署流程、接口或数据结构仍可能调整。
 - `vX.Y.Z-beta.N` 用于功能基本齐全后的验收。重点验证从零部署、节点接入、升级和兼容性。
-- `vX.Y.Z` 用于通过验收的正式版。主、次和补丁版本号使用无前导零的非负整数。每个预发布阶段的序号从 `1` 开始。示例顺序为 `v0.1.0-alpha.1`、`v0.1.0-alpha.2`、`v0.1.0-alpha.3`、`v0.1.0-beta.1`、`v0.1.0`。[语义化版本规范](https://semver.org/lang/zh-CN/)
+- `vX.Y.Z` 用于通过验收的正式版。主、次和补丁版本号使用无前导零的非负整数。每个预发布阶段的序号从 `1` 开始。示例顺序为 `v0.1.0-alpha.1`、`v0.1.0-alpha.2`、`v0.1.0-alpha.3`、`v0.1.0-alpha.4`、`v0.1.0-beta.1`、`v0.1.0`。[语义化版本规范](https://semver.org/lang/zh-CN/)
 
 **Publish MCUI release** 在推送新标签时运行项目检查，从该标签构建 amd64 和 arm64 制品，并上传到 GitHub Release。每个架构提供 `mcui-master-linux-<arch>.tar.gz`（主控和 Web 文件）和 `mcui-agent-linux-<arch>.zip`（Agent 和 Helper），另附 `SHA256SUMS-binaries`。
 

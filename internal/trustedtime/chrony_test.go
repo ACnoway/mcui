@@ -93,8 +93,13 @@ func TestTrackingHealthyChecksClockBoundAndSynchronization(t *testing.T) {
 	if !trackingHealthy(valid) {
 		t.Fatal("expected synchronized clock within its error bound")
 	}
+	boundary := "System time : 9.5 seconds slow of NTP time\nRoot delay : 0.5 seconds\nRoot dispersion : 0.25 seconds\nUpdate interval : 64 seconds\nLeap status : Normal\n"
+	if !trackingHealthy(boundary) {
+		t.Fatal("expected clock at the 10 second error bound to be accepted")
+	}
 	for _, tracking := range []string{
-		"System time : 2 seconds fast of NTP time\nRoot delay : 0.01 seconds\nRoot dispersion : 0.02 seconds\nUpdate interval : 64 seconds\nLeap status : Normal\n",
+		"System time : 10.1 seconds fast of NTP time\nRoot delay : 0.01 seconds\nRoot dispersion : 0.02 seconds\nUpdate interval : 64 seconds\nLeap status : Normal\n",
+		"System time : 9.75 seconds slow of NTP time\nRoot delay : 0.5 seconds\nRoot dispersion : 0.25 seconds\nUpdate interval : 64 seconds\nLeap status : Normal\n",
 		"System time : 0.1 seconds slow of NTP time\nRoot delay : 0.01 seconds\nRoot dispersion : 0.02 seconds\nUpdate interval : 600 seconds\nLeap status : Normal\n",
 		"System time : 0.1 seconds slow of NTP time\nRoot delay : 0.01 seconds\nRoot dispersion : 0.02 seconds\nUpdate interval : 64 seconds\nLeap status : Not synchronised\n",
 		"System time : 0.1 seconds slow of NTP time\nRoot delay : 0.01 seconds\nRoot dispersion : 0.02 seconds\nUpdate interval : NaN seconds\nLeap status : Normal\n",

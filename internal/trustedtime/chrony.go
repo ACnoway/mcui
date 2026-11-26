@@ -15,6 +15,7 @@ import (
 
 const DefaultNTSSource = "time.cloudflare.com"
 const chronyCommandSocket = "/run/chrony/chronyd.sock"
+const maxClockErrorSeconds = 10.0
 
 var ErrUntrusted = errors.New("authenticated time source is unavailable")
 
@@ -137,7 +138,7 @@ func trackingHealthy(output string) bool {
 		return false
 	}
 	systemOffset, err := firstNumber(fields["System time"])
-	if err != nil || !isFinite(systemOffset) || absFloat(systemOffset) > 1 {
+	if err != nil || !isFinite(systemOffset) || absFloat(systemOffset) > maxClockErrorSeconds {
 		return false
 	}
 	update, err := firstNumber(fields["Update interval"])
@@ -145,11 +146,11 @@ func trackingHealthy(output string) bool {
 		return false
 	}
 	dispersion, err := firstNumber(fields["Root dispersion"])
-	if err != nil || !isFinite(dispersion) || dispersion < 0 || dispersion > 1 {
+	if err != nil || !isFinite(dispersion) || dispersion < 0 || dispersion > maxClockErrorSeconds {
 		return false
 	}
 	delay, err := firstNumber(fields["Root delay"])
-	return err == nil && isFinite(delay) && delay >= 0 && absFloat(systemOffset)+dispersion+(0.5*delay) <= 1
+	return err == nil && isFinite(delay) && delay >= 0 && absFloat(systemOffset)+dispersion+(0.5*delay) <= maxClockErrorSeconds
 }
 
 func parseDurationSeconds(value string) (float64, error) {
