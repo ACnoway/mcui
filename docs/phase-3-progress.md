@@ -65,6 +65,7 @@
 
 | 检查 | 结果 | 环境/范围 |
 |---|---|---|
+| Xray 安装版本目录响应上限 | 通过，`v0.1.0-alpha.3` 候选 | `ssh ro` 的 `/root/mcui`，Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。回归测试确认 13,016,327 字节的 Xray 响应可读取；`scripts/check-static.sh` 通过。双架构二进制归档、alpha.3 Compose 发布包及 SHA-256 校验通过。 |
 | 单管理员 Xray 选版与后台签发 | 通过，代码 `11743c6`，测试时钟修正 `51151a6`（2026-11-21） | `ro` 的 Debian amd64 隔离检出通过全量 `scripts/check-static.sh`、定向竞态测试和 Master、Agent 及签发器的 amd64/arm64 构建。集成测试覆盖六类操作、架构筛选、已提交版本绑定、请求重试、确认及 MFA，以及单机和独立检查点。临时 Debian 容器用真实 Cloudflare NTS 和测试签名清单运行独立签发进程，验证认证、节点范围、未批准摘要拒绝、幂等重放及清单防回滚。 |
 | 单机 Master 无独立检查点 | 通过（2026-11-21） | 在 `ro` 上通过全量 `bash scripts/check-static.sh`。同时配置 Xray 和 Agent/Helper 远程更新策略，使用测试证书启动真实 Master 并通过 HTTPS 健康检查。单机和独立检查点两种配置均通过远程任务、在线租约、备用制品、更新回执及并发互斥的定向竞态测试。独立检查点仍拒绝协调恢复的旧快照。 |
 | Master 远程发起 Agent/Helper 成对更新 | 通过，提交 `e66e9af`（2026-11-21） | `ro` 的 `/root/mcui` 隔离检出，Debian 13 amd64、Go 1.27.4、Node.js 26.13.1、pnpm 12.17.0。全量 `bash scripts/check-static.sh`、Master/监督器竞态检查、systemd 单元验证、amd64/arm64 ZIP 构建和 SHA-256 校验通过。涵盖独立签名与凭据、节点绑定、伪造和损坏制品拒绝、任务互斥、TLS 下载、提交和回退、过期处理、回执重试与数据库迁移。arm64 仅验证构建和制品摘要。 |

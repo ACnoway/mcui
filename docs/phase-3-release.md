@@ -2,6 +2,8 @@
 
 Core 安装直接使用各项目官方 GitHub Releases。安装 Xray 时，管理员在节点面板选择一个已发布的稳定版本；Master 根据固定的 Xray 仓库读取该版本和节点架构对应的官方制品，并把精确版本、架构和 SHA-256 签入生命周期任务。节点只从固定的官方来源下载，并校验文件长度和 SHA-256。
 
+Xray 安装选择器读取最近最多 100 条发布记录，目录响应上限为 16 MiB，以容纳目前实测约 13 MB 的上游响应，同时继续拒绝超大响应。
+
 这条流程不需要单独维护 Core 发布公钥或签名清单。Master 在上游 API 提供制品摘要时核对该摘要；未提供时由 Master 下载官方文件并计算摘要。Agent 与 Helper 仍使用专用任务公钥核验任务。Agent/Helper 成对更新使用独立的运行时签名和节点授权流程，见[成对更新手册](./phase-3-runtime-update.md)。
 
 ## 1. 发布位置和信任边界
@@ -22,7 +24,7 @@ Core 安装直接使用各项目官方 GitHub Releases。安装 Xray 时，管�
 
 - `vX.Y.Z-alpha.N` 用于早期验证。主要功能已经可以试用，部署流程、接口或数据结构仍可能调整。
 - `vX.Y.Z-beta.N` 用于功能基本齐全后的验收。重点验证从零部署、节点接入、升级和兼容性。
-- `vX.Y.Z` 用于通过验收的正式版。主、次和补丁版本号使用无前导零的非负整数。每个预发布阶段的序号从 `1` 开始。示例顺序为 `v0.1.0-alpha.1`、`v0.1.0-alpha.2`、`v0.1.0-beta.1`、`v0.1.0`。[语义化版本规范](https://semver.org/lang/zh-CN/)
+- `vX.Y.Z` 用于通过验收的正式版。主、次和补丁版本号使用无前导零的非负整数。每个预发布阶段的序号从 `1` 开始。示例顺序为 `v0.1.0-alpha.1`、`v0.1.0-alpha.2`、`v0.1.0-alpha.3`、`v0.1.0-beta.1`、`v0.1.0`。[语义化版本规范](https://semver.org/lang/zh-CN/)
 
 **Publish MCUI release** 在推送新标签时运行项目检查，从该标签构建 amd64 和 arm64 制品，并上传到 GitHub Release。每个架构提供 `mcui-master-linux-<arch>.tar.gz`（主控和 Web 文件）和 `mcui-agent-linux-<arch>.zip`（Agent 和 Helper），另附 `SHA256SUMS-binaries`。
 

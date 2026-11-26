@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	maxResponseBytes = 8 << 20
+	maxResponseBytes = 16 << 20
 	pageSize         = 10
 	installPageSize  = 100
 	cacheLifetime    = 10 * time.Minute

@@ -173,6 +173,26 @@ func TestListRejectsOversizeSourceResponse(t *testing.T) {
 	}
 }
 
+func TestListXrayReleasesAcceptsObservedResponseSize(t *testing.T) {
+	const responseBytes = 13_016_327
+	client := NewClient()
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/repos/XTLS/Xray-core/releases" || req.URL.Query().Get("per_page") != fmt.Sprint(installPageSize) {
+			return nil, fmt.Errorf("unexpected Xray releases request: %s", req.URL)
+		}
+		body := "[]" + strings.Repeat(" ", responseBytes-2)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})}
+
+	snapshot, err := client.ListXrayReleases(context.Background())
+	if err != nil {
+		t.Fatalf("observed Xray release response size was rejected: %v", err)
+	}
+	if len(snapshot.Cores) != 1 || snapshot.Cores[0].ID != "xray" {
+		t.Fatalf("unexpected Xray release snapshot: %+v", snapshot)
+	}
+}
+
 func TestResolveOfficialXrayReleaseUsesExactOfficialAsset(t *testing.T) {
 	version, architecture := "v26.11.9", "amd64"
 	filename, err := ExpectedAssetName("xray", version, architecture)
