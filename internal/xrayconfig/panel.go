@@ -41,7 +41,7 @@ func (p PanelConfiguration) valid(plan Plan) bool {
 		if inbound.Protocol == "" && !slices.Contains(p.DirectPorts, inbound.Port) {
 			return false
 		}
-		if inbound.Protocol == Trojan {
+		if inbound.UsesTLS() {
 			usesTLS = true
 			if p.TLS == nil || p.TLS.Trust.SHA256 != inbound.TLSCertSHA256 {
 				return false
@@ -194,7 +194,12 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 		if protocol == Trojan {
 			entry["streamSettings"] = tls.streamSettings()
 		} else if inbound.VLESSStream != nil {
-			entry["streamSettings"] = inbound.VLESSStream.render()
+			stream := inbound.VLESSStream.render()
+			if inbound.UsesTLS() {
+				tlsStream := tls.streamSettings()
+				stream["security"], stream["tlsSettings"] = tlsStream["security"], tlsStream["tlsSettings"]
+			}
+			entry["streamSettings"] = stream
 		}
 		inbounds = append(inbounds, entry)
 		tags[inbound.Port] = tag

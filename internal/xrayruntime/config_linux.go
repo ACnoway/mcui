@@ -129,9 +129,15 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				if in.Protocol == "socks" {
 					entry.Protocol = ""
 				}
-				if keyErr == nil && in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "" {
-					stream := &xrayconfig.VLESSStream{Network: in.StreamSettings.Network}
+				if keyErr == nil && in.Protocol == xrayconfig.VLESS && (in.StreamSettings.Security == "" || in.StreamSettings.Security == "tls") {
+					stream := &xrayconfig.VLESSStream{Network: in.StreamSettings.Network, Security: in.StreamSettings.Security}
 					switch stream.Network {
+					case "raw", "tcp":
+						if stream.Security == "tls" {
+							stream.Network = "tcp"
+						} else {
+							stream = nil
+						}
 					case "ws":
 						stream.Path, stream.Host = in.StreamSettings.WS.Path, in.StreamSettings.WS.Host
 					case "httpupgrade":
@@ -152,7 +158,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 					}
 					entry.Protocol, entry.RealityPublicKey = xrayconfig.VLESSReality, key
 				}
-				if entry.Protocol == xrayconfig.Trojan {
+				if entry.UsesTLS() {
 					certs := in.StreamSettings.TLS.Certificates
 					if in.StreamSettings.Security != "tls" || len(certs) != 1 {
 						return view
@@ -412,7 +418,7 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 		}
 		supported := (inbound.Protocol == "socks" && inbound.Stream.Security == "") ||
 			(inbound.Protocol == xrayconfig.Trojan && inbound.Stream.Security == "tls") ||
-			(inbound.Protocol == xrayconfig.VLESS && (inbound.Stream.Security == "reality" || inbound.Stream.Security == ""))
+			(inbound.Protocol == xrayconfig.VLESS && (inbound.Stream.Security == "reality" || inbound.Stream.Security == "tls" || inbound.Stream.Security == ""))
 		if inbound.Listen != xrayconfig.PublicListenAddress || !ok || !supported || inbound.Port < 1024 || inbound.Port > 65535 {
 			return nil, nil, false, errors.New("invalid saved Xray public listener")
 		}

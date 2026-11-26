@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// PanelTLS shares one server identity across the panel's Trojan inbounds on
+// PanelTLS shares one server identity across the panel's TLS inbounds on
 // a node. The signed draft carries the public trust and a sealed private seed.
 type PanelTLS struct {
 	Trust TrojanTrust `json:"trust"`

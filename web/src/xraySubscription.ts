@@ -6,7 +6,7 @@ export const xrayProtocolName: Record<XrayProtocol, string> = {
 }
 
 export type XrayPublicEndpoint = { address: string; port: number }
-export type VLESSStream = { network: 'ws' | 'grpc' | 'httpupgrade' | 'xhttp'; path?: string; host?: string; service_name?: string; authority?: string; multi_mode?: boolean; mode?: 'auto' | 'packet-up' | 'stream-up' | 'stream-one' }
+export type VLESSStream = { network: 'tcp' | 'ws' | 'grpc' | 'httpupgrade' | 'xhttp'; security?: 'tls'; path?: string; host?: string; service_name?: string; authority?: string; multi_mode?: boolean; mode?: 'auto' | 'packet-up' | 'stream-up' | 'stream-one' }
 
 export type XraySubscription = {
   schema_version: 1 | 2 | 3 | 4 | 5
@@ -83,17 +83,19 @@ export function validSubscription(value: unknown): value is XraySubscription {
     if (!streams.length || streams.some(([key, stream]) => {
       const port = Number(key)
       if (String(port) !== key || !ports.includes(port) || port_protocols[port] !== 'vless' || !stream || typeof stream !== 'object') return true
-      if (typeof stream.network !== 'string' || !['ws', 'grpc', 'httpupgrade', 'xhttp'].includes(stream.network)) return true
+      if (typeof stream.network !== 'string' || !['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp'].includes(stream.network)) return true
+      if (stream.security !== undefined && stream.security !== 'tls') return true
       if (stream.host !== undefined && (typeof stream.host !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.host))) return true
       if (stream.authority !== undefined && (typeof stream.authority !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.authority))) return true
       if (stream.multi_mode !== undefined && typeof stream.multi_mode !== 'boolean') return true
       if (stream.service_name !== undefined && (typeof stream.service_name !== 'string' || !/^[A-Za-z0-9_.-]{0,128}$/.test(stream.service_name))) return true
+      if (stream.network === 'tcp') return stream.security !== 'tls' || !!stream.path || !!stream.host || !!stream.mode || !!stream.service_name || !!stream.authority || !!stream.multi_mode
       if (stream.network === 'grpc') return !!stream.path || !!stream.host || !!stream.mode
       return typeof stream.path !== 'string' || !stream.path.startsWith('/') || stream.path.length > 256 || /[\r\n\0]/.test(stream.path) ||
         !!stream.service_name || !!stream.authority || !!stream.multi_mode || (stream.network === 'xhttp' ? !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(stream.mode ?? '') : !!stream.mode)
     })) return false
   }
-  if (entries.some(([, protocol]) => protocol === 'trojan')) {
+  if (entries.some(([, protocol]) => protocol === 'trojan') || Object.values(vless_streams ?? {}).some(stream => stream.security === 'tls')) {
     if (!trojan_trust || typeof trojan_trust.certificate !== 'string' || trojan_trust.certificate.length > 1024 ||
       !/^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+\n-----END CERTIFICATE-----$/.test(trojan_trust.certificate.trim()) ||
       typeof trojan_trust.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(trojan_trust.sha256)) return false
@@ -158,10 +160,14 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
   const trust = subscription.trojan_trust
   const vlessStream = subscription.vless_streams?.[proxyPort]
   const streamSettings = vlessStream ? {
-    network: vlessStream.network,
-    [`${vlessStream.network}Settings`]: vlessStream.network === 'grpc'
+    network: vlessStream.network === 'tcp' ? 'raw' : vlessStream.network,
+    ...(vlessStream.network === 'tcp' ? {} : { [`${vlessStream.network}Settings`]: vlessStream.network === 'grpc'
       ? { serviceName: vlessStream.service_name ?? '', authority: vlessStream.authority ?? '', multiMode: vlessStream.multi_mode ?? false }
-      : { path: vlessStream.path, host: vlessStream.host ?? '', ...(vlessStream.network === 'xhttp' ? { mode: vlessStream.mode } : {}) },
+      : { path: vlessStream.path, host: vlessStream.host ?? '', ...(vlessStream.network === 'xhttp' ? { mode: vlessStream.mode } : {}) } }),
+    ...(vlessStream.security === 'tls' && trust ? { security: 'tls', tlsSettings: {
+      serverName: 'localhost', fingerprint: 'unsafe', pinnedPeerCertSha256: trust.sha256,
+      ...(vlessStream.network === 'grpc' ? { alpn: ['h2', 'http/1.1'] } : {}),
+    } } : {}),
   } : protocol === 'vless-reality' ? {
     network: 'raw', security: 'reality',
     realitySettings: {
@@ -194,13 +200,18 @@ export function buildVlessLink(subscription: XraySubscription, proxyPort: number
   outboundSettings(subscription, proxyPort, protocol, credential)
   const endpoint = subscriptionEndpoint(subscription, proxyPort)
   const stream = subscription.vless_streams?.[proxyPort]
-  const params = new URLSearchParams({ type: stream?.network ?? 'tcp', encryption: 'none', security: protocol === 'vless-reality' ? 'reality' : 'none' })
+  const params = new URLSearchParams({ type: stream?.network ?? 'tcp', encryption: 'none', security: protocol === 'vless-reality' ? 'reality' : stream?.security ?? 'none' })
   if (stream?.path) params.set('path', stream.path)
   if (stream?.host) params.set('host', stream.host)
   if (stream?.service_name) params.set('serviceName', stream.service_name)
   if (stream?.authority) params.set('authority', stream.authority)
   if (stream?.multi_mode) params.set('mode', 'multi')
   if (stream?.mode) params.set('mode', stream.mode)
+  if (stream?.security === 'tls') {
+    params.set('sni', 'localhost')
+    params.set('pcs', subscription.trojan_trust!.sha256)
+    if (stream.network === 'grpc') params.set('alpn', 'h2,http/1.1')
+  }
   if (protocol === 'vless-reality') {
     params.set('sni', 'localhost')
     params.set('fp', 'chrome')

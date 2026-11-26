@@ -37,6 +37,10 @@ type Inbound struct {
 	Users            []string       `json:"users"`
 }
 
+func (in Inbound) UsesTLS() bool {
+	return in.Protocol == Trojan || (in.Protocol == VLESS && in.VLESSStream != nil && in.VLESSStream.Security == "tls")
+}
+
 // Plan contains only listen ports, approved protocols and node-local credential names.
 type Plan []Inbound
 
@@ -49,7 +53,7 @@ func (p Plan) Valid() bool {
 	for _, in := range p {
 		if in.Port <= lastPort || in.Port > 65535 || !validUsers(in.Users) ||
 			(in.Protocol != "" && in.Protocol != HTTP && !UsesProtocolCredentials(in.Protocol)) ||
-			(in.Protocol == Trojan && !digest.MatchString(in.TLSCertSHA256)) || (in.Protocol != Trojan && in.TLSCertSHA256 != "") ||
+			(in.UsesTLS() && !digest.MatchString(in.TLSCertSHA256)) || (!in.UsesTLS() && in.TLSCertSHA256 != "") ||
 			(in.Protocol == VLESSReality && !security.ValidNodeSecret(in.RealityPublicKey)) || (in.Protocol != VLESSReality && in.RealityPublicKey != "") ||
 			!in.VLESSStream.Valid() || (in.VLESSStream != nil && in.Protocol != VLESS) {
 			return false

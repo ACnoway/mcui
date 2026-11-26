@@ -50,3 +50,16 @@ for (const stream of [
   if (stream.path) assert.equal(settings.path, stream.path)
   if (stream.service_name) assert.equal(settings.serviceName, stream.service_name)
 }
+
+const tls = {
+  ...base, schema_version: 5,
+  trojan_trust: { certificate: '-----BEGIN CERTIFICATE-----\nMII=\n-----END CERTIFICATE-----', sha256: 'a'.repeat(64) },
+  vless_streams: { 1080: { network: 'grpc', security: 'tls', service_name: 'proxy' } },
+}
+const tlsURL = new URL(buildVlessLink(tls, 1080, id, 'tls'))
+assert.equal(tlsURL.searchParams.get('security'), 'tls')
+assert.equal(tlsURL.searchParams.get('pcs'), 'a'.repeat(64))
+assert.equal(tlsURL.searchParams.get('sni'), 'localhost')
+const tlsClient = buildXrayClient(tls, 1080, 10808, id)
+assert.equal(tlsClient.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256, 'a'.repeat(64))
+assert.throws(() => buildVlessLink({ ...tls, trojan_trust: undefined }, 1080, id, 'tls'))

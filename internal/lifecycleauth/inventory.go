@@ -71,7 +71,7 @@ func (x XrayInventory) Valid() bool {
 	if x.PanelKey != "" && x.Applied != nil {
 		usesTLS := false
 		for _, in := range *x.Applied {
-			if in.Protocol == xrayconfig.Trojan {
+			if in.UsesTLS() {
 				usesTLS = true
 				if x.PanelTLS == nil || in.TLSCertSHA256 != x.PanelTLS.SHA256 {
 					return false

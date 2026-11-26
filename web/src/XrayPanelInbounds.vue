@@ -29,7 +29,7 @@ const protocols: { value: Protocol; label: string }[] = [
 const form = ref<{
   port: number; editing: boolean; copyFrom?: number; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
   published: boolean; publicAddress: string; publicPort: number; rotateTLS: boolean
-  transport: 'tcp' | VLESSStream['network']; path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
+  transport: VLESSStream['network']; tls: boolean; path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
 } | null>(null)
 const error = ref('')
 const download = ref<{ inbound: Inbound; username: string; revision: number; localPort: number; password: string; error: string } | null>(null)
@@ -76,6 +76,7 @@ function open(inbound?: Inbound, copy = false) {
     published: !copy && !!inbound?.public_endpoint, publicAddress: inbound?.public_endpoint?.address ?? props.addresses[0] ?? '',
     publicPort: inbound?.public_endpoint?.port ?? 443, rotateTLS: false,
     transport: inbound?.vless_stream?.network ?? 'tcp', path: inbound?.vless_stream?.path ?? '/',
+    tls: inbound?.vless_stream?.security === 'tls',
     host: inbound?.vless_stream?.host ?? '', serviceName: inbound?.vless_stream?.service_name ?? '', mode: inbound?.vless_stream?.mode ?? 'auto',
     authority: inbound?.vless_stream?.authority ?? '', multiMode: inbound?.vless_stream?.multi_mode ?? false,
   }
@@ -103,10 +104,12 @@ async function submit() {
       destination: !draft.copyFrom && draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
       copy_routes_from: draft.copyFrom,
       public_endpoint: (draft.protocol === '' || draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
-      rotate_tls: draft.protocol === 'trojan' && draft.rotateTLS ? true : undefined,
-      vless_stream: draft.protocol !== 'vless' || draft.transport === 'tcp' ? undefined : draft.transport === 'grpc'
-        ? { network: 'grpc', service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined }
-        : { network: draft.transport, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}) },
+      rotate_tls: (draft.protocol === 'trojan' || (draft.protocol === 'vless' && draft.tls)) && draft.rotateTLS ? true : undefined,
+      vless_stream: draft.protocol !== 'vless' || (draft.transport === 'tcp' && !draft.tls) ? undefined : draft.transport === 'tcp'
+        ? { network: 'tcp', security: 'tls' }
+        : draft.transport === 'grpc'
+          ? { network: 'grpc', security: draft.tls ? 'tls' : undefined, service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined }
+          : { network: draft.transport, security: draft.tls ? 'tls' : undefined, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}) },
     })
     form.value = null
   } catch (cause) {
@@ -126,7 +129,8 @@ function downloadFile(contents: string, type: string, filename: string) {
 function appliedPublic(port: number) {
   if (!props.appliedVerified) return undefined
   return props.applied.find(entry => entry.port === port && entry.public_endpoint &&
-    (!entry.protocol || entry.protocol === 'vless' || (entry.protocol === 'trojan' && props.trust && entry.tls_cert_sha256 === props.trust.sha256)))
+    (!entry.protocol || (entry.protocol === 'vless' && (entry.vless_stream?.security !== 'tls' || (props.trust && entry.tls_cert_sha256 === props.trust.sha256))) ||
+      (entry.protocol === 'trojan' && props.trust && entry.tls_cert_sha256 === props.trust.sha256)))
 }
 
 function openDownload(port: number) {
@@ -151,7 +155,7 @@ function downloadClient() {
       schema_version: active.vless_stream ? 5 : 4, username, address: '127.0.0.1', ports: [active.port],
       port_protocols: { [active.port]: active.protocol === '' ? 'socks' : active.protocol === 'trojan' ? 'trojan' : 'vless' },
       public_endpoints: { [active.port]: active.public_endpoint },
-      ...(active.protocol === 'trojan' ? { trojan_trust: props.trust } : {}),
+      ...(active.protocol === 'trojan' || active.vless_stream?.security === 'tls' ? { trojan_trust: props.trust } : {}),
       ...(active.vless_stream ? { vless_streams: { [active.port]: active.vless_stream } } : {}),
       revision: props.revision, expires_at: Math.floor(Date.now() / 1000) + 60,
     }
@@ -206,6 +210,8 @@ async function remove(port: number) {
       </select></label>
       <label>监听端口 <input v-model.number="form.port" type="number" min="1024" max="65535" required :disabled="form.editing" /></label>
       <template v-if="form.protocol === 'vless'">
+        <label><input v-model="form.tls" type="checkbox" :disabled="!trojan && !form.tls" /> 启用 TLS</label>
+        <p v-if="form.tls" class="feedback">使用本节点共用的自动生成证书；客户端通过证书指纹验证。</p>
         <label>传输方式 <select v-model="form.transport">
           <option value="tcp">RAW / TCP</option><option value="ws">WebSocket</option><option value="grpc">gRPC</option>
           <option value="httpupgrade">HTTPUpgrade</option><option value="xhttp">XHTTP</option>
@@ -243,7 +249,7 @@ async function remove(port: number) {
       </div>
       <template v-if="form.protocol === '' || form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
-        <p v-if="form.protocol === 'vless' && form.published" class="feedback">此 VLESS 入口不提供传输加密，请在可信网络或受保护的传输通道中使用。</p>
+        <p v-if="form.protocol === 'vless' && form.published && !form.tls" class="feedback">此 VLESS 入口不提供传输加密，请在可信网络或受保护的传输通道中使用。</p>
         <p v-if="form.protocol === '' && form.published" class="feedback">公网 SOCKS5 使用明文 TCP。认证密码和代理流量没有传输加密，请仅在可信网络或受保护的隧道中使用。</p>
         <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
         <template v-if="form.published">
@@ -253,7 +259,7 @@ async function remove(port: number) {
           </select></label>
           <label>公网 TCP 端口 <input v-model.number="form.publicPort" type="number" min="1" max="65535" required /></label>
         </template>
-        <label v-if="form.protocol === 'trojan' && inbounds.some(entry => entry.protocol === 'trojan')">
+        <label v-if="(form.protocol === 'trojan' || (form.protocol === 'vless' && form.tls)) && inbounds.some(entry => entry.tls_cert_sha256)">
           <input v-model="form.rotateTLS" type="checkbox" /> 轮换此节点主控入站共用的 TLS 证书
         </label>
       </template>

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,15 +32,28 @@ func TestPanelVLESSTransports(t *testing.T) {
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "packet-up"},
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-up"},
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-one"},
+		{Network: "tcp", Security: "tls"},
+		{Network: "ws", Security: "tls", Path: "/socket", Host: "example.test"},
+		{Network: "grpc", Security: "tls", ServiceName: "proxy"},
+		{Network: "httpupgrade", Security: "tls", Path: "/upgrade"},
+		{Network: "xhttp", Security: "tls", Path: "/xhttp", Mode: "auto"},
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
 			in := Inbound{Port: 1080, Protocol: VLESS, Users: []string{"alice"}, VLESSStream: &stream}
+			var identity *PanelTLS
+			if stream.Security == "tls" {
+				identity, err = NewPanelTLS(public, time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				in.TLSCertSHA256 = identity.Trust.SHA256
+			}
 			sealed, err := SealPanelCredential(public, in, "00000000-0000-4000-8000-000000000001")
 			if err != nil {
 				t.Fatal(err)
 			}
 			draft := Configuration{Inbounds: Plan{in}, Network: &Network{Outbounds: []Outbound{}, Routes: []Route{}},
-				Panel: &PanelConfiguration{Credentials: []string{sealed}}}
+				Panel: &PanelConfiguration{Credentials: []string{sealed}, TLS: identity}}
 			parsed, err := ParseConfiguration(draft.Encode())
 			if err != nil {
 				t.Fatal(err)
@@ -53,8 +67,13 @@ func TestPanelVLESSTransports(t *testing.T) {
 					Stream map[string]any `json:"streamSettings"`
 				} `json:"inbounds"`
 			}
+			network := stream.Network
+			if network == "tcp" {
+				network = "raw"
+			}
 			if err := json.Unmarshal(data, &config); err != nil || len(config.Inbounds) != 1 ||
-				config.Inbounds[0].Stream["network"] != stream.Network || config.Inbounds[0].Stream[stream.Network+"Settings"] == nil {
+				config.Inbounds[0].Stream["network"] != network || (network != "raw" && config.Inbounds[0].Stream[network+"Settings"] == nil) ||
+				(stream.Security == "tls" && config.Inbounds[0].Stream["security"] != "tls") {
 				t.Fatalf("wrong rendered transport: %s (%v)", data, err)
 			}
 			if binary := os.Getenv("MCUI_TEST_XRAY"); binary != "" {
@@ -86,6 +105,11 @@ func TestVLESSTransportConnections(t *testing.T) {
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "packet-up"},
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-up"},
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-one"},
+		{Network: "tcp", Security: "tls"},
+		{Network: "ws", Security: "tls", Path: "/socket", Host: "example.test"},
+		{Network: "grpc", Security: "tls", ServiceName: "proxy"},
+		{Network: "httpupgrade", Security: "tls", Path: "/upgrade"},
+		{Network: "xhttp", Security: "tls", Path: "/xhttp", Mode: "auto"},
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
 			target, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -122,11 +146,19 @@ func TestVLESSTransportConnections(t *testing.T) {
 			}
 			const id = "00000000-0000-4000-8000-000000000001"
 			in := Inbound{Port: serverPort, Protocol: VLESS, Users: []string{"alice"}, VLESSStream: &stream}
+			var identity *PanelTLS
+			if stream.Security == "tls" {
+				identity, err = NewPanelTLS(base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				in.TLSCertSHA256 = identity.Trust.SHA256
+			}
 			sealed, err := SealPanelCredential(base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), in, id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			draft := Configuration{Inbounds: Plan{in}, Network: &Network{Outbounds: []Outbound{}, Routes: []Route{}}, Panel: &PanelConfiguration{Credentials: []string{sealed}}}
+			draft := Configuration{Inbounds: Plan{in}, Network: &Network{Outbounds: []Outbound{}, Routes: []Route{}}, Panel: &PanelConfiguration{Credentials: []string{sealed}, TLS: identity}}
 			data, _, err := draft.RenderPanel(key)
 			if err != nil {
 				t.Fatal(err)
@@ -140,10 +172,19 @@ func TestVLESSTransportConnections(t *testing.T) {
 			}}}
 			server["log"] = map[string]string{"loglevel": "debug"}
 			delete(server, "routing")
+			clientStream := stream.render()
+			if identity != nil {
+				clientStream["security"] = "tls"
+				tlsSettings := map[string]any{"serverName": "localhost", "fingerprint": "unsafe", "pinnedPeerCertSha256": identity.Trust.SHA256}
+				if stream.Network == "grpc" {
+					tlsSettings["alpn"] = []string{"h2", "http/1.1"}
+				}
+				clientStream["tlsSettings"] = tlsSettings
+			}
 			client := map[string]any{
 				"log":       map[string]string{"loglevel": "debug"},
 				"inbounds":  []any{map[string]any{"listen": "127.0.0.1", "port": clientPort, "protocol": "socks", "settings": map[string]any{"auth": "noauth"}}},
-				"outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"address": "127.0.0.1", "port": serverPort, "id": id, "encryption": "none"}, "streamSettings": stream.render()}},
+				"outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"address": "127.0.0.1", "port": serverPort, "id": id, "encryption": "none"}, "streamSettings": clientStream}},
 			}
 			start := func(config any) {
 				raw, err := json.Marshal(config)
@@ -211,6 +252,41 @@ func TestVLESSTransportConnections(t *testing.T) {
 			result := make([]byte, 4)
 			if _, err := io.ReadFull(conn, result); err != nil || string(result) != "pong" {
 				t.Fatalf("proxy exchange: %q %v", result, err)
+			}
+			if stream.Network == "tcp" && identity != nil {
+				clientStream["tlsSettings"].(map[string]any)["pinnedPeerCertSha256"] = strings.Repeat("f", 64)
+				badPort := freePort()
+				client["inbounds"].([]any)[0].(map[string]any)["port"] = badPort
+				start(client)
+				var bad net.Conn
+				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+					bad, err = net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", badPort), 100*time.Millisecond)
+					if err == nil {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer bad.Close()
+				_ = bad.SetDeadline(time.Now().Add(6 * time.Second))
+				_, _ = bad.Write([]byte{5, 1, 0})
+				if _, err := io.ReadFull(bad, response); err != nil || response[1] != 0 {
+					t.Fatal("bad-pin SOCKS negotiation failed", err)
+				}
+				_, _ = bad.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1, byte(port >> 8), byte(port)})
+				if _, err := io.ReadFull(bad, reply); err != nil || reply[1] != 0 {
+					t.Fatal("bad-pin SOCKS request failed", err)
+				}
+				_, _ = bad.Write([]byte("ping"))
+				_, err = io.ReadFull(bad, result)
+				if err == nil {
+					t.Fatal("client accepted the wrong certificate pin")
+				}
+				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+					t.Fatal("wrong-pin handshake did not terminate")
+				}
 			}
 		})
 	}

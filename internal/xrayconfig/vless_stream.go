@@ -9,6 +9,7 @@ import (
 // A nil value selects the existing RAW transport.
 type VLESSStream struct {
 	Network     string `json:"network"`
+	Security    string `json:"security,omitempty"`
 	Path        string `json:"path,omitempty"`
 	Host        string `json:"host,omitempty"`
 	ServiceName string `json:"service_name,omitempty"`
@@ -24,11 +25,16 @@ func (s *VLESSStream) Valid() bool {
 	if s == nil {
 		return true
 	}
+	if s.Security != "" && s.Security != "tls" {
+		return false
+	}
 	if !vlessHost.MatchString(s.Host) || !vlessHost.MatchString(s.Authority) || !vlessService.MatchString(s.ServiceName) ||
 		len(s.Path) > 256 || strings.ContainsAny(s.Path, "\r\n\x00") {
 		return false
 	}
 	switch s.Network {
+	case "tcp":
+		return s.Security == "tls" && s.Path == "" && s.Host == "" && s.ServiceName == "" && s.Authority == "" && !s.MultiMode && s.Mode == ""
 	case "ws", "httpupgrade":
 		return strings.HasPrefix(s.Path, "/") && s.ServiceName == "" && s.Authority == "" && !s.MultiMode && s.Mode == ""
 	case "xhttp":
@@ -47,6 +53,8 @@ func (s *VLESSStream) render() map[string]any {
 	}
 	settings := map[string]any{}
 	switch s.Network {
+	case "tcp":
+		return map[string]any{"network": "raw"}
 	case "grpc":
 		settings["serviceName"] = s.ServiceName
 		settings["authority"] = s.Authority

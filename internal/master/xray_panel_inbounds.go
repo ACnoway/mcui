@@ -54,7 +54,7 @@ func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS, 
 		Panel:    &xrayconfig.PanelConfiguration{Credentials: []string{}, Statistics: statistics},
 	}
 	for _, entry := range entries {
-		if entry.Inbound.Protocol == xrayconfig.Trojan && identity != nil {
+		if entry.Inbound.UsesTLS() && identity != nil {
 			draft.Panel.TLS = identity
 			entry.Inbound.TLSCertSHA256 = identity.Trust.SHA256
 		}
@@ -158,7 +158,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 		!in.VLESSStream.Valid() || (in.VLESSStream != nil && in.Protocol != xrayconfig.VLESS) ||
 		(in.CopyRoutesFrom != 0 && (in.CopyRoutesFrom < 1024 || in.CopyRoutesFrom > 65535 || in.CopyRoutesFrom == port || in.Destination != (xrayconfig.Destination{}))) ||
 		(in.Clients != nil && (len(in.Clients) < 1 || len(in.Clients) > xrayconfig.MaxInboundUsers || in.Username != "" || in.Credential != "")) ||
-		(in.Protocol != xrayconfig.Trojan && in.RotateTLS) ||
+		(in.Protocol != xrayconfig.Trojan && !(in.Protocol == xrayconfig.VLESS && in.VLESSStream != nil && in.VLESSStream.Security == "tls") && in.RotateTLS) ||
 		(in.Protocol != "" && in.Protocol != xrayconfig.Trojan && in.Protocol != xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{})) {
 		http.Error(w, "invalid panel Xray inbound", http.StatusBadRequest)
 		return
@@ -199,7 +199,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 			if err := checkXrayDraftReservation(st, nodeID, now); err != nil {
 				return err
 			}
-			if in.Protocol == xrayconfig.Trojan && !inv.Xray.PanelTrojan ||
+			if (in.Protocol == xrayconfig.Trojan || in.Protocol == xrayconfig.VLESS && in.VLESSStream != nil && in.VLESSStream.Security == "tls") && !inv.Xray.PanelTrojan ||
 				in.Protocol == xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{}) && !inv.Xray.PanelPublicVLESS ||
 				in.Public != (xrayconfig.PublicEndpoint{}) && (!in.Public.Valid() || !slices.Contains(inv.Xray.PanelAddresses, in.Public.Address)) {
 				return lifecycleauth.ErrDenied
@@ -252,7 +252,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 					return lifecycleauth.ErrDenied
 				}
 				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, PublicEndpoint: in.Public, VLESSStream: in.VLESSStream}}
-				if in.Protocol == xrayconfig.Trojan {
+				if entry.Inbound.UsesTLS() {
 					if identity == nil || in.RotateTLS {
 						identity, err = xrayconfig.NewPanelTLS(inv.Xray.PanelKey, now)
 						if err != nil {

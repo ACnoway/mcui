@@ -385,6 +385,12 @@ func (g subscriptionGrant) payload(username string, ports subscriptionPorts, exp
 	if len(ports.streams) > 0 {
 		result["schema_version"] = 5
 		result["vless_streams"] = ports.streams
+		for _, stream := range ports.streams {
+			if stream.Security == "tls" {
+				result["trojan_trust"] = g.trojan
+				break
+			}
+		}
 	}
 	return result
 }
