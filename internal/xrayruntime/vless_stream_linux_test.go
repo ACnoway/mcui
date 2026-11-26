@@ -33,6 +33,9 @@ func TestPanelVLESSAppliedTransportMatchesSignedDraft(t *testing.T) {
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
 			in := xrayconfig.Inbound{Port: 1080, Protocol: xrayconfig.VLESS, Users: []string{"alice"}, VLESSStream: &stream}
+			if stream.Network == "tcp" {
+				in.VLESSFlows = map[string]string{"alice": "xtls-rprx-vision"}
+			}
 			var identity *xrayconfig.PanelTLS
 			if stream.Security == "tls" {
 				identity, err = xrayconfig.NewPanelTLS(base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), time.Now())

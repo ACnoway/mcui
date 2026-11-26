@@ -63,3 +63,7 @@ assert.equal(tlsURL.searchParams.get('sni'), 'localhost')
 const tlsClient = buildXrayClient(tls, 1080, 10808, id)
 assert.equal(tlsClient.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256, 'a'.repeat(64))
 assert.throws(() => buildVlessLink({ ...tls, trojan_trust: undefined }, 1080, id, 'tls'))
+const vision = { ...tls, vless_streams: { 1080: { network: 'tcp', security: 'tls' } }, vless_flows: { 1080: 'xtls-rprx-vision' } }
+assert.equal(new URL(buildVlessLink(vision, 1080, id, 'vision')).searchParams.get('flow'), 'xtls-rprx-vision')
+assert.equal(buildXrayClient(vision, 1080, 10808, id).outbounds[0].settings.flow, 'xtls-rprx-vision')
+assert.throws(() => buildVlessLink({ ...tls, vless_flows: { 1080: 'xtls-rprx-vision' } }, 1080, id, 'invalid'))

@@ -28,13 +28,14 @@ func ValidUsername(username string) bool {
 }
 
 type Inbound struct {
-	Port             int            `json:"port"`
-	Protocol         string         `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
-	TLSCertSHA256    string         `json:"tls_cert_sha256,omitempty"`
-	RealityPublicKey string         `json:"reality_public_key,omitempty"`
-	PublicEndpoint   PublicEndpoint `json:"public_endpoint,omitzero"`
-	VLESSStream      *VLESSStream   `json:"vless_stream,omitempty"`
-	Users            []string       `json:"users"`
+	Port             int               `json:"port"`
+	Protocol         string            `json:"protocol,omitempty"` // Empty preserves the original SOCKS template.
+	TLSCertSHA256    string            `json:"tls_cert_sha256,omitempty"`
+	RealityPublicKey string            `json:"reality_public_key,omitempty"`
+	PublicEndpoint   PublicEndpoint    `json:"public_endpoint,omitzero"`
+	VLESSStream      *VLESSStream      `json:"vless_stream,omitempty"`
+	VLESSFlows       map[string]string `json:"vless_flows,omitempty"`
+	Users            []string          `json:"users"`
 }
 
 func (in Inbound) UsesTLS() bool {
@@ -63,6 +64,12 @@ func (p Plan) Valid() bool {
 				return false
 			}
 			publicEndpoints[in.PublicEndpoint] = true
+		}
+		for user, flow := range in.VLESSFlows {
+			if in.Protocol != VLESS || in.VLESSStream == nil || in.VLESSStream.Network != "tcp" ||
+				in.VLESSStream.Security != "tls" || flow != "xtls-rprx-vision" || !slices.Contains(in.Users, user) {
+				return false
+			}
 		}
 		grants += len(in.Users)
 		lastPort = in.Port

@@ -28,6 +28,7 @@ type panelInboundChange struct {
 type panelInboundClient struct {
 	Username   string `json:"username"`
 	Credential string `json:"credential,omitempty"`
+	Flow       string `json:"flow,omitempty"`
 }
 
 type panelInbound struct {
@@ -130,6 +131,12 @@ func updatePanelInboundClients(entry *panelInbound, previous panelInbound, clien
 		}
 	}
 	for _, client := range clients {
+		if client.Flow != "" {
+			if entry.Inbound.VLESSFlows == nil {
+				entry.Inbound.VLESSFlows = make(map[string]string)
+			}
+			entry.Inbound.VLESSFlows[client.Username] = client.Flow
+		}
 		inbound := entry.Inbound
 		inbound.Users = []string{client.Username}
 		var sealed string

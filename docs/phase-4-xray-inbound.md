@@ -6,7 +6,9 @@
 
 主控定义的 VLESS 入站支持 RAW TCP、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 基础传输，可启用公网 TCP 入口，并可选择 TLS。TLS 使用该节点主控定义入站共用的自动生成证书，私钥加密下发；客户端通过证书 SHA-256 指纹验证，分享链接携带该指纹。证书有效期为 90 天，可在入站表单轮换；轮换影响共用证书的入站，须应用修订并重新生成客户端配置。未启用 TLS 的入站不提供传输加密，应在可信网络或已有安全传输通道中使用。客户端配置和分享链接使用已生效修订中的传输参数。更新 Agent、Helper 和主控后，节点上报 `panel_public_vless` 才能保存公网入口。自定义证书、主控定义 REALITY、mKCP、宿主网络直监听及更多高级传输参数仍在开发中。
 
-2026-11-26 使用远程隔离检出与 Xray `26.10.31` 测试了 WebSocket、gRPC（普通与多路）、HTTPUpgrade 和 XHTTP 四种模式的回环数据交换及节点已生效配置对账；另验证 RAW、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 的 TLS 握手与数据交换。此测试不覆盖公网中继或 REALITY 组合。
+RAW TCP + TLS 可为各客户端单独启用 `xtls-rprx-vision` flow。flow 随入站授权签名，只有已生效并获授权的对应客户端会在订阅和分享链接中收到该值。
+
+2026-11-26 使用远程隔离检出与 Xray `26.10.31` 测试了 WebSocket、gRPC（普通与多路）、HTTPUpgrade 和 XHTTP 四种模式的回环数据交换及节点已生效配置对账；另验证 RAW + TLS + Vision、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 的 TLS 握手与数据交换，以及错误证书指纹被拒绝。此测试不覆盖公网中继或 REALITY 组合。
 
 订阅页面可以根据已授权的 VLESS 入站及用户输入的凭据生成 `vless://` 分享链接和二维码。链接包含 UUID，节点目录 REALITY 链接还包含 Short ID，请按凭据保管。回环地址仅在能够访问节点回环网络的环境中有效。此功能参考 [3x-ui v3.11.0 的 VLESS 分享格式](https://github.com/MHSanaei/3x-ui/blob/c621ba9014a6aa21fd7c9ecf45655e44e24ebf13/frontend/src/lib/xray/inbound-link.ts)，不代表其他传输或安全组合已接入。
 

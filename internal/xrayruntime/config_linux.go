@@ -82,6 +82,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 					Users []struct {
 						User string `json:"user"`
 						Name string `json:"email"`
+						Flow string `json:"flow"`
 					} `json:"users"`
 				} `json:"settings"`
 				StreamSettings struct {
@@ -186,6 +187,12 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						name = user.Name
 					}
 					entry.Users = append(entry.Users, name)
+					if user.Flow != "" {
+						if entry.VLESSFlows == nil {
+							entry.VLESSFlows = make(map[string]string)
+						}
+						entry.VLESSFlows[name] = user.Flow
+					}
 				}
 				plan = append(plan, entry)
 			}

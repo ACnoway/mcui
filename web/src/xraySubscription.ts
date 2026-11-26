@@ -19,6 +19,7 @@ export type XraySubscription = {
   reality_public_key?: string
   public_endpoints?: Record<number, XrayPublicEndpoint>
   vless_streams?: Record<number, VLESSStream>
+  vless_flows?: Record<number, 'xtls-rprx-vision'>
   revision: number
   expires_at: number
 }
@@ -45,7 +46,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
   if (!value || typeof value !== 'object') return false
   const {
     schema_version, username, address, ports, http_ports, port_protocols, trojan_trust, reality_public_key, public_endpoints,
-    revision, expires_at, vless_streams,
+    revision, expires_at, vless_streams, vless_flows,
   } = value as XraySubscription
   if (typeof username !== 'string' || !/^[a-z][a-z0-9_-]{0,23}$/.test(username) || address !== '127.0.0.1' ||
     !Array.isArray(ports) || ports.length === 0 || ports.length > 4 ||
@@ -55,6 +56,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
   if (!typed && (trojan_trust !== undefined || reality_public_key !== undefined)) return false
   if (schema_version !== 4 && schema_version !== 5 && public_endpoints !== undefined) return false
   if (schema_version !== 5 && vless_streams !== undefined) return false
+  if (schema_version !== 5 && vless_flows !== undefined) return false
   if (schema_version === 1) return http_ports === undefined && port_protocols === undefined
   if (schema_version === 2) {
     return port_protocols === undefined && Array.isArray(http_ports) && http_ports.length > 0 && http_ports.length <= ports.length &&
@@ -94,6 +96,12 @@ export function validSubscription(value: unknown): value is XraySubscription {
       return typeof stream.path !== 'string' || !stream.path.startsWith('/') || stream.path.length > 256 || /[\r\n\0]/.test(stream.path) ||
         !!stream.service_name || !!stream.authority || !!stream.multi_mode || (stream.network === 'xhttp' ? !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(stream.mode ?? '') : !!stream.mode)
     })) return false
+    if (vless_flows !== undefined) {
+      if (!vless_flows || typeof vless_flows !== 'object' || Array.isArray(vless_flows)) return false
+      if (Object.entries(vless_flows).some(([key, flow]) => String(Number(key)) !== key ||
+        !ports.includes(Number(key)) || flow !== 'xtls-rprx-vision' ||
+        vless_streams[Number(key)]?.network !== 'tcp' || vless_streams[Number(key)]?.security !== 'tls')) return false
+    }
   }
   if (entries.some(([, protocol]) => protocol === 'trojan') || Object.values(vless_streams ?? {}).some(stream => stream.security === 'tls')) {
     if (!trojan_trust || typeof trojan_trust.certificate !== 'string' || trojan_trust.certificate.length > 1024 ||
@@ -155,7 +163,8 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
   if (!validSubscription(subscription) || !subscription.ports.includes(proxyPort)) throw new Error('此节点端口未获授权。')
   if (!validPort(localPort) || subscription.ports.includes(localPort)) throw new Error('请选择不同的本地非特权端口。')
   const protocol = subscriptionProtocol(subscription, proxyPort)
-  const settings = outboundSettings(subscription, proxyPort, protocol, credential)
+  const settings = { ...outboundSettings(subscription, proxyPort, protocol, credential),
+    ...(subscription.vless_flows?.[proxyPort] ? { flow: subscription.vless_flows[proxyPort] } : {}) }
   const account = { user: subscription.username, pass: credential }
   const trust = subscription.trojan_trust
   const vlessStream = subscription.vless_streams?.[proxyPort]
@@ -201,6 +210,8 @@ export function buildVlessLink(subscription: XraySubscription, proxyPort: number
   const endpoint = subscriptionEndpoint(subscription, proxyPort)
   const stream = subscription.vless_streams?.[proxyPort]
   const params = new URLSearchParams({ type: stream?.network ?? 'tcp', encryption: 'none', security: protocol === 'vless-reality' ? 'reality' : stream?.security ?? 'none' })
+  const flow = subscription.vless_flows?.[proxyPort]
+  if (flow) params.set('flow', flow)
   if (stream?.path) params.set('path', stream.path)
   if (stream?.host) params.set('host', stream.host)
   if (stream?.service_name) params.set('serviceName', stream.service_name)

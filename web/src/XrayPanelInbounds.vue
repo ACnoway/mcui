@@ -5,8 +5,8 @@ import { destinationLabel, type Destination, type Network } from './xrayManageme
 import { buildXrayClient, type VLESSStream, type XraySubscription } from './xraySubscription'
 
 type Protocol = '' | 'http' | 'vless' | 'vmess' | 'trojan'
-type Inbound = { port: number; protocol?: string; users: string[]; public_endpoint?: Destination; tls_cert_sha256?: string; vless_stream?: VLESSStream }
-type Client = { username: string; credential: string }
+type Inbound = { port: number; protocol?: string; users: string[]; public_endpoint?: Destination; tls_cert_sha256?: string; vless_stream?: VLESSStream; vless_flows?: Record<string, 'xtls-rprx-vision'> }
+type Client = { username: string; credential: string; flow?: 'xtls-rprx-vision' | '' }
 type ClientEdit = Client & { originalUsername?: string }
 export type PanelInboundChange = { remove: true } | {
   protocol: Protocol; clients: Client[]; destination?: Destination; copy_routes_from?: number
@@ -70,8 +70,8 @@ function open(inbound?: Inbound, copy = false) {
   form.value = {
     editing: !!inbound && !copy, copyFrom: copy ? inbound?.port : undefined, port: copy ? firstFree : inbound?.port ?? firstFree,
     protocol: protocols.find(option => option.value === inbound?.protocol)?.value ?? '',
-    clients: inbound?.users.map(username => ({ username, credential: '', originalUsername: copy ? undefined : username })) ??
-      [{ username: '', credential: '' }],
+    clients: inbound?.users.map(username => ({ username, credential: '', flow: inbound.vless_flows?.[username] ?? '', originalUsername: copy ? undefined : username })) ??
+      [{ username: '', credential: '', flow: '' }],
     address: existing?.address ?? '', targetPort: existing?.port ?? 443,
     published: !copy && !!inbound?.public_endpoint, publicAddress: inbound?.public_endpoint?.address ?? props.addresses[0] ?? '',
     publicPort: inbound?.public_endpoint?.port ?? 443, rotateTLS: false,
@@ -100,7 +100,8 @@ async function submit() {
   error.value = ''
   try {
     await props.save(draft.port, {
-      protocol: draft.protocol, clients: draft.clients.map(({ username, credential }) => ({ username, credential })),
+      protocol: draft.protocol, clients: draft.clients.map(({ username, credential, flow }) => ({ username, credential,
+        flow: draft.protocol === 'vless' && draft.transport === 'tcp' && draft.tls && flow ? flow : undefined })),
       destination: !draft.copyFrom && draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
       copy_routes_from: draft.copyFrom,
       public_endpoint: (draft.protocol === '' || draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
@@ -146,7 +147,8 @@ function downloadClient() {
   if (!active?.public_endpoint || dialog.revision !== props.revision || !active.users.includes(username) ||
       active.protocol !== inbound.protocol ||
       destinationLabel(active.public_endpoint) !== destinationLabel(inbound.public_endpoint!) ||
-      active.tls_cert_sha256 !== inbound.tls_cert_sha256 || JSON.stringify(active.vless_stream) !== JSON.stringify(inbound.vless_stream)) {
+      active.tls_cert_sha256 !== inbound.tls_cert_sha256 || JSON.stringify(active.vless_stream) !== JSON.stringify(inbound.vless_stream) ||
+      active.vless_flows?.[username] !== inbound.vless_flows?.[username]) {
     dialog.error = '生效入站已变化，请重新打开客户端配置。'
     return
   }
@@ -157,6 +159,7 @@ function downloadClient() {
       public_endpoints: { [active.port]: active.public_endpoint },
       ...(active.protocol === 'trojan' || active.vless_stream?.security === 'tls' ? { trojan_trust: props.trust } : {}),
       ...(active.vless_stream ? { vless_streams: { [active.port]: active.vless_stream } } : {}),
+      ...(active.vless_flows?.[username] ? { vless_flows: { [active.port]: active.vless_flows[username] } } : {}),
       revision: props.revision, expires_at: Math.floor(Date.now() / 1000) + 60,
     }
     const config = buildXrayClient(metadata, active.port, localPort, password)
@@ -243,9 +246,12 @@ async function remove(port: number) {
           </div>
         </template>
         <p v-else class="feedback">在「客户端」中解除绑定或轮换凭据。</p>
+        <label v-if="form.protocol === 'vless' && form.transport === 'tcp' && form.tls">Flow
+          <select v-model="client.flow"><option value="">无</option><option value="xtls-rprx-vision">xtls-rprx-vision</option></select>
+        </label>
       </fieldset>
       <div v-if="multiClient && form.clients.length < 8" class="actions">
-        <button type="button" class="outline" :disabled="busy" @click="form.clients.push({ username: '', credential: '' })">添加客户端</button>
+        <button type="button" class="outline" :disabled="busy" @click="form.clients.push({ username: '', credential: '', flow: '' })">添加客户端</button>
       </div>
       <template v-if="form.protocol === '' || form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>

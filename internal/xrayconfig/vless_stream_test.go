@@ -40,6 +40,9 @@ func TestPanelVLESSTransports(t *testing.T) {
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
 			in := Inbound{Port: 1080, Protocol: VLESS, Users: []string{"alice"}, VLESSStream: &stream}
+			if stream.Network == "tcp" {
+				in.VLESSFlows = map[string]string{"alice": "xtls-rprx-vision"}
+			}
 			var identity *PanelTLS
 			if stream.Security == "tls" {
 				identity, err = NewPanelTLS(public, time.Now())
@@ -146,6 +149,9 @@ func TestVLESSTransportConnections(t *testing.T) {
 			}
 			const id = "00000000-0000-4000-8000-000000000001"
 			in := Inbound{Port: serverPort, Protocol: VLESS, Users: []string{"alice"}, VLESSStream: &stream}
+			if stream.Network == "tcp" {
+				in.VLESSFlows = map[string]string{"alice": "xtls-rprx-vision"}
+			}
 			var identity *PanelTLS
 			if stream.Security == "tls" {
 				identity, err = NewPanelTLS(base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), time.Now())
@@ -185,6 +191,9 @@ func TestVLESSTransportConnections(t *testing.T) {
 				"log":       map[string]string{"loglevel": "debug"},
 				"inbounds":  []any{map[string]any{"listen": "127.0.0.1", "port": clientPort, "protocol": "socks", "settings": map[string]any{"auth": "noauth"}}},
 				"outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"address": "127.0.0.1", "port": serverPort, "id": id, "encryption": "none"}, "streamSettings": clientStream}},
+			}
+			if flow := in.VLESSFlows["alice"]; flow != "" {
+				client["outbounds"].([]any)[0].(map[string]any)["settings"].(map[string]any)["flow"] = flow
 			}
 			start := func(config any) {
 				raw, err := json.Marshal(config)
@@ -304,5 +313,24 @@ func TestVLESSStreamRejectsInvalidFields(t *testing.T) {
 	}
 	if (Plan{{Port: 1080, Protocol: VMess, Users: []string{"alice"}, VLESSStream: &VLESSStream{Network: "ws", Path: "/"}}}).Valid() {
 		t.Fatal("accepted VLESS transport on another protocol")
+	}
+}
+
+func TestVLESSVisionRequiresAuthorizedUserAndRawTLS(t *testing.T) {
+	valid := Inbound{Port: 1080, Protocol: VLESS, Users: []string{"alice"}, TLSCertSHA256: strings.Repeat("a", 64),
+		VLESSStream: &VLESSStream{Network: "tcp", Security: "tls"}, VLESSFlows: map[string]string{"alice": "xtls-rprx-vision"}}
+	if !(Plan{valid}).Valid() {
+		t.Fatal("valid Vision flow rejected")
+	}
+	wrongUser := valid
+	wrongUser.VLESSFlows = map[string]string{"bob": "xtls-rprx-vision"}
+	wrongFlow := valid
+	wrongFlow.VLESSFlows = map[string]string{"alice": "unknown"}
+	wrongTransport := valid
+	wrongTransport.VLESSStream = &VLESSStream{Network: "ws", Security: "tls", Path: "/"}
+	for _, in := range []Inbound{wrongUser, wrongFlow, wrongTransport} {
+		if (Plan{in}).Valid() {
+			t.Fatalf("invalid flow accepted: %+v", in)
+		}
 	}
 }

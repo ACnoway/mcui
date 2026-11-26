@@ -425,6 +425,7 @@ func stageClientBindings(st *store.State, id string, additions, removals []store
 				continue
 			}
 			entry.Inbound.Users = slices.Delete(entry.Inbound.Users, user, user+1)
+			delete(entry.Inbound.VLESSFlows, binding.Credential)
 			entry.Credentials = slices.Delete(entry.Credentials, user, user+1)
 			if len(entry.Inbound.Users) == 0 {
 				removePanelInboundRoutes(draft.Network, entry.Inbound.Port)

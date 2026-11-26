@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ACnoway/mcui/internal/store"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
 )
 
@@ -27,6 +28,44 @@ func TestSubscriptionOnlyIncludesAuthorizedVLESSStreams(t *testing.T) {
 	}
 }
 
+func TestRemovingClientRemovesOnlyItsVisionFlow(t *testing.T) {
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
+	identity, err := xrayconfig.NewPanelTLS(public, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := xrayconfig.Inbound{Port: 1080, Protocol: xrayconfig.VLESS, Users: []string{"alice", "bob"},
+		TLSCertSHA256: identity.Trust.SHA256, VLESSStream: &xrayconfig.VLESSStream{Network: "tcp", Security: "tls"},
+		VLESSFlows: map[string]string{"alice": "xtls-rprx-vision", "bob": "xtls-rprx-vision"}}
+	var boxes []string
+	for index, user := range in.Users {
+		single := in
+		single.Users = []string{user}
+		ids := []string{"00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"}
+		box, err := xrayconfig.SealPanelCredential(public, single, ids[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		boxes = append(boxes, box)
+	}
+	draft := encodePanelInbounds([]panelInbound{{Inbound: in, Credentials: boxes}}, identity,
+		&xrayconfig.Network{Outbounds: []xrayconfig.Outbound{}, Routes: []xrayconfig.Route{}}, false)
+	state := store.State{Nodes: map[string]store.Node{"node-1": {XrayDraft: draft.Encode()}}}
+	removed := store.XrayBinding{NodeID: "node-1", Port: 1080, Credential: "alice"}
+	if err := stageClientBindings(&state, "node-1", nil, []store.XrayBinding{removed}, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := xrayconfig.ParseConfiguration(state.Nodes["node-1"].XrayDraft)
+	if err != nil || len(updated.Inbounds) != 1 || len(updated.Inbounds[0].VLESSFlows) != 1 ||
+		updated.Inbounds[0].VLESSFlows["bob"] != "xtls-rprx-vision" || len(updated.Panel.Credentials) != 1 || updated.Panel.Credentials[0] != boxes[1] {
+		t.Fatalf("unexpected draft after removing client: %+v, %v", updated, err)
+	}
+}
+
 func TestVLESSTLSRotationAndSubscriptionTrust(t *testing.T) {
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -42,7 +81,8 @@ func TestVLESSTLSRotationAndSubscriptionTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := xrayconfig.Inbound{Port: 1080, Protocol: xrayconfig.VLESS, Users: []string{"alice"},
-		TLSCertSHA256: old.Trust.SHA256, VLESSStream: &xrayconfig.VLESSStream{Network: "tcp", Security: "tls"}}
+		TLSCertSHA256: old.Trust.SHA256, VLESSStream: &xrayconfig.VLESSStream{Network: "tcp", Security: "tls"},
+		VLESSFlows: map[string]string{"alice": "xtls-rprx-vision"}}
 	box, err := xrayconfig.SealPanelCredential(public, in, "00000000-0000-4000-8000-000000000001")
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +96,10 @@ func TestVLESSTLSRotationAndSubscriptionTrust(t *testing.T) {
 	payload := grant.payload("alice", grant.ports("alice"), 2000000000)
 	if payload["trojan_trust"] != &next.Trust || payload["schema_version"] != 5 {
 		t.Fatal("VLESS TLS subscription does not carry the applied trust")
+	}
+	flows, ok := payload["vless_flows"].(map[int]string)
+	if !ok || flows[1080] != "xtls-rprx-vision" {
+		t.Fatal("VLESS flow missing from subscription")
 	}
 	if _, ok := grant.payload("bob", grant.ports("bob"), 2000000000)["trojan_trust"]; ok {
 		t.Fatal("TLS trust disclosed to an unauthorized user")

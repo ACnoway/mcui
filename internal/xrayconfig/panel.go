@@ -83,6 +83,8 @@ func validPanelCredential(inbound Inbound, credential string) bool {
 
 // SealPanelCredential encrypts the credential to the Helper's enrollment key.
 func SealPanelCredential(public string, inbound Inbound, credential string) (string, error) {
+	// A credential is bound to a single user; flow authorization is signed separately.
+	inbound.VLESSFlows = nil
 	if !(Plan{inbound}).Valid() || !PanelProtocol(inbound.Protocol) || len(inbound.Users) != 1 ||
 		!validPanelCredential(inbound, credential) {
 		return "", errors.New("invalid panel Xray credential")
@@ -187,9 +189,17 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 		if inbound.PublicEndpoint != (PublicEndpoint{}) {
 			listen, tag = PublicListenAddress, publicTagPrefix+inbound.PublicEndpoint.String()
 		}
+		settings := catalog.inboundSettings(protocol, inbound.Users)
+		if protocol == VLESS {
+			for _, user := range settings["users"].([]map[string]string) {
+				if flow := inbound.VLESSFlows[user["email"]]; flow != "" {
+					user["flow"] = flow
+				}
+			}
+		}
 		entry := map[string]any{
 			"listen": listen, "port": inbound.Port, "protocol": protocol, "tag": tag,
-			"settings": catalog.inboundSettings(protocol, inbound.Users),
+			"settings": settings,
 		}
 		if protocol == Trojan {
 			entry["streamSettings"] = tls.streamSettings()
