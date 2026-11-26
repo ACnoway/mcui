@@ -4,7 +4,9 @@
 
 新节点可使用主控定义入站。节点、Master、Agent、Helper 和独立签发服务须使用支持相应模式的版本。主控 SOCKS5 的安全策略随 Agent 能力版本更新；此轮不包含旧 Agent 兼容或旧节点迁移。
 
-主控定义的 VLESS 入站也可启用公网 TCP 入口。该模板使用 RAW TCP，VLESS 本身不提供传输加密。在可信网络或已有安全传输通道中使用，客户端可从已生效入站生成配置。更新 Agent、Helper 和主控后，节点上报 `panel_public_vless` 才能保存此入口。
+主控定义的 VLESS 入站支持 RAW TCP、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 基础传输，可启用公网 TCP 入口。当前这些主控定义的 VLESS 传输不提供加密，应在可信网络或已有安全传输通道中使用。客户端配置和分享链接使用已生效修订中的传输参数。更新 Agent、Helper 和主控后，节点上报 `panel_public_vless` 才能保存公网入口。TLS、主控定义 REALITY、mKCP、宿主网络直监听及更多高级传输参数仍在开发中。
+
+订阅页面可以根据已授权的 VLESS 入站及用户输入的凭据生成 `vless://` 分享链接和二维码。链接包含 UUID，节点目录 REALITY 链接还包含 Short ID，请按凭据保管。回环地址仅在能够访问节点回环网络的环境中有效。此功能参考 [3x-ui v3.11.0 的 VLESS 分享格式](https://github.com/MHSanaei/3x-ui/blob/c621ba9014a6aa21fd7c9ecf45655e44e24ebf13/frontend/src/lib/xray/inbound-link.ts)，不代表其他传输或安全组合已接入。
 
 ## 从主控添加入站
 

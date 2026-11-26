@@ -33,6 +33,7 @@ type Inbound struct {
 	TLSCertSHA256    string         `json:"tls_cert_sha256,omitempty"`
 	RealityPublicKey string         `json:"reality_public_key,omitempty"`
 	PublicEndpoint   PublicEndpoint `json:"public_endpoint,omitzero"`
+	VLESSStream      *VLESSStream   `json:"vless_stream,omitempty"`
 	Users            []string       `json:"users"`
 }
 
@@ -49,7 +50,8 @@ func (p Plan) Valid() bool {
 		if in.Port <= lastPort || in.Port > 65535 || !validUsers(in.Users) ||
 			(in.Protocol != "" && in.Protocol != HTTP && !UsesProtocolCredentials(in.Protocol)) ||
 			(in.Protocol == Trojan && !digest.MatchString(in.TLSCertSHA256)) || (in.Protocol != Trojan && in.TLSCertSHA256 != "") ||
-			(in.Protocol == VLESSReality && !security.ValidNodeSecret(in.RealityPublicKey)) || (in.Protocol != VLESSReality && in.RealityPublicKey != "") {
+			(in.Protocol == VLESSReality && !security.ValidNodeSecret(in.RealityPublicKey)) || (in.Protocol != VLESSReality && in.RealityPublicKey != "") ||
+			!in.VLESSStream.Valid() || (in.VLESSStream != nil && in.Protocol != VLESS) {
 			return false
 		}
 		if in.PublicEndpoint != (PublicEndpoint{}) {
@@ -191,7 +193,7 @@ func (c Catalog) Allows(p Plan) bool {
 	}
 	for _, in := range p {
 		approved, users, ok := c.Inbound(in.Port)
-		if !ok || in.Protocol != approved.Protocol || in.PublicEndpoint != approved.PublicEndpoint ||
+		if !ok || in.VLESSStream != nil || in.Protocol != approved.Protocol || in.PublicEndpoint != approved.PublicEndpoint ||
 			in.TLSCertSHA256 != approved.TLSCertSHA256 || in.RealityPublicKey != approved.RealityPublicKey {
 			return false
 		}

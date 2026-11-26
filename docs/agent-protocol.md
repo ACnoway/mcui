@@ -77,6 +77,8 @@ VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之�
 
 主控定义的草稿在 `network` 后附加 `panel.credentials` 数组，元素按入站端口顺序排列，每项是接收节点的 HPKE 密文；`panel.direct_ports` 只允许标记 SOCKS5 入站使用受保护的公网 Freedom 出站。心跳用 `panel_key` 通告节点的 X25519 公钥，主控首次保存时绑定该公钥。新草稿仍在 3072 字节限制内，并额外要求领取方声明 `xray_panel_inbounds=v2`。不支持旧版主控入站草稿节点。[主控入站流程](./phase-4-xray-inbound.md#从主控添加入站)
 
+主控定义的 VLESS 入站可带 `vless_stream`，包含 `network` 和对应的路径、Host、gRPC service name、authority、multiMode 或 XHTTP mode；字段随草稿签名，并从节点已提交配置恢复后进行对账。订阅使用 schema 5，按已授权的端口返回 `vless_streams`。这些字段当前只覆盖不带 TLS 的 WS、gRPC、HTTPUpgrade 和 XHTTP 基础组合；节点目录模式不接受这些扩展字段。
+
 主控 Trojan 另要求 `xray_panel_trojan=v1`。`panel.tls` 包含公开证书 `trust` 和密封的 Ed25519 私钥种子 `key`，其解密上下文绑定证书摘要。各 Trojan 入站引用同一摘要，可附带 `public_endpoint`。具备能力的节点心跳通告 `panel_trojan` 与 `panel_addresses`，应用后上报 `panel_tls`。主控只有在配置摘要、修订、端点和证书均与成功任务的签名草稿一致时才导出客户端元数据。 [主控公网接入](./phase-4-xray-inbound.md#从主控开通-trojantls-公网入口)
 
 **取消对象**字段：`schema_version`、`node_id`、`task_id`、`sequence`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`，使用任务用途密钥和取消域。取消须目标精确匹配；可独立于顺序任务领取并持久化。取消先于开始则任务消费为 CANCELED；已开始只在操作定义的安全点停止并回滚，无法安全中止时继续完成既有已授权步骤或安全恢复，返回 `CANCEL_TOO_LATE`，不能虚报取消成功。取消与开始由本地同一事务/锁线性化。

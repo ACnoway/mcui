@@ -6,9 +6,10 @@ export const xrayProtocolName: Record<XrayProtocol, string> = {
 }
 
 export type XrayPublicEndpoint = { address: string; port: number }
+export type VLESSStream = { network: 'ws' | 'grpc' | 'httpupgrade' | 'xhttp'; path?: string; host?: string; service_name?: string; authority?: string; multi_mode?: boolean; mode?: 'auto' | 'packet-up' | 'stream-up' | 'stream-one' }
 
 export type XraySubscription = {
-  schema_version: 1 | 2 | 3 | 4
+  schema_version: 1 | 2 | 3 | 4 | 5
   username: string
   address: '127.0.0.1'
   ports: number[]
@@ -17,6 +18,7 @@ export type XraySubscription = {
   trojan_trust?: { certificate: string; sha256: string }
   reality_public_key?: string
   public_endpoints?: Record<number, XrayPublicEndpoint>
+  vless_streams?: Record<number, VLESSStream>
   revision: number
   expires_at: number
 }
@@ -43,15 +45,16 @@ export function validSubscription(value: unknown): value is XraySubscription {
   if (!value || typeof value !== 'object') return false
   const {
     schema_version, username, address, ports, http_ports, port_protocols, trojan_trust, reality_public_key, public_endpoints,
-    revision, expires_at,
+    revision, expires_at, vless_streams,
   } = value as XraySubscription
   if (typeof username !== 'string' || !/^[a-z][a-z0-9_-]{0,23}$/.test(username) || address !== '127.0.0.1' ||
     !Array.isArray(ports) || ports.length === 0 || ports.length > 4 ||
     !ports.every((port, index) => validPort(port) && (index === 0 || ports[index - 1] < port)) ||
     !Number.isSafeInteger(revision) || revision <= 0 || !Number.isSafeInteger(expires_at) || expires_at <= 0) return false
-  const typed = schema_version === 3 || schema_version === 4
+  const typed = schema_version === 3 || schema_version === 4 || schema_version === 5
   if (!typed && (trojan_trust !== undefined || reality_public_key !== undefined)) return false
-  if (schema_version !== 4 && public_endpoints !== undefined) return false
+  if (schema_version !== 4 && schema_version !== 5 && public_endpoints !== undefined) return false
+  if (schema_version !== 5 && vless_streams !== undefined) return false
   if (schema_version === 1) return http_ports === undefined && port_protocols === undefined
   if (schema_version === 2) {
     return port_protocols === undefined && Array.isArray(http_ports) && http_ports.length > 0 && http_ports.length <= ports.length &&
@@ -59,7 +62,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
   }
   if (!typed || http_ports !== undefined || !port_protocols || typeof port_protocols !== 'object' || Array.isArray(port_protocols)) return false
   const entries = Object.entries(port_protocols)
-  if (schema_version === 4) {
+  if (schema_version === 4 || (schema_version === 5 && public_endpoints !== undefined)) {
     if (!public_endpoints || typeof public_endpoints !== 'object' || Array.isArray(public_endpoints)) return false
     const published = Object.entries(public_endpoints)
     const seen = new Set<string>()
@@ -72,6 +75,22 @@ export function validSubscription(value: unknown): value is XraySubscription {
       if (seen.has(address)) return true
       seen.add(address)
       return false
+    })) return false
+  }
+  if (schema_version === 5) {
+    if (!vless_streams || typeof vless_streams !== 'object' || Array.isArray(vless_streams)) return false
+    const streams = Object.entries(vless_streams)
+    if (!streams.length || streams.some(([key, stream]) => {
+      const port = Number(key)
+      if (String(port) !== key || !ports.includes(port) || port_protocols[port] !== 'vless' || !stream || typeof stream !== 'object') return true
+      if (typeof stream.network !== 'string' || !['ws', 'grpc', 'httpupgrade', 'xhttp'].includes(stream.network)) return true
+      if (stream.host !== undefined && (typeof stream.host !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.host))) return true
+      if (stream.authority !== undefined && (typeof stream.authority !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.authority))) return true
+      if (stream.multi_mode !== undefined && typeof stream.multi_mode !== 'boolean') return true
+      if (stream.service_name !== undefined && (typeof stream.service_name !== 'string' || !/^[A-Za-z0-9_.-]{0,128}$/.test(stream.service_name))) return true
+      if (stream.network === 'grpc') return !!stream.path || !!stream.host || !!stream.mode
+      return typeof stream.path !== 'string' || !stream.path.startsWith('/') || stream.path.length > 256 || /[\r\n\0]/.test(stream.path) ||
+        !!stream.service_name || !!stream.authority || !!stream.multi_mode || (stream.network === 'xhttp' ? !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(stream.mode ?? '') : !!stream.mode)
     })) return false
   }
   if (entries.some(([, protocol]) => protocol === 'trojan')) {
@@ -137,7 +156,13 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
   const settings = outboundSettings(subscription, proxyPort, protocol, credential)
   const account = { user: subscription.username, pass: credential }
   const trust = subscription.trojan_trust
-  const streamSettings = protocol === 'vless-reality' ? {
+  const vlessStream = subscription.vless_streams?.[proxyPort]
+  const streamSettings = vlessStream ? {
+    network: vlessStream.network,
+    [`${vlessStream.network}Settings`]: vlessStream.network === 'grpc'
+      ? { serviceName: vlessStream.service_name ?? '', authority: vlessStream.authority ?? '', multiMode: vlessStream.multi_mode ?? false }
+      : { path: vlessStream.path, host: vlessStream.host ?? '', ...(vlessStream.network === 'xhttp' ? { mode: vlessStream.mode } : {}) },
+  } : protocol === 'vless-reality' ? {
     network: 'raw', security: 'reality',
     realitySettings: {
       serverName: 'localhost', fingerprint: 'chrome', password: subscription.reality_public_key,
@@ -159,4 +184,28 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
     }],
     outbounds: [{ protocol: protocol === 'vless-reality' ? 'vless' : protocol, settings, ...(streamSettings ? { streamSettings } : {}) }],
   }
+}
+
+// Share only the VLESS variants represented by the current subscription schema.
+export function buildVlessLink(subscription: XraySubscription, proxyPort: number, credential: string, remark: string) {
+  if (!validSubscription(subscription) || !subscription.ports.includes(proxyPort)) throw new Error('此节点端口未获授权。')
+  const protocol = subscriptionProtocol(subscription, proxyPort)
+  if (protocol !== 'vless' && protocol !== 'vless-reality') throw new Error('此入站不是 VLESS。')
+  outboundSettings(subscription, proxyPort, protocol, credential)
+  const endpoint = subscriptionEndpoint(subscription, proxyPort)
+  const stream = subscription.vless_streams?.[proxyPort]
+  const params = new URLSearchParams({ type: stream?.network ?? 'tcp', encryption: 'none', security: protocol === 'vless-reality' ? 'reality' : 'none' })
+  if (stream?.path) params.set('path', stream.path)
+  if (stream?.host) params.set('host', stream.host)
+  if (stream?.service_name) params.set('serviceName', stream.service_name)
+  if (stream?.authority) params.set('authority', stream.authority)
+  if (stream?.multi_mode) params.set('mode', 'multi')
+  if (stream?.mode) params.set('mode', stream.mode)
+  if (protocol === 'vless-reality') {
+    params.set('sni', 'localhost')
+    params.set('fp', 'chrome')
+    params.set('pbk', subscription.reality_public_key!)
+    params.set('sid', credential.split(':')[1])
+  }
+  return `vless://${credential.split(':')[0]}@${endpoint.address}:${endpoint.port}?${params.toString()}#${encodeURIComponent(remark)}`
 }

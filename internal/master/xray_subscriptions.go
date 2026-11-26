@@ -34,6 +34,7 @@ type subscriptionPorts struct {
 	httpPorts []int
 	protocols map[int]string
 	published map[int]xrayconfig.PublicEndpoint
+	streams   map[int]*xrayconfig.VLESSStream
 }
 
 func (g subscriptionGrant) ports(user string) subscriptionPorts {
@@ -45,6 +46,12 @@ func (g subscriptionGrant) allowedPorts(user string, port int) subscriptionPorts
 	for _, inbound := range g.plan {
 		if (port == 0 || inbound.Port == port) && slices.Contains(inbound.Users, user) {
 			result.ports = append(result.ports, inbound.Port)
+			if inbound.VLESSStream != nil {
+				if result.streams == nil {
+					result.streams = make(map[int]*xrayconfig.VLESSStream)
+				}
+				result.streams[inbound.Port] = inbound.VLESSStream
+			}
 			if inbound.Protocol == xrayconfig.HTTP {
 				result.httpPorts = append(result.httpPorts, inbound.Port)
 			}
@@ -374,6 +381,10 @@ func (g subscriptionGrant) payload(username string, ports subscriptionPorts, exp
 	} else if len(ports.httpPorts) > 0 {
 		result["schema_version"] = 2
 		result["http_ports"] = ports.httpPorts
+	}
+	if len(ports.streams) > 0 {
+		result["schema_version"] = 5
+		result["vless_streams"] = ports.streams
 	}
 	return result
 }

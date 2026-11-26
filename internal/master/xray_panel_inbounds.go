@@ -22,6 +22,7 @@ type panelInboundChange struct {
 	Destination    xrayconfig.Destination    `json:"destination,omitzero"`
 	Public         xrayconfig.PublicEndpoint `json:"public_endpoint,omitzero"`
 	RotateTLS      bool                      `json:"rotate_tls,omitempty"`
+	VLESSStream    *xrayconfig.VLESSStream   `json:"vless_stream,omitempty"`
 }
 
 type panelInboundClient struct {
@@ -153,7 +154,8 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 	port, err := strconv.Atoi(r.PathValue("port"))
 	if err != nil || strconv.Itoa(port) != r.PathValue("port") || port < 1024 || port > 65535 ||
 		readJSON(r, &in) != nil || len(in.State) != 64 ||
-		(in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0)) ||
+		(in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0 || in.VLESSStream != nil)) ||
+		!in.VLESSStream.Valid() || (in.VLESSStream != nil && in.Protocol != xrayconfig.VLESS) ||
 		(in.CopyRoutesFrom != 0 && (in.CopyRoutesFrom < 1024 || in.CopyRoutesFrom > 65535 || in.CopyRoutesFrom == port || in.Destination != (xrayconfig.Destination{}))) ||
 		(in.Clients != nil && (len(in.Clients) < 1 || len(in.Clients) > xrayconfig.MaxInboundUsers || in.Username != "" || in.Credential != "")) ||
 		(in.Protocol != xrayconfig.Trojan && in.RotateTLS) ||
@@ -249,7 +251,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				if in.Clients == nil && len(previous.Inbound.Users) > 1 {
 					return lifecycleauth.ErrDenied
 				}
-				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, PublicEndpoint: in.Public}}
+				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, PublicEndpoint: in.Public, VLESSStream: in.VLESSStream}}
 				if in.Protocol == xrayconfig.Trojan {
 					if identity == nil || in.RotateTLS {
 						identity, err = xrayconfig.NewPanelTLS(inv.Xray.PanelKey, now)

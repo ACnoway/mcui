@@ -193,6 +193,8 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 		}
 		if protocol == Trojan {
 			entry["streamSettings"] = tls.streamSettings()
+		} else if inbound.VLESSStream != nil {
+			entry["streamSettings"] = inbound.VLESSStream.render()
 		}
 		inbounds = append(inbounds, entry)
 		tags[inbound.Port] = tag

@@ -85,8 +85,27 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 					} `json:"users"`
 				} `json:"settings"`
 				StreamSettings struct {
+					Network  string `json:"network"`
 					Security string `json:"security"`
-					Reality  struct {
+					WS       struct {
+						Path string `json:"path"`
+						Host string `json:"host"`
+					} `json:"wsSettings"`
+					HTTPUpgrade struct {
+						Path string `json:"path"`
+						Host string `json:"host"`
+					} `json:"httpupgradeSettings"`
+					XHTTP struct {
+						Path string `json:"path"`
+						Host string `json:"host"`
+						Mode string `json:"mode"`
+					} `json:"xhttpSettings"`
+					GRPC struct {
+						ServiceName string `json:"serviceName"`
+						Authority   string `json:"authority"`
+						MultiMode   bool   `json:"multiMode"`
+					} `json:"grpcSettings"`
+					Reality struct {
 						PrivateKey string `json:"privateKey"`
 					} `json:"realitySettings"`
 					TLS struct {
@@ -109,6 +128,22 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 				}
 				if in.Protocol == "socks" {
 					entry.Protocol = ""
+				}
+				if keyErr == nil && in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "" {
+					stream := &xrayconfig.VLESSStream{Network: in.StreamSettings.Network}
+					switch stream.Network {
+					case "ws":
+						stream.Path, stream.Host = in.StreamSettings.WS.Path, in.StreamSettings.WS.Host
+					case "httpupgrade":
+						stream.Path, stream.Host = in.StreamSettings.HTTPUpgrade.Path, in.StreamSettings.HTTPUpgrade.Host
+					case "xhttp":
+						stream.Path, stream.Host, stream.Mode = in.StreamSettings.XHTTP.Path, in.StreamSettings.XHTTP.Host, in.StreamSettings.XHTTP.Mode
+					case "grpc":
+						stream.ServiceName, stream.Authority, stream.MultiMode = in.StreamSettings.GRPC.ServiceName, in.StreamSettings.GRPC.Authority, in.StreamSettings.GRPC.MultiMode
+					default:
+						stream = nil
+					}
+					entry.VLESSStream = stream
 				}
 				if in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "reality" {
 					key, err := xrayconfig.RealityPublicKey(in.StreamSettings.Reality.PrivateKey)

@@ -2,15 +2,15 @@
 import { computed, ref } from 'vue'
 import PanelDialog from './PanelDialog.vue'
 import { destinationLabel, type Destination, type Network } from './xrayManagement'
-import { buildXrayClient, type XraySubscription } from './xraySubscription'
+import { buildXrayClient, type VLESSStream, type XraySubscription } from './xraySubscription'
 
 type Protocol = '' | 'http' | 'vless' | 'vmess' | 'trojan'
-type Inbound = { port: number; protocol?: string; users: string[]; public_endpoint?: Destination; tls_cert_sha256?: string }
+type Inbound = { port: number; protocol?: string; users: string[]; public_endpoint?: Destination; tls_cert_sha256?: string; vless_stream?: VLESSStream }
 type Client = { username: string; credential: string }
 type ClientEdit = Client & { originalUsername?: string }
 export type PanelInboundChange = { remove: true } | {
   protocol: Protocol; clients: Client[]; destination?: Destination; copy_routes_from?: number
-  public_endpoint?: Destination; rotate_tls?: boolean
+  public_endpoint?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream
 }
 
 const props = defineProps<{
@@ -29,6 +29,7 @@ const protocols: { value: Protocol; label: string }[] = [
 const form = ref<{
   port: number; editing: boolean; copyFrom?: number; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
   published: boolean; publicAddress: string; publicPort: number; rotateTLS: boolean
+  transport: 'tcp' | VLESSStream['network']; path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
 } | null>(null)
 const error = ref('')
 const download = ref<{ inbound: Inbound; username: string; revision: number; localPort: number; password: string; error: string } | null>(null)
@@ -74,6 +75,9 @@ function open(inbound?: Inbound, copy = false) {
     address: existing?.address ?? '', targetPort: existing?.port ?? 443,
     published: !copy && !!inbound?.public_endpoint, publicAddress: inbound?.public_endpoint?.address ?? props.addresses[0] ?? '',
     publicPort: inbound?.public_endpoint?.port ?? 443, rotateTLS: false,
+    transport: inbound?.vless_stream?.network ?? 'tcp', path: inbound?.vless_stream?.path ?? '/',
+    host: inbound?.vless_stream?.host ?? '', serviceName: inbound?.vless_stream?.service_name ?? '', mode: inbound?.vless_stream?.mode ?? 'auto',
+    authority: inbound?.vless_stream?.authority ?? '', multiMode: inbound?.vless_stream?.multi_mode ?? false,
   }
   error.value = ''
 }
@@ -100,6 +104,9 @@ async function submit() {
       copy_routes_from: draft.copyFrom,
       public_endpoint: (draft.protocol === '' || draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
       rotate_tls: draft.protocol === 'trojan' && draft.rotateTLS ? true : undefined,
+      vless_stream: draft.protocol !== 'vless' || draft.transport === 'tcp' ? undefined : draft.transport === 'grpc'
+        ? { network: 'grpc', service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined }
+        : { network: draft.transport, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}) },
     })
     form.value = null
   } catch (cause) {
@@ -135,16 +142,17 @@ function downloadClient() {
   if (!active?.public_endpoint || dialog.revision !== props.revision || !active.users.includes(username) ||
       active.protocol !== inbound.protocol ||
       destinationLabel(active.public_endpoint) !== destinationLabel(inbound.public_endpoint!) ||
-      active.tls_cert_sha256 !== inbound.tls_cert_sha256) {
+      active.tls_cert_sha256 !== inbound.tls_cert_sha256 || JSON.stringify(active.vless_stream) !== JSON.stringify(inbound.vless_stream)) {
     dialog.error = '生效入站已变化，请重新打开客户端配置。'
     return
   }
   try {
     const metadata: XraySubscription = {
-      schema_version: 4, username, address: '127.0.0.1', ports: [active.port],
+      schema_version: active.vless_stream ? 5 : 4, username, address: '127.0.0.1', ports: [active.port],
       port_protocols: { [active.port]: active.protocol === '' ? 'socks' : active.protocol === 'trojan' ? 'trojan' : 'vless' },
       public_endpoints: { [active.port]: active.public_endpoint },
       ...(active.protocol === 'trojan' ? { trojan_trust: props.trust } : {}),
+      ...(active.vless_stream ? { vless_streams: { [active.port]: active.vless_stream } } : {}),
       revision: props.revision, expires_at: Math.floor(Date.now() / 1000) + 60,
     }
     const config = buildXrayClient(metadata, active.port, localPort, password)
@@ -197,6 +205,24 @@ async function remove(port: number) {
         <option v-for="protocol in protocols.filter(option => trojan || option.value !== 'trojan')" :key="protocol.value" :value="protocol.value">{{ protocol.label }}</option>
       </select></label>
       <label>监听端口 <input v-model.number="form.port" type="number" min="1024" max="65535" required :disabled="form.editing" /></label>
+      <template v-if="form.protocol === 'vless'">
+        <label>传输方式 <select v-model="form.transport">
+          <option value="tcp">RAW / TCP</option><option value="ws">WebSocket</option><option value="grpc">gRPC</option>
+          <option value="httpupgrade">HTTPUpgrade</option><option value="xhttp">XHTTP</option>
+        </select></label>
+        <template v-if="form.transport === 'grpc'">
+          <label>gRPC serviceName <input v-model="form.serviceName" maxlength="128" pattern="[A-Za-z0-9_.\-]*" /></label>
+          <label>gRPC authority <input v-model="form.authority" maxlength="253" pattern="[A-Za-z0-9.\-:]*" /></label>
+          <label><input v-model="form.multiMode" type="checkbox" /> gRPC multiMode</label>
+        </template>
+        <template v-else-if="form.transport !== 'tcp'">
+          <label>路径 <input v-model="form.path" required maxlength="256" pattern="/.*" /></label>
+          <label>Host <input v-model="form.host" maxlength="253" pattern="[A-Za-z0-9.\-:]*" /></label>
+          <label v-if="form.transport === 'xhttp'">XHTTP 模式 <select v-model="form.mode">
+            <option value="auto">auto</option><option value="packet-up">packet-up</option><option value="stream-up">stream-up</option><option value="stream-one">stream-one</option>
+          </select></label>
+        </template>
+      </template>
       <fieldset v-for="(client, index) in form.clients" :key="index">
         <legend>客户端 {{ index + 1 }}</legend>
         <label>用户名 <input v-model="client.username" pattern="[a-z][a-z0-9_\-]{0,23}" autocomplete="off"
@@ -217,7 +243,7 @@ async function remove(port: number) {
       </div>
       <template v-if="form.protocol === '' || form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
-        <p v-if="form.protocol === 'vless' && form.published" class="feedback">此 VLESS 入口使用明文 RAW TCP，请在可信网络或受保护的传输通道中使用。</p>
+        <p v-if="form.protocol === 'vless' && form.published" class="feedback">此 VLESS 入口不提供传输加密，请在可信网络或受保护的传输通道中使用。</p>
         <p v-if="form.protocol === '' && form.published" class="feedback">公网 SOCKS5 使用明文 TCP。认证密码和代理流量没有传输加密，请仅在可信网络或受保护的隧道中使用。</p>
         <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
         <template v-if="form.published">

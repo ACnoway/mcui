@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import LinkActions from './LinkActions.vue'
-import { buildXrayClient, subscriptionEndpoint, subscriptionProtocol, validSubscription, xrayProtocolName, type XraySubscription } from './xraySubscription'
+import { buildVlessLink, buildXrayClient, subscriptionEndpoint, subscriptionProtocol, validSubscription, xrayProtocolName, type XraySubscription } from './xraySubscription'
 
 type Entry = { key: string; node: string; port: number; config: XraySubscription }
 type Selection = { username: string; expiresAt: number; entries: Entry[]; credential?: string }
@@ -12,6 +12,7 @@ const subscriptionURL = ref('')
 const status = ref('正在读取订阅…')
 const error = ref('')
 const password = ref('')
+const vlessLink = ref('')
 const localPort = ref<number>(10808)
 let expiryTimer = 0
 let subscriptionRead: AbortController | undefined
@@ -27,6 +28,7 @@ const credentialLabel = computed(() => {
 })
 watch(endpointKey, () => {
   password.value = ''
+  vlessLink.value = ''
   error.value = ''
   const entry = activeEntry.value
   if (entry?.config.ports.includes(localPort.value)) {
@@ -34,6 +36,7 @@ watch(endpointKey, () => {
     while (entry.config.ports.includes(localPort.value)) localPort.value++
   }
 })
+watch(password, () => { vlessLink.value = '' })
 
 function parseSelection(data: unknown, clientPage: boolean): Selection | null {
   if (!clientPage) {
@@ -76,6 +79,7 @@ async function loadSubscription() {
   endpointKey.value = ''
   subscriptionURL.value = ''
   password.value = ''
+  vlessLink.value = ''
   error.value = ''
   localPort.value = 10808
   status.value = '正在读取订阅…'
@@ -136,6 +140,21 @@ function updateExpiry() {
   selection.value = null
   subscriptionURL.value = ''
   password.value = ''
+  vlessLink.value = ''
+}
+
+function generateVlessLink() {
+  updateExpiry()
+  const entry = activeEntry.value
+  if (!entry) return
+  error.value = ''
+  vlessLink.value = ''
+  try {
+    vlessLink.value = buildVlessLink(entry.config, entry.port, selection.value?.credential ?? password.value,
+      `${entry.node || selection.value?.username || 'VLESS'}-${entry.port}`)
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '生成分享链接失败。'
+  }
 }
 
 function downloadClient() {
@@ -196,8 +215,14 @@ function downloadClient() {
           </details>
           <p v-if="activeEntry && activeEntry.config.username !== selection.username">节点凭据名 {{ activeEntry.config.username }}</p>
           <button type="submit">生成并下载 Xray 配置</button>
+          <button v-if="activeEntry && ['vless', 'vless-reality'].includes(subscriptionProtocol(activeEntry.config, activeEntry.port))"
+            type="button" class="outline" @click="generateVlessLink">生成 VLESS 分享链接</button>
           <p v-if="error" class="error" role="alert">{{ error }}</p>
         </form>
+        <div v-if="vlessLink">
+          <p>分享链接包含客户端凭据，请妥善保管。</p>
+          <LinkActions :url="vlessLink" label="VLESS 分享链接" />
+        </div>
       </section>
       <section v-if="!selection.credential" class="card">
         <h2>订阅链接</h2>
