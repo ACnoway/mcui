@@ -196,7 +196,11 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 		}
 		tag := fmt.Sprintf("%s-%d", protocol, inbound.Port)
 		listen := "127.0.0.1"
-		if inbound.PublicEndpoint != (PublicEndpoint{}) {
+		listenPort := inbound.Port
+		if c.Network != nil && c.Network.Host {
+			listen, listenPort = inbound.HostListen.Address, inbound.HostListen.Port
+			tag = HostInboundTag(inbound.Port, inbound.PublicEndpoint)
+		} else if inbound.PublicEndpoint != (PublicEndpoint{}) {
 			listen, tag = PublicListenAddress, publicTagPrefix+inbound.PublicEndpoint.String()
 		}
 		settings := catalog.inboundSettings(protocol, inbound.Users)
@@ -208,7 +212,7 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 			}
 		}
 		entry := map[string]any{
-			"listen": listen, "port": inbound.Port, "protocol": protocol, "tag": tag,
+			"listen": listen, "port": listenPort, "protocol": protocol, "tag": tag,
 			"settings": settings,
 		}
 		if protocol == Trojan {

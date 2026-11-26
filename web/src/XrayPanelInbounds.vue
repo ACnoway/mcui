@@ -5,19 +5,19 @@ import { destinationLabel, type Destination, type Network } from './xrayManageme
 import { buildXrayClient, type VLESSStream, type XraySubscription } from './xraySubscription'
 
 type Protocol = '' | 'http' | 'vless' | 'vmess' | 'trojan'
-type Inbound = { port: number; protocol?: string; users: string[]; public_endpoint?: Destination; tls_cert_sha256?: string; vless_stream?: VLESSStream; vless_flows?: Record<string, 'xtls-rprx-vision'> }
+type Inbound = { port: number; protocol?: string; users: string[]; public_endpoint?: Destination; host_listen?: Destination; tls_cert_sha256?: string; vless_stream?: VLESSStream; vless_flows?: Record<string, 'xtls-rprx-vision'> }
 type Client = { username: string; credential: string; flow?: 'xtls-rprx-vision' | '' }
 type ClientEdit = Client & { originalUsername?: string }
 export type PanelInboundChange = { remove: true } | {
   protocol: Protocol; clients: Client[]; destination?: Destination; copy_routes_from?: number
-  public_endpoint?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream; reality_target?: string; reality_names?: string[]; rotate_reality?: boolean
+  public_endpoint?: Destination; host_listen?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream; reality_target?: string; reality_names?: string[]; rotate_reality?: boolean
 }
 
 const props = defineProps<{
   inbounds: Inbound[]; network: Network | null; busy: boolean
   managedBindings: { port: number; credential: string }[]
   save: (port: number, change: PanelInboundChange) => Promise<void>
-  multiClient: boolean; trojan: boolean; publicVless: boolean; appliedVerified: boolean
+  multiClient: boolean; trojan: boolean; publicVless: boolean; hostAvailable: boolean; appliedVerified: boolean
   addresses: string[]; trust?: XraySubscription['trojan_trust']; applied: Inbound[]; revision: number
 }>()
 
@@ -29,6 +29,7 @@ const protocols: { value: Protocol; label: string }[] = [
 const form = ref<{
   port: number; editing: boolean; copyFrom?: number; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
   published: boolean; publicAddress: string; publicPort: number; rotateTLS: boolean
+  hostMode: boolean; listenAddress: string; listenPort: number
   transport: VLESSStream['network']; tls: boolean; reality: boolean; realityTarget: string; realityNames: string; rotateReality: boolean
   path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
 } | null>(null)
@@ -76,6 +77,8 @@ function open(inbound?: Inbound, copy = false) {
     address: existing?.address ?? '', targetPort: existing?.port ?? 443,
     published: !copy && !!inbound?.public_endpoint, publicAddress: inbound?.public_endpoint?.address ?? props.addresses[0] ?? '',
     publicPort: inbound?.public_endpoint?.port ?? 443, rotateTLS: false,
+    hostMode: !!props.network?.host || (!props.inbounds.length && props.hostAvailable),
+    listenAddress: inbound?.host_listen?.address ?? '0.0.0.0', listenPort: copy ? firstFree : inbound?.host_listen?.port ?? inbound?.port ?? firstFree,
     transport: inbound?.vless_stream?.network ?? 'tcp', path: inbound?.vless_stream?.path ?? '/',
     tls: inbound?.vless_stream?.security === 'tls',
     reality: inbound?.vless_stream?.security === 'reality', realityTarget: inbound?.vless_stream?.reality?.target ?? '',
@@ -108,6 +111,7 @@ async function submit() {
       destination: !draft.copyFrom && draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
       copy_routes_from: draft.copyFrom,
       public_endpoint: (draft.protocol === '' || draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
+      host_listen: draft.hostMode ? { address: draft.listenAddress, port: draft.listenPort } : undefined,
       rotate_tls: (draft.protocol === 'trojan' || (draft.protocol === 'vless' && draft.tls)) && draft.rotateTLS ? true : undefined,
       vless_stream: draft.protocol !== 'vless' || (draft.transport === 'tcp' && !draft.tls && !draft.reality) ? undefined : draft.transport === 'tcp'
         ? { network: 'tcp', security: draft.reality ? 'reality' : 'tls' }
@@ -197,7 +201,7 @@ async function remove(port: number) {
     <table class="data-table" aria-label="主控入站草稿">
       <thead><tr><th scope="col">监听</th><th scope="col">协议</th><th scope="col">客户端</th><th scope="col">出站</th><th scope="col">操作</th></tr></thead>
       <tbody><tr v-for="inbound in inbounds" :key="inbound.port">
-        <th scope="row">{{ inbound.public_endpoint ? destinationLabel(inbound.public_endpoint) : `127.0.0.1:${inbound.port}` }}</th>
+        <th scope="row">{{ inbound.host_listen ? destinationLabel(inbound.host_listen) : inbound.public_endpoint ? destinationLabel(inbound.public_endpoint) : `127.0.0.1:${inbound.port}` }}</th>
         <td>{{ protocolLabel(inbound.protocol) }}</td>
         <td>{{ inbound.users.join('、') }}<template v-if="centrallyBound(inbound.port)"> · 已在「客户端」绑定</template></td>
         <td>{{ !inbound.protocol || inbound.protocol === 'vless' ? `${targets(inbound.port).map(destinationLabel).join('、')}${targets(inbound.port).length ? '，其余' : ''}直连公网（内网目标拒绝）` : targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
@@ -265,13 +269,21 @@ async function remove(port: number) {
       <div v-if="multiClient && form.clients.length < 8" class="actions">
         <button type="button" class="outline" :disabled="busy" @click="form.clients.push({ username: '', credential: '', flow: '' })">添加客户端</button>
       </div>
+      <template v-if="hostAvailable || form.hostMode">
+        <label><input v-model="form.hostMode" type="checkbox" :disabled="inbounds.length > (form.editing ? 1 : 0)" /> 宿主网络直监听</label>
+        <template v-if="form.hostMode">
+          <label>监听地址 <input v-model.trim="form.listenAddress" required placeholder="0.0.0.0 或 ::" /></label>
+          <label>监听端口 <input v-model.number="form.listenPort" type="number" min="1" max="65535" required /></label>
+        </template>
+      </template>
       <template v-if="form.protocol === '' || form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
-        <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
+        <label><input v-model="form.published" type="checkbox" :disabled="!form.hostMode && !addresses.length && !form.published" /> {{ form.hostMode ? '设置订阅公布地址' : '启用公网 TCP 接入' }}</label>
         <p v-if="form.protocol === 'vless' && form.published && !form.tls && !form.reality" class="feedback">此 VLESS 入口不提供传输加密，请在可信网络或受保护的传输通道中使用。</p>
         <p v-if="form.protocol === '' && form.published" class="feedback">公网 SOCKS5 使用明文 TCP。认证密码和代理流量没有传输加密，请仅在可信网络或受保护的隧道中使用。</p>
-        <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
+        <p v-if="!form.hostMode && !addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
         <template v-if="form.published">
-          <label>宿主公网 IPv4 <select v-model="form.publicAddress" required>
+          <label v-if="form.hostMode">公布公网 IPv4 <input v-model.trim="form.publicAddress" required /></label>
+          <label v-else>宿主公网 IPv4 <select v-model="form.publicAddress" required>
             <option v-if="!addresses.includes(form.publicAddress)" value="" disabled>请选择节点上报的地址</option>
             <option v-for="address in addresses" :key="address" :value="address">{{ address }}</option>
           </select></label>

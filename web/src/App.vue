@@ -45,7 +45,7 @@ type PanelXrayOptions = {
   current: {
     version: string; sha256: string; running: boolean; candidate?: XrayConfigReference; config?: XrayConfigReference; config_revision?: number
     catalog?: XrayCatalog; applied?: XrayInbound[]; applied_network?: Network
-    panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean; panel_public_vless?: boolean
+    panel_trojan?: boolean; panel_addresses?: string[]; panel_multi_client?: boolean; panel_public_vless?: boolean; panel_host?: boolean
     panel_multi_route?: boolean
     panel_statistics?: boolean; statistics_active?: boolean
   }
@@ -1397,6 +1397,7 @@ onMounted(async () => {
           <p v-if="panelXray.panel_inbounds && draftTab === 'inbound' && xrayDraftDirty" class="feedback">编辑入站前，请保存或放弃未保存的路由和出站修改。</p>
           <XrayPanelInbounds v-if="panelXray.panel_inbounds && draftTab === 'inbound'" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
             :multi-client="!!panelXray.current.panel_multi_client"
+            :host-available="!!panelXray.current.panel_host"
             :public-vless="!!panelXray.current.panel_public_vless" :applied-verified="appliedConfigVerified"
             :network="panelXray.draft_network ?? null" :busy="draftDisabled || xrayDraftDirty" :save="savePanelInbound"
             :managed-bindings="panelXray.managed_bindings ?? []"

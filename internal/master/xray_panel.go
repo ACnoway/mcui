@@ -139,6 +139,7 @@ func xrayCandidate(i *lifecycleauth.XrayInventory, draft string) bool {
 			}
 		}
 		return err == nil && plan.Panel != nil && (!plan.Panel.Statistics || i.PanelStatistics) &&
+			(plan.Network == nil || !plan.Network.Host || i.PanelHost) &&
 			(i.PanelMultiRoute || !plan.Network.HasMultipleRoutes()) && xrayDraftPreviewed(i, draft)
 	}
 	if i.Catalog == nil {

@@ -743,7 +743,34 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		}
 		complete(installDirect.TaskID, installTask.Sequence, newer)
 		direct.Version, direct.SHA256, direct.Running = newer.Version, newer.SHA256, true
+		direct.PanelPublicVLESS = true
 		heartbeat(&direct)
+		hostChange := panelInboundChange{State: options(), Protocol: xrayconfig.VLESS,
+			Username: "host-user", Credential: "00000000-0000-4000-8000-000000000001",
+			HostListen: &xrayconfig.HostListener{Address: "0.0.0.0", Port: 443},
+			Public:     xrayconfig.PublicEndpoint{Address: "93.184.216.37", Port: 8443}}
+		hostWrite := func(change panelInboundChange) *httptest.ResponseRecorder {
+			return subscriptionAdmin(http.MethodPut, "https://panel.example.test"+path+"/inbounds/1081", client.csrf, change)
+		}
+		expect(hostWrite(hostChange), http.StatusBadRequest)
+		direct.PanelHost = true
+		heartbeat(&direct)
+		hostChange.State = options()
+		expect(hostWrite(hostChange), http.StatusOK)
+		hostNode, err := s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostDraft, err := xrayconfig.ParseConfiguration(hostNode.XrayDraft)
+		if err != nil || !hostDraft.Network.Host || len(hostDraft.Inbounds) != 1 ||
+			hostDraft.Inbounds[0].HostListen == nil || *hostDraft.Inbounds[0].HostListen != *hostChange.HostListen ||
+			hostDraft.Inbounds[0].PublicEndpoint != hostChange.Public {
+			t.Fatalf("host listener and NAT advertisement were not saved: %v", err)
+		}
+		if _, _, err := hostDraft.RenderPanel(private); err != nil {
+			t.Fatalf("host listener draft did not render: %v", err)
+		}
+		expect(hostWrite(panelInboundChange{State: options(), Remove: true}), http.StatusOK)
 		credential := strings.Repeat("A", 43)
 		change := panelInboundChange{
 			State: options(), Protocol: xrayconfig.Trojan, Username: "alice", Credential: credential,

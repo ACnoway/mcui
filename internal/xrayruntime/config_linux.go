@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ACnoway/mcui/internal/lifecycleauth"
 	"github.com/ACnoway/mcui/internal/xrayconfig"
@@ -48,8 +49,13 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 			view.PanelPublicVLESS = true
 			view.PanelAddresses, _ = network.panelAddresses()
 		}
+		if network, ok := r.service.(hostNetworkService); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			view.PanelHost = network.checkHostUnits(ctx) == nil
+			cancel()
+		}
 		if plan, err := xrayconfig.ParseConfiguration(encoded); err == nil && plan.Panel != nil &&
-			(!plan.Panel.Statistics || view.PanelStatistics) && checkPolicyDirectory(inboundPolicyPath, current.Release) == nil {
+			(!plan.Panel.Statistics || view.PanelStatistics) && (plan.Network == nil || !plan.Network.Host || view.PanelHost) && checkPolicyDirectory(inboundPolicyPath, current.Release) == nil {
 			_, view.Candidate, _ = plan.RenderPanel(key)
 			view.Preview = xrayconfig.PlanDigest(encoded)
 		}
@@ -126,6 +132,10 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 			var panelTLS *xrayconfig.TrojanTrust
 			for _, in := range config.Inbounds {
 				entry := xrayconfig.Inbound{Port: in.Port, Protocol: in.Protocol}
+				if logical, endpoint, host := xrayconfig.ParseHostInboundTag(in.Tag); host {
+					entry.Port, entry.PublicEndpoint = logical, endpoint
+					entry.HostListen = &xrayconfig.HostListener{Address: in.Listen, Port: in.Port}
+				}
 				ports[in.Tag] = entry.Port
 				if in.Protocol == "" {
 					return view
@@ -185,7 +195,7 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						panelTLS = &xrayconfig.TrojanTrust{Certificate: certificate, SHA256: digest}
 					}
 				}
-				if in.Listen == xrayconfig.PublicListenAddress {
+				if entry.HostListen == nil && in.Listen == xrayconfig.PublicListenAddress {
 					endpoint, ok := xrayconfig.PublishedEndpoint(in.Tag)
 					if !ok {
 						return view
@@ -356,6 +366,10 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 	if config.Inbounds == nil || (len(config.Inbounds) == 0 && len(config.Routing.Rules) != 0) {
 		return nil, nil, false, errors.New("invalid saved Xray route")
 	}
+	hostNetwork := config.DNS.Tag == xrayconfig.PanelHostDNSTag
+	if hostNetwork && (!slices.Equal(config.DNS.Servers, []string{"localhost"}) || config.DNS.QueryStrategy != "UseIPv4") {
+		return nil, nil, false, errors.New("invalid host Xray DNS policy")
+	}
 	direct, dnsOutbound := false, false
 	for _, outbound := range config.Outbounds {
 		if outbound.Tag == xrayconfig.PanelDNSTag {
@@ -366,7 +380,7 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 		}
 		if outbound.Tag == "direct" {
 			if direct || outbound.Protocol != "freedom" || outbound.Settings.DomainStrategy != "UseIPv4" ||
-				config.DNS.Tag != xrayconfig.PanelDNSTag || !slices.Equal(config.DNS.Servers, []string{xrayconfig.PanelDNSAddress}) || config.DNS.QueryStrategy != "UseIPv4" ||
+				(!hostNetwork && (config.DNS.Tag != xrayconfig.PanelDNSTag || !slices.Equal(config.DNS.Servers, []string{xrayconfig.PanelDNSAddress}) || config.DNS.QueryStrategy != "UseIPv4")) ||
 				len(outbound.Settings.FinalRules) != 1 ||
 				outbound.Settings.FinalRules[0].Action != "block" ||
 				!slices.Equal(outbound.Settings.FinalRules[0].IP, xrayconfig.PanelDirectBlockedIPs()) {
@@ -433,12 +447,13 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 			destinations = append(destinations, rule.IP[0])
 		}
 	}
-	if direct != (directRules == 1) || direct != dnsOutbound || direct != (dnsRules == 1) {
+	if direct != (directRules == 1) || (!hostNetwork && (direct != dnsOutbound || direct != (dnsRules == 1))) ||
+		(hostNetwork && (dnsOutbound || dnsRules != 0)) {
 		return nil, nil, false, errors.New("Xray direct outbound and route do not match")
 	}
 	var published []publishedInbound
 	for _, inbound := range config.Inbounds {
-		if inbound.Stream.Security == "reality" && inbound.Stream.Reality.Target != "127.0.0.1:10443" {
+		if inbound.Stream.Security == "reality" && (hostNetwork || inbound.Stream.Reality.Target != "127.0.0.1:10443") {
 			target, err := netip.ParseAddrPort(inbound.Stream.Reality.Target)
 			if err != nil || !(xrayconfig.PublicEndpoint{Address: target.Addr().String(), Port: int(target.Port())}).Valid() {
 				return nil, nil, false, errors.New("REALITY target is not a pinned public IPv4 endpoint")
@@ -447,6 +462,15 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 			if !slices.Contains(destinations, prefix) {
 				destinations = append(destinations, prefix)
 			}
+		}
+		if hostNetwork {
+			logical, endpoint, ok := xrayconfig.ParseHostInboundTag(inbound.Tag)
+			listener := xrayconfig.HostListener{Address: inbound.Listen, Port: inbound.Port}
+			if !ok || !listener.Valid() || (inbound.Protocol != "socks" && !xrayconfig.PanelProtocol(inbound.Protocol)) {
+				return nil, nil, false, errors.New("invalid host Xray listener")
+			}
+			published = append(published, publishedInbound{port: logical, endpoint: endpoint, host: true, listen: listener})
+			continue
 		}
 		endpoint, ok := xrayconfig.PublishedEndpoint(inbound.Tag)
 		if inbound.Listen == "127.0.0.1" && !ok {
@@ -463,6 +487,15 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 	return destinations, published, direct, nil
 }
 
+func usesHostNetwork(data []byte) bool {
+	var config struct {
+		DNS struct {
+			Tag string `json:"tag"`
+		} `json:"dns"`
+	}
+	return json.Unmarshal(data, &config) == nil && config.DNS.Tag == xrayconfig.PanelHostDNSTag
+}
+
 func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool) error {
 	destinations, published, _, err := configurationNetwork(data)
 	if err != nil {
@@ -472,9 +505,6 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool)
 		service, ok := r.service.(panelNetworkService)
 		if !ok {
 			return errors.New("Xray service cannot apply panel network policy")
-		}
-		if err := validatePanelAddresses(service, published); err != nil {
-			return err
 		}
 		if len(destinations) > 0 {
 			addresses, err := service.panelAddresses()
@@ -487,8 +517,27 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool)
 				}
 			}
 		}
+		if usesHostNetwork(data) {
+			host, ok := r.service.(hostNetworkService)
+			if !ok {
+				return errors.New("Xray host network service is unavailable")
+			}
+			if err := host.checkHostUnits(ctx); err != nil {
+				return err
+			}
+			if err := host.checkHostCandidate(destinations, published); err != nil {
+				return err
+			}
+			return checkConfigUnit(ctx, preflightUnit, "candidate", "candidate-config.json", "-test ", "", nil, false, networkPolicyPreflight)
+		}
+		if err := validatePanelAddresses(service, published); err != nil {
+			return err
+		}
 		// Check the sandbox without altering the running revision's policy.
 		return r.checkServiceUnits(ctx, nil, nil, false, networkPolicyBase)
+	}
+	if usesHostNetwork(data) {
+		return errors.New("host Xray configuration requires panel mode")
 	}
 	return r.checkServiceUnits(ctx, destinations, published, true, networkPolicyBase)
 }
@@ -525,6 +574,7 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]p
 		}
 	}
 	panel := false
+	host := usesHostNetwork(data)
 	policy := networkPolicyRestricted
 	if next.Running {
 		_, err := r.panelKey()
@@ -535,16 +585,32 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]p
 			if !ok {
 				return nil, errors.New("Xray service cannot apply panel network policy")
 			}
-			if err := validatePanelAddresses(controller, published); err != nil {
-				return nil, err
-			}
-			if err := controller.setPanelDestinations(ctx, destinations, len(published) > 0, direct); err != nil {
-				return nil, err
+			if host {
+				service, ok := r.service.(hostNetworkService)
+				if !ok {
+					return nil, errors.New("Xray host network service is unavailable")
+				}
+				service.setHost(true)
+				if err := service.prepareHost(ctx, destinations, published); err != nil {
+					return nil, err
+				}
+			} else {
+				if service, ok := r.service.(hostNetworkService); ok {
+					service.setHost(false)
+				}
+				if err := validatePanelAddresses(controller, published); err != nil {
+					return nil, err
+				}
+				if err := controller.setPanelDestinations(ctx, destinations, len(published) > 0, direct); err != nil {
+					return nil, err
+				}
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
+		} else if host {
+			return nil, errors.New("host Xray configuration requires panel mode")
 		}
-		if next.Revision != 0 {
+		if next.Revision != 0 && !host {
 			if direct {
 				policy = networkPolicyPanel
 			}
@@ -556,7 +622,7 @@ func (r *Runtime) prepareRuntimeConfig(ctx context.Context, next selection) ([]p
 	if err := r.writeControl("runtime-config.json", data); err != nil {
 		return nil, err
 	}
-	if panel {
+	if panel && !host {
 		return published, nil
 	}
 	return nil, nil

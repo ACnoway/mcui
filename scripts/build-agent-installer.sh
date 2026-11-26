@@ -55,6 +55,7 @@ EOF
   fi
   cp deploy/agent-xray-bootstrap.sh "$build/xray-bootstrap/install.sh"
   cp deploy/xray-network.sh "$build/xray-bootstrap/xray-network.sh"
+  cp deploy/xray-host-network.sh "$build/xray-bootstrap/xray-host-network.sh"
   cp deploy/systemd/mcui-helper-xray-install.conf deploy/systemd/mcui-xray*.service \
     deploy/systemd/mcui-xray-panel-network.conf deploy/systemd/mcui-node-clock.socket \
     deploy/systemd/mcui-node-clock@.service "$build/units/"

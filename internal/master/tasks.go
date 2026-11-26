@@ -810,6 +810,7 @@ func (s *Server) nextTask(w http.ResponseWriter, r *http.Request) {
 		PanelTrojan:      query.Get("xray_panel_trojan") == "v1",
 		PublicVLESS:      query.Get("xray_public_vless") == "v1",
 		PanelMultiClient: query.Get("xray_panel_multi_client") == "v1",
+		PanelHost:        query.Get("xray_panel_host") == "v1",
 		PanelMultiRoute:  query.Get("xray_panel_multi_route") == "v1",
 		PanelStatistics:  query.Get("xray_panel_statistics") == "v1",
 	}

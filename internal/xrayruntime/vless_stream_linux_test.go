@@ -4,9 +4,13 @@ package xrayruntime
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -120,4 +124,35 @@ func TestPanelRealityAppliedInventoryOmitsPrivateKey(t *testing.T) {
 		bytes.Contains([]byte(view.Applied.Encode()), []byte("privateKey")) {
 		t.Fatalf("REALITY inventory did not preserve the public signed configuration: %+v", view.Applied)
 	}
+}
+
+func TestHostModeCannotUseIsolatedRuntime(t *testing.T) {
+	tag := xrayconfig.HostInboundTag(1080, xrayconfig.PublicEndpoint{})
+	data := []byte(fmt.Sprintf(`{"dns":{"tag":"mcui-host-dns","servers":["localhost"],"queryStrategy":"UseIPv4"},"inbounds":[{"listen":"0.0.0.0","port":443,"protocol":"vless","tag":%q}],"outbounds":[],"routing":{"rules":[]}}`, tag))
+	if _, _, _, err := configurationNetwork(data); err != nil {
+		t.Fatalf("valid host configuration rejected: %v", err)
+	}
+	r := newRuntime(t, &fakeService{})
+	if err := r.checkConfigUnits(context.Background(), data, true); err == nil {
+		t.Fatal("host mode accepted without a host-capable service")
+	}
+}
+
+func TestHostUnitsInIsolatedVM(t *testing.T) {
+	if os.Getenv("MCUI_TEST_HOST_UNITS") != "1" {
+		t.Skip("requires an isolated systemd test VM")
+	}
+	ctx := context.Background()
+	service := &systemdService{}
+	if err := service.checkHostUnits(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.prepareHost(ctx, []string{"93.184.216.34/32"}, nil); err == nil {
+		t.Fatal("accepted a route to an address of the node")
+	}
+	published := []publishedInbound{{host: true, port: 1080, listen: xrayconfig.HostListener{Address: "127.0.0.1", Port: 443}}}
+	if err := service.prepareHost(ctx, nil, published); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exec.Command("systemctl", "stop", hostGuardUnit).Run() })
 }

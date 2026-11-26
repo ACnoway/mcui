@@ -36,6 +36,7 @@ type XrayInventory struct {
 	Traffic          *xraytraffic.Sample     `json:"traffic,omitempty"`
 	PanelTrojan      bool                    `json:"panel_trojan,omitempty"`
 	PanelPublicVLESS bool                    `json:"panel_public_vless,omitempty"`
+	PanelHost        bool                    `json:"panel_host,omitempty"`
 	PanelAddresses   []string                `json:"panel_addresses,omitempty"`
 	PanelTLS         *xrayconfig.TrojanTrust `json:"panel_tls,omitempty"`
 }
@@ -56,7 +57,7 @@ func (x XrayInventory) Valid() bool {
 		(x.Candidate.Valid() && !xrayconfig.ValidPlanDigest(x.Preview))) {
 		return false
 	}
-	if (x.PanelTrojan || x.PanelPublicVLESS || x.PanelMultiClient || x.PanelMultiRoute || x.PanelStatistics || x.StatisticsActive) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
+	if (x.PanelTrojan || x.PanelPublicVLESS || x.PanelHost || x.PanelMultiClient || x.PanelMultiRoute || x.PanelStatistics || x.StatisticsActive) && x.PanelKey == "" || !x.PanelTrojan && (len(x.PanelAddresses) != 0 || x.PanelTLS != nil) ||
 		len(x.PanelAddresses) > 16 || !slices.IsSorted(x.PanelAddresses) {
 		return false
 	}

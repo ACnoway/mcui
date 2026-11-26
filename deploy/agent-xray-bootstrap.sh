@@ -6,7 +6,7 @@ install_xray_bootstrap() {
   local source_dir=/etc/chrony/sources.d
   local xray_config=/etc/mcui-xray
   local chrony_source=$source_dir/mcui-nts.sources
-  local expected_id
+  local expected_id host_uid
   local panel_inbounds=false
   if [[ -f $profile/managed ]]; then
     printf '%s\n' "$provided_core_key" >"$profile/xray-install.pub"
@@ -31,9 +31,9 @@ install_xray_bootstrap() {
     die 'Automatic Xray bootstrap requires Debian with APT'
   if [[ $arch == amd64 && ( $preserve == false || $enable_panel_inbounds == true ) ]]; then
     panel_inbounds=true
-    if [[ ! -x /usr/sbin/ip || ! -x /usr/bin/slirp4netns || ! -x /usr/sbin/modprobe ]]; then
+    if [[ ! -x /usr/sbin/ip || ! -x /usr/bin/slirp4netns || ! -x /usr/sbin/modprobe || ! -x /usr/sbin/nft ]]; then
       apt-get update </dev/null
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 kmod slirp4netns </dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 kmod slirp4netns nftables </dev/null
     fi
     if [[ ! -c /dev/net/tun ]]; then
       /usr/sbin/modprobe tun || die 'The Xray panel network requires the TUN kernel device'
@@ -58,8 +58,15 @@ install_xray_bootstrap() {
   getent group mcui-xray-stats >/dev/null || groupadd --system mcui-xray-stats
   if [[ $panel_inbounds == true ]]; then
     "$stage/$arch/mcui-xray" initialize-panel-inbounds >/dev/null
+    id mcui-xray-host >/dev/null 2>&1 || useradd --system --shell /usr/sbin/nologin mcui-xray-host
+    host_uid=$(id -u mcui-xray-host)
+    [[ $host_uid =~ ^[0-9]+$ ]] && (( host_uid > 0 && host_uid < 1000 )) &&
+      [[ $(getent passwd "$host_uid" | cut -d: -f1) == mcui-xray-host &&
+         $(getent passwd mcui-xray-host | cut -d: -f7) == /usr/sbin/nologin &&
+         $(id -G mcui-xray-host) != *' '* ]] || die 'Invalid Xray host service account'
     install -d -o root -g root -m 0755 /usr/local/libexec "$units/mcui-xray.service.d"
     install -o root -g root -m 0755 -- "$profile/xray-network.sh" /usr/local/libexec/mcui-xray-network
+    install -o root -g root -m 0755 -- "$profile/xray-host-network.sh" /usr/local/libexec/mcui-xray-host-network
     install -o root -g root -m 0644 -- "$stage/units/mcui-xray-panel-network.conf" "$units/mcui-xray.service.d/panel-network.conf"
   fi
 

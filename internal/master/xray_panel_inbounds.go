@@ -22,6 +22,7 @@ type panelInboundChange struct {
 	CopyRoutesFrom int                       `json:"copy_routes_from,omitempty"`
 	Destination    xrayconfig.Destination    `json:"destination,omitzero"`
 	Public         xrayconfig.PublicEndpoint `json:"public_endpoint,omitzero"`
+	HostListen     *xrayconfig.HostListener  `json:"host_listen,omitempty"`
 	RotateTLS      bool                      `json:"rotate_tls,omitempty"`
 	VLESSStream    *xrayconfig.VLESSStream   `json:"vless_stream,omitempty"`
 	RealityTarget  string                    `json:"reality_target,omitempty"`
@@ -185,7 +186,8 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 		probe.Reality = &xrayconfig.RealitySettings{Target: "93.184.216.34:443", ServerNames: in.RealityNames, PublicKey: strings.Repeat("A", 43), ShortID: "00"}
 		streamValid = xrayconfig.ValidRealityTargetInput(in.RealityTarget) && probe.Valid()
 	}
-	if (in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0 || in.VLESSStream != nil)) ||
+	if (in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0 || in.VLESSStream != nil || in.HostListen != nil)) ||
+		(in.HostListen != nil && !in.HostListen.Valid()) ||
 		!streamValid || (in.VLESSStream != nil && in.Protocol != xrayconfig.VLESS) ||
 		(wantsReality && in.VLESSStream.Reality != nil) || (!wantsReality && (in.RealityTarget != "" || in.RealityNames != nil || in.RotateReality)) ||
 		(in.CopyRoutesFrom != 0 && (in.CopyRoutesFrom < 1024 || in.CopyRoutesFrom > 65535 || in.CopyRoutesFrom == port || in.Destination != (xrayconfig.Destination{}))) ||
@@ -240,9 +242,10 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 			if err := checkXrayDraftReservation(st, nodeID, now); err != nil {
 				return err
 			}
-			if (in.Protocol == xrayconfig.Trojan || in.Protocol == xrayconfig.VLESS && in.VLESSStream != nil && in.VLESSStream.Security == "tls") && !inv.Xray.PanelTrojan ||
+			if in.HostListen != nil && !inv.Xray.PanelHost ||
+				(in.Protocol == xrayconfig.Trojan || in.Protocol == xrayconfig.VLESS && in.VLESSStream != nil && in.VLESSStream.Security == "tls") && !inv.Xray.PanelTrojan ||
 				in.Protocol == xrayconfig.VLESS && in.Public != (xrayconfig.PublicEndpoint{}) && !inv.Xray.PanelPublicVLESS ||
-				in.Public != (xrayconfig.PublicEndpoint{}) && (!in.Public.Valid() || !slices.Contains(inv.Xray.PanelAddresses, in.Public.Address)) {
+				in.Public != (xrayconfig.PublicEndpoint{}) && (!in.Public.Valid() || (in.HostListen == nil && !slices.Contains(inv.Xray.PanelAddresses, in.Public.Address))) {
 				return lifecycleauth.ErrDenied
 			}
 			if wantsReality {
@@ -295,10 +298,18 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				entries = slices.Delete(entries, index, index+1)
 				removePanelInboundRoutes(network, port)
 			} else {
+				others := len(entries)
+				if index >= 0 {
+					others--
+				}
+				if others > 0 && network.Host != (in.HostListen != nil) {
+					return lifecycleauth.ErrDenied
+				}
+				network.Host = in.HostListen != nil
 				if in.Clients == nil && len(previous.Inbound.Users) > 1 {
 					return lifecycleauth.ErrDenied
 				}
-				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, PublicEndpoint: in.Public, VLESSStream: in.VLESSStream}}
+				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, PublicEndpoint: in.Public, HostListen: in.HostListen, VLESSStream: in.VLESSStream}}
 				if wantsReality {
 					var identity *xrayconfig.PanelReality
 					if previous.Reality != nil && !in.RotateReality {

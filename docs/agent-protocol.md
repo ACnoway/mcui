@@ -28,6 +28,8 @@ Master 地址、显式私有 CA 和任务/配置验证公钥的变更通过受�
 
 VLESS RAW 公网入站仅投递给声明 `xray_public_vless=v1` 的 Agent。支持主控定义 VLESS 公网入口的 Helper 在节点清单上报 `panel_public_vless`。
 
+宿主网络模式要求 Helper 上报 `panel_host`，领取 Agent 声明 `xray_panel_host=v1`。签名草稿的 `network.host` 选择宿主模式，各入站的 `host_listen` 给出真实地址及端口，`public_endpoint` 独立表示可用于 NAT 的公布端点。节点核验宿主服务与 nftables 防护单元、监听地址和目的地址，生效清单从提交配置复原两类端点。未声明能力的节点或 Agent 不接收该模式。
+
 支持受控 Xray 统计的节点报告 `panel_statistics`。启用统计的配置任务要求 Agent 声明 `xray_panel_statistics=v1`。Agent 心跳可带 `xray_traffic` 样本，样本包含生效修订号、Xray 进程实例、采样时间和各口径累计上下行字节。Master 逐次检查节点凭据、样本与生效修订的关联，以及计数标识是否属于该节点上报的入站、客户端或出站。
 
 ## 3. 通用签名编码与校验

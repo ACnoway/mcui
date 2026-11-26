@@ -33,6 +33,7 @@ type Inbound struct {
 	TLSCertSHA256    string            `json:"tls_cert_sha256,omitempty"`
 	RealityPublicKey string            `json:"reality_public_key,omitempty"`
 	PublicEndpoint   PublicEndpoint    `json:"public_endpoint,omitzero"`
+	HostListen       *HostListener     `json:"host_listen,omitempty"`
 	VLESSStream      *VLESSStream      `json:"vless_stream,omitempty"`
 	VLESSFlows       map[string]string `json:"vless_flows,omitempty"`
 	Users            []string          `json:"users"`
@@ -51,12 +52,13 @@ func (p Plan) Valid() bool {
 	}
 	lastPort, grants := 1023, 0
 	publicEndpoints := make(map[PublicEndpoint]bool)
+	hostPorts := make(map[int]bool)
 	for _, in := range p {
 		if in.Port <= lastPort || in.Port > 65535 || !validUsers(in.Users) ||
 			(in.Protocol != "" && in.Protocol != HTTP && !UsesProtocolCredentials(in.Protocol)) ||
 			(in.UsesTLS() && !digest.MatchString(in.TLSCertSHA256)) || (!in.UsesTLS() && in.TLSCertSHA256 != "") ||
 			(in.Protocol == VLESSReality && !security.ValidNodeSecret(in.RealityPublicKey)) || (in.Protocol != VLESSReality && in.RealityPublicKey != "") ||
-			!in.VLESSStream.Valid() || (in.VLESSStream != nil && in.Protocol != VLESS) {
+			!in.VLESSStream.Valid() || (in.VLESSStream != nil && in.Protocol != VLESS) || (in.HostListen != nil && !in.HostListen.Valid()) {
 			return false
 		}
 		if in.PublicEndpoint != (PublicEndpoint{}) {
@@ -64,6 +66,12 @@ func (p Plan) Valid() bool {
 				return false
 			}
 			publicEndpoints[in.PublicEndpoint] = true
+		}
+		if in.HostListen != nil {
+			if hostPorts[in.HostListen.Port] {
+				return false
+			}
+			hostPorts[in.HostListen.Port] = true
 		}
 		for user, flow := range in.VLESSFlows {
 			if in.Protocol != VLESS || in.VLESSStream == nil || in.VLESSStream.Network != "tcp" ||
@@ -204,7 +212,7 @@ func (c Catalog) Allows(p Plan) bool {
 	}
 	for _, in := range p {
 		approved, users, ok := c.Inbound(in.Port)
-		if !ok || in.VLESSStream != nil || in.Protocol != approved.Protocol || in.PublicEndpoint != approved.PublicEndpoint ||
+		if !ok || in.VLESSStream != nil || in.HostListen != nil || in.Protocol != approved.Protocol || in.PublicEndpoint != approved.PublicEndpoint ||
 			in.TLSCertSHA256 != approved.TLSCertSHA256 || in.RealityPublicKey != approved.RealityPublicKey {
 			return false
 		}

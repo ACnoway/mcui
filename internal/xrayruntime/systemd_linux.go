@@ -22,6 +22,9 @@ import (
 const serviceUnit = "mcui-xray.service"
 const preflightUnit = "mcui-xray-preflight.service"
 const networkNamespace = "/run/netns/mcui-xray"
+const hostServiceUnit = "mcui-xray-host.service"
+const hostGuardUnit = "mcui-xray-host-network.service"
+const hostCheckUnit = "mcui-xray-host-check.service"
 
 type networkPolicy uint8
 
@@ -41,11 +44,13 @@ var panelNetworkDeny = []string{
 	"fc00::/7", "fe80::/10", "ff00::/8",
 }
 
-type systemdService struct{}
+type systemdService struct{ host bool }
 
 type publishedInbound struct {
 	port     int
 	endpoint xrayconfig.PublicEndpoint
+	host     bool
+	listen   xrayconfig.HostListener
 }
 
 type panelNetworkService interface {
@@ -53,6 +58,15 @@ type panelNetworkService interface {
 	setPanelDestinations(context.Context, []string, bool, bool) error
 	startPanelIngress(context.Context, []publishedInbound) error
 }
+
+type hostNetworkService interface {
+	checkHostUnits(context.Context) error
+	checkHostCandidate([]string, []publishedInbound) error
+	prepareHost(context.Context, []string, []publishedInbound) error
+	setHost(bool)
+}
+
+func (s *systemdService) setHost(host bool) { s.host = host }
 
 func (systemdService) panelAddresses() ([]string, error) {
 	local, err := net.InterfaceAddrs()
@@ -337,11 +351,15 @@ func (systemdService) preflight(ctx context.Context) error {
 	return systemctl(ctx, 20*time.Second, "start", preflightUnit)
 }
 
-func (systemdService) start(ctx context.Context) error {
-	if err := systemctl(ctx, 20*time.Second, "start", serviceUnit); err != nil {
+func (s *systemdService) start(ctx context.Context) error {
+	unit := serviceUnit
+	if s.host {
+		unit = hostServiceUnit
+	}
+	if err := systemctl(ctx, 20*time.Second, "start", unit); err != nil {
 		return err
 	}
-	pid, err := runningPID(ctx)
+	pid, err := runningPID(ctx, unit)
 	if err != nil {
 		return err
 	}
@@ -354,30 +372,61 @@ func (systemdService) start(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return checkPID(ctx, pid)
+			return checkPID(ctx, unit, pid)
 		case <-ticker.C:
-			if err := checkPID(ctx, pid); err != nil {
+			if err := checkPID(ctx, unit, pid); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (systemdService) stop(ctx context.Context) error {
-	if err := systemctl(ctx, 20*time.Second, "stop", serviceUnit); err != nil {
+func (s *systemdService) stop(ctx context.Context) error {
+	// The guard must stay installed until the host-network process is stopped.
+	if err := stopXrayUnit(ctx, hostServiceUnit, true); err != nil {
 		return err
 	}
-	state, err := serviceState(ctx)
+	if err := stopXrayUnit(ctx, serviceUnit, false); err != nil {
+		return err
+	}
+	return stopOptionalUnit(ctx, hostGuardUnit)
+}
+
+func stopOptionalUnit(ctx context.Context, unit string) error {
+	raw, err := systemctlCommand(ctx, "show", "--property=LoadState", unit).Output()
+	if err != nil {
+		return err
+	}
+	if systemdProperties(raw)["LoadState"] == "not-found" {
+		return nil
+	}
+	return systemctl(ctx, 20*time.Second, "stop", unit)
+}
+
+func stopXrayUnit(ctx context.Context, unit string, optional bool) error {
+	if optional {
+		raw, err := systemctlCommand(ctx, "show", "--property=LoadState", unit).Output()
+		if err != nil {
+			return err
+		}
+		if systemdProperties(raw)["LoadState"] == "not-found" {
+			return nil
+		}
+	}
+	if err := systemctl(ctx, 20*time.Second, "stop", unit); err != nil {
+		return err
+	}
+	state, err := serviceState(ctx, unit)
 	if err != nil {
 		return err
 	}
 	// A failed start can leave the unit failed even after systemd finishes
 	// stopping it. Clear that state before restoring the previous selection.
 	if state["MainPID"] == "0" && state["ActiveState"] == "failed" && state["SubState"] == "failed" {
-		if err := systemctl(ctx, 20*time.Second, "reset-failed", serviceUnit); err != nil {
+		if err := systemctl(ctx, 20*time.Second, "reset-failed", unit); err != nil {
 			return err
 		}
-		state, err = serviceState(ctx)
+		state, err = serviceState(ctx, unit)
 		if err != nil {
 			return err
 		}
@@ -388,8 +437,8 @@ func (systemdService) stop(ctx context.Context) error {
 	return nil
 }
 
-func checkPID(ctx context.Context, expected int) error {
-	actual, err := runningPID(ctx)
+func checkPID(ctx context.Context, unit string, expected int) error {
+	actual, err := runningPID(ctx, unit)
 	if err != nil {
 		return err
 	}
@@ -399,8 +448,8 @@ func checkPID(ctx context.Context, expected int) error {
 	return nil
 }
 
-func runningPID(ctx context.Context) (int, error) {
-	values, err := serviceState(ctx)
+func runningPID(ctx context.Context, unit string) (int, error) {
+	values, err := serviceState(ctx, unit)
 	if err != nil {
 		return 0, err
 	}
@@ -411,10 +460,10 @@ func runningPID(ctx context.Context) (int, error) {
 	return pid, nil
 }
 
-func serviceState(ctx context.Context) (map[string]string, error) {
+func serviceState(ctx context.Context, unit string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	command := systemctlCommand(ctx, "show", "--property=ActiveState,SubState,MainPID", serviceUnit)
+	command := systemctlCommand(ctx, "show", "--property=ActiveState,SubState,MainPID", unit)
 	data, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("read Xray systemd status: %w", err)

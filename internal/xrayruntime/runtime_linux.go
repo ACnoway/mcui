@@ -105,7 +105,7 @@ func Open(initialize bool) (*Runtime, error) {
 	if os.Geteuid() != 0 {
 		return nil, errors.New("the Xray runtime requires local root")
 	}
-	return openRuntime(StateDir, systemdService{}, initialize)
+	return openRuntime(StateDir, &systemdService{}, initialize)
 }
 
 func (r *Runtime) Close() error { return r.lock.Close() }

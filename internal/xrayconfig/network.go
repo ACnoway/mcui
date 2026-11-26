@@ -14,6 +14,7 @@ const MaxConfigurationSize = 3072
 
 const denyTag = "deny"
 const PanelDNSTag = "mcui-dns"
+const PanelHostDNSTag = "mcui-host-dns"
 
 // slirp4netns provides this DNS forwarder inside the node's Xray namespace.
 const PanelDNSAddress = "10.0.2.3"
@@ -56,6 +57,7 @@ type Route struct {
 type Network struct {
 	Outbounds []Outbound `json:"outbounds"`
 	Routes    []Route    `json:"routes"`
+	Host      bool       `json:"host,omitempty"`
 }
 
 func (n Network) HasMultipleRoutes() bool {
@@ -84,6 +86,11 @@ func (c Configuration) Valid() bool {
 		return false
 	}
 	if c.Network == nil {
+		for _, in := range c.Inbounds {
+			if in.HostListen != nil {
+				return false
+			}
+		}
 		return true
 	}
 	n := c.Network
@@ -92,12 +99,15 @@ func (c Configuration) Valid() bool {
 	}
 	ports := make(map[int]bool, len(c.Inbounds))
 	for _, in := range c.Inbounds {
+		if (in.HostListen != nil) != n.Host {
+			return false
+		}
 		ports[in.Port] = true
 	}
 	tags := make(map[string]bool, len(n.Outbounds))
 	destinations := make(map[Destination]bool, len(n.Outbounds))
 	for _, outbound := range n.Outbounds {
-		if outbound.Tag == denyTag || outbound.Tag == "direct" || outbound.Tag == PanelDNSTag || !ValidUsername(outbound.Tag) || tags[outbound.Tag] ||
+		if outbound.Tag == denyTag || outbound.Tag == "direct" || outbound.Tag == PanelDNSTag || outbound.Tag == PanelHostDNSTag || !ValidUsername(outbound.Tag) || tags[outbound.Tag] ||
 			!outbound.Destination.valid() || destinations[outbound.Destination] {
 			return false
 		}
@@ -138,7 +148,7 @@ func ParseConfiguration(encoded string) (Configuration, error) {
 }
 
 func (c Catalog) AllowsConfiguration(plan Configuration) bool {
-	if !plan.Valid() || plan.Panel != nil || !c.Allows(plan.Inbounds) {
+	if !plan.Valid() || plan.Panel != nil || (plan.Network != nil && plan.Network.Host) || !c.Allows(plan.Inbounds) {
 		return false
 	}
 	if plan.Network == nil {
@@ -186,7 +196,12 @@ func (n Network) render(inbounds []any, tags map[int]string, port int, statistic
 				Settings: map[string]string{"redirect": outbound.Destination.String()},
 			})
 		}
-		rules := []renderedRule{{InboundTags: []string{PanelDNSTag}, Network: "udp", IP: []string{PanelDNSAddress + "/32"}, Port: 53, OutboundTag: PanelDNSTag}}
+		rules := []renderedRule{}
+		if n.Host {
+			outbounds = slices.Delete(outbounds, 2, 3)
+		} else {
+			rules = append(rules, renderedRule{InboundTags: []string{PanelDNSTag}, Network: "udp", IP: []string{PanelDNSAddress + "/32"}, Port: 53, OutboundTag: PanelDNSTag})
+		}
 		for _, route := range n.Routes {
 			destination := destinations[route.OutboundTag]
 			rules = append(rules, renderedRule{
@@ -195,9 +210,13 @@ func (n Network) render(inbounds []any, tags map[int]string, port int, statistic
 			})
 		}
 		rules = append(rules, renderedRule{InboundTags: slices.Clone(directTags), OutboundTag: "direct"})
+		dns := map[string]any{"tag": PanelDNSTag, "servers": []string{PanelDNSAddress}, "queryStrategy": "UseIPv4"}
+		if n.Host {
+			dns = map[string]any{"tag": PanelHostDNSTag, "servers": []string{"localhost"}, "queryStrategy": "UseIPv4"}
+		}
 		config := map[string]any{
 			"log": map[string]string{"loglevel": "none"}, "inbounds": inbounds, "outbounds": outbounds,
-			"dns": map[string]any{"tag": PanelDNSTag, "servers": []string{PanelDNSAddress}, "queryStrategy": "UseIPv4"},
+			"dns": dns,
 			"routing": map[string]any{
 				"domainStrategy": "IPOnDemand",
 				"rules":          rules,
@@ -230,6 +249,9 @@ func (n Network) render(inbounds []any, tags map[int]string, port int, statistic
 		"inbounds": inbounds, "outbounds": outbounds,
 		"routing": map[string]any{"domainStrategy": "AsIs", "rules": rules},
 	}
+	if n.Host {
+		config["dns"] = map[string]any{"tag": PanelHostDNSTag, "servers": []string{"localhost"}, "queryStrategy": "UseIPv4"}
+	}
 	if statistics {
 		enableStatistics(config)
 	}
@@ -240,6 +262,9 @@ func (n Network) render(inbounds []any, tags map[int]string, port int, statistic
 // independently of changes to the current node-local catalog.
 func AppliedNetwork(data []byte, inboundPorts map[string]int) (*Network, error) {
 	var config struct {
+		DNS struct {
+			Tag string `json:"tag"`
+		} `json:"dns"`
 		Outbounds []renderedOutbound `json:"outbounds"`
 		Routing   struct {
 			Rules []renderedRule `json:"rules"`
@@ -253,7 +278,7 @@ func AppliedNetwork(data []byte, inboundPorts map[string]int) (*Network, error) 
 		config.Outbounds[1].Protocol == "freedom" && config.Outbounds[1].Settings == nil {
 		return nil, nil
 	}
-	network := &Network{Outbounds: []Outbound{}, Routes: []Route{}}
+	network := &Network{Outbounds: []Outbound{}, Routes: []Route{}, Host: config.DNS.Tag == PanelHostDNSTag}
 	destinations := make(map[string]Destination, len(config.Outbounds)-1)
 	for _, out := range config.Outbounds[1:] {
 		if out.Tag == "direct" && out.Protocol == "freedom" {

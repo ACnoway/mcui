@@ -1,0 +1,19 @@
+[Unit]
+Description=MCUI Xray host-network egress guard
+Before=mcui-xray-host.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/mcui-xray-host-network start
+ExecStop=/usr/local/libexec/mcui-xray-host-network stop
+User=root
+UMask=0077
+RuntimeDirectory=mcui-xray-host-guard
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
