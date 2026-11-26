@@ -6,6 +6,8 @@
 
 主控定义的 VLESS 入站支持 RAW TCP、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 基础传输，可启用公网 TCP 入口。当前这些主控定义的 VLESS 传输不提供加密，应在可信网络或已有安全传输通道中使用。客户端配置和分享链接使用已生效修订中的传输参数。更新 Agent、Helper 和主控后，节点上报 `panel_public_vless` 才能保存公网入口。TLS、主控定义 REALITY、mKCP、宿主网络直监听及更多高级传输参数仍在开发中。
 
+2026-11-26 使用远程隔离检出与 Xray `26.10.31` 测试了 WebSocket、gRPC（普通与多路）、HTTPUpgrade 和 XHTTP 四种模式的回环数据交换及节点已生效配置对账。此测试不覆盖公网中继、TLS 或 REALITY 组合。
+
 订阅页面可以根据已授权的 VLESS 入站及用户输入的凭据生成 `vless://` 分享链接和二维码。链接包含 UUID，节点目录 REALITY 链接还包含 Short ID，请按凭据保管。回环地址仅在能够访问节点回环网络的环境中有效。此功能参考 [3x-ui v3.11.0 的 VLESS 分享格式](https://github.com/MHSanaei/3x-ui/blob/c621ba9014a6aa21fd7c9ecf45655e44e24ebf13/frontend/src/lib/xray/inbound-link.ts)，不代表其他传输或安全组合已接入。
 
 ## 从主控添加入站

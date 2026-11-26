@@ -28,6 +28,9 @@ func TestPanelVLESSTransports(t *testing.T) {
 		{Network: "grpc", ServiceName: "proxy", Authority: "example.test", MultiMode: true},
 		{Network: "httpupgrade", Path: "/upgrade", Host: "example.test"},
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "auto"},
+		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "packet-up"},
+		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-up"},
+		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-one"},
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
 			in := Inbound{Port: 1080, Protocol: VLESS, Users: []string{"alice"}, VLESSStream: &stream}
@@ -80,6 +83,9 @@ func TestVLESSTransportConnections(t *testing.T) {
 		{Network: "grpc", ServiceName: "proxy", Authority: "example.test", MultiMode: true},
 		{Network: "httpupgrade", Path: "/upgrade", Host: "example.test"},
 		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "auto"},
+		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "packet-up"},
+		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-up"},
+		{Network: "xhttp", Path: "/xhttp", Host: "example.test", Mode: "stream-one"},
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
 			target, err := net.Listen("tcp4", "127.0.0.1:0")
