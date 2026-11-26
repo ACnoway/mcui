@@ -22,9 +22,11 @@ Master、Agent 和 Helper 的任务时限判断依赖本机 chrony。选用 Clou
 使用支持 `opencommands` 的版本时，修改 `/etc/chrony/chrony.conf`，确认未认证的 `pool`/`server` 源退出选择，保留本机 loopback command socket。
 
 ```conf
-server time.cloudflare.com iburst nts
+server time.cloudflare.com iburst nts minpoll 4 maxpoll 7
 opencommands authdata sourcename sources tracking
 ```
+
+将最大轮询间隔设为 7（128 秒），确保 Chrony 的 `Update interval` 保持在程序接受的 300 秒以内。
 
 不要把 chrony command socket 绑定到外部接口，也不要添加宽泛的 `cmdallow`。`opencommands` 仅开放应用需要的只读监控命令。`chronyc -N` 通过 `sourcename` 核对本地配置的源名称。chronyd 默认只监听 loopback 命令地址。重启服务后，以 root 检查：
 

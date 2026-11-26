@@ -76,7 +76,7 @@ install_xray_bootstrap() {
   '; then
     die 'Chrony must load the Debian sources.d directory'
   fi
-  printf 'server time.cloudflare.com iburst nts prefer require\n' >"$profile/mcui-nts.sources"
+  printf 'server time.cloudflare.com iburst nts prefer require minpoll 4 maxpoll 7\n' >"$profile/mcui-nts.sources"
   if file_exists "$chrony_source"; then
     check_config "$chrony_source"
     cmp -s -- "$profile/mcui-nts.sources" "$chrony_source" || die 'Existing MCUI NTS source differs'
