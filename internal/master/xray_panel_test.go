@@ -824,6 +824,39 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		copyChange.State = options()
 		expect(copyInbound(copyChange), http.StatusConflict)
 		expect(copyInbound(panelInboundChange{State: options(), Remove: true}), http.StatusOK)
+		realityChange := panelInboundChange{
+			State: options(), Protocol: xrayconfig.VLESS,
+			Clients:       []panelInboundClient{{Username: "reality-user", Credential: "00000000-0000-4000-8000-000000000001", Flow: "xtls-rprx-vision"}},
+			VLESSStream:   &xrayconfig.VLESSStream{Network: "tcp", Security: "reality"},
+			RealityTarget: "93.184.216.34:443", RealityNames: []string{"www.example.com"},
+		}
+		expect(copyInbound(realityChange), http.StatusOK)
+		realityNode, err := s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		realityDraft, err := xrayconfig.ParseConfiguration(realityNode.XrayDraft)
+		if err != nil || len(realityDraft.Panel.Reality) != 1 || realityDraft.Inbounds[1].VLESSFlows["reality-user"] != "xtls-rprx-vision" {
+			t.Fatalf("REALITY draft lost identity or flow: %v", err)
+		}
+		firstKey := realityDraft.Panel.Reality[1081].PublicKey
+		if _, _, err := realityDraft.RenderPanel(private); err != nil {
+			t.Fatalf("REALITY draft did not render: %v", err)
+		}
+		realityChange.State, realityChange.Clients[0].Credential = options(), ""
+		realityChange.RealityTarget = direct.PanelAddresses[0] + ":443"
+		expect(copyInbound(realityChange), http.StatusBadRequest)
+		realityChange.RealityTarget, realityChange.RotateReality = "93.184.216.34:443", true
+		expect(copyInbound(realityChange), http.StatusOK)
+		realityNode, err = s.store.NodeByID(t.Context(), client.nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		realityDraft, err = xrayconfig.ParseConfiguration(realityNode.XrayDraft)
+		if err != nil || realityDraft.Panel.Reality[1081].PublicKey == firstKey {
+			t.Fatalf("REALITY identity was not rotated: %v", err)
+		}
+		expect(copyInbound(panelInboundChange{State: options(), Remove: true}), http.StatusOK)
 		change.State, change.Destination = options(), xrayconfig.Destination{}
 		change.Clients[0].Credential = ""
 		expect(write(client.csrf), http.StatusOK)

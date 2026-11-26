@@ -81,6 +81,8 @@ VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之�
 
 RAW + TLS 的 VLESS 入站可在签名草稿的 `vless_flows` 中按用户名启用 `xtls-rprx-vision`。节点从已提交配置恢复 flow；订阅只返回当前用户获准端口的 flow，删除客户端时同时移除其 flow 授权。
 
+主控定义的 REALITY 使用 `vless_stream.security: "reality"`，支持 RAW、gRPC 和 XHTTP，RAW 可启用 Vision。`vless_stream.reality` 只含固定公网 IPv4 握手目标、服务器名称、公钥和 Short ID；`panel.reality` 按端口保存对节点密封的私钥。主控解析握手目标并拒绝包含非公网 IPv4 的 DNS 应答，节点再次检查目标和本机地址；私钥不会进入订阅。更新、轮换后须重新签发并应用配置。
+
 主控 Trojan 另要求 `xray_panel_trojan=v1`。`panel.tls` 包含公开证书 `trust` 和密封的 Ed25519 私钥种子 `key`，其解密上下文绑定证书摘要。各 Trojan 入站引用同一摘要，可附带 `public_endpoint`。具备能力的节点心跳通告 `panel_trojan` 与 `panel_addresses`，应用后上报 `panel_tls`。主控只有在配置摘要、修订、端点和证书均与成功任务的签名草稿一致时才导出客户端元数据。 [主控公网接入](./phase-4-xray-inbound.md#从主控开通-trojantls-公网入口)
 
 **取消对象**字段：`schema_version`、`node_id`、`task_id`、`sequence`、`issued_at`、`not_before`、`expires_at`、`signing_key_id`、`signature_algorithm`、`signature`，使用任务用途密钥和取消域。取消须目标精确匹配；可独立于顺序任务领取并持久化。取消先于开始则任务消费为 CANCELED；已开始只在操作定义的安全点停止并回滚，无法安全中止时继续完成既有已授权步骤或安全恢复，返回 `CANCEL_TOO_LATE`，不能虚报取消成功。取消与开始由本地同一事务/锁线性化。

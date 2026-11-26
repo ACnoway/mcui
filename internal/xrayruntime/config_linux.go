@@ -107,7 +107,10 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						MultiMode   bool   `json:"multiMode"`
 					} `json:"grpcSettings"`
 					Reality struct {
-						PrivateKey string `json:"privateKey"`
+						PrivateKey  string   `json:"privateKey"`
+						Target      string   `json:"target"`
+						ServerNames []string `json:"serverNames"`
+						ShortIDs    []string `json:"shortIds"`
 					} `json:"realitySettings"`
 					TLS struct {
 						Certificates []struct {
@@ -122,19 +125,19 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 			ports := make(map[string]int, len(config.Inbounds))
 			var panelTLS *xrayconfig.TrojanTrust
 			for _, in := range config.Inbounds {
-				ports[in.Tag] = in.Port
 				entry := xrayconfig.Inbound{Port: in.Port, Protocol: in.Protocol}
+				ports[in.Tag] = entry.Port
 				if in.Protocol == "" {
 					return view
 				}
 				if in.Protocol == "socks" {
 					entry.Protocol = ""
 				}
-				if keyErr == nil && in.Protocol == xrayconfig.VLESS && (in.StreamSettings.Security == "" || in.StreamSettings.Security == "tls") {
+				if keyErr == nil && in.Protocol == xrayconfig.VLESS && (in.StreamSettings.Security == "" || in.StreamSettings.Security == "tls" || in.StreamSettings.Security == "reality") {
 					stream := &xrayconfig.VLESSStream{Network: in.StreamSettings.Network, Security: in.StreamSettings.Security}
 					switch stream.Network {
 					case "raw", "tcp":
-						if stream.Security == "tls" {
+						if stream.Security == "tls" || stream.Security == "reality" {
 							stream.Network = "tcp"
 						} else {
 							stream = nil
@@ -150,9 +153,17 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 					default:
 						stream = nil
 					}
+					if stream != nil && stream.Security == "reality" {
+						reality := in.StreamSettings.Reality
+						public, err := xrayconfig.RealityPublicKey(reality.PrivateKey)
+						if err != nil || len(reality.ShortIDs) != 1 {
+							return view
+						}
+						stream.Reality = &xrayconfig.RealitySettings{Target: reality.Target, ServerNames: reality.ServerNames, PublicKey: public, ShortID: reality.ShortIDs[0]}
+					}
 					entry.VLESSStream = stream
 				}
-				if in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "reality" {
+				if keyErr != nil && in.Protocol == xrayconfig.VLESS && in.StreamSettings.Security == "reality" {
 					key, err := xrayconfig.RealityPublicKey(in.StreamSettings.Reality.PrivateKey)
 					if err != nil {
 						return view
@@ -324,6 +335,9 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 			Protocol string `json:"protocol"`
 			Stream   struct {
 				Security string `json:"security"`
+				Reality  struct {
+					Target string `json:"target"`
+				} `json:"realitySettings"`
 			} `json:"streamSettings"`
 		} `json:"inbounds"`
 		Routing struct {
@@ -424,6 +438,16 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 	}
 	var published []publishedInbound
 	for _, inbound := range config.Inbounds {
+		if inbound.Stream.Security == "reality" && inbound.Stream.Reality.Target != "127.0.0.1:10443" {
+			target, err := netip.ParseAddrPort(inbound.Stream.Reality.Target)
+			if err != nil || !(xrayconfig.PublicEndpoint{Address: target.Addr().String(), Port: int(target.Port())}).Valid() {
+				return nil, nil, false, errors.New("REALITY target is not a pinned public IPv4 endpoint")
+			}
+			prefix := target.Addr().String() + "/32"
+			if !slices.Contains(destinations, prefix) {
+				destinations = append(destinations, prefix)
+			}
+		}
 		endpoint, ok := xrayconfig.PublishedEndpoint(inbound.Tag)
 		if inbound.Listen == "127.0.0.1" && !ok {
 			continue
@@ -451,6 +475,17 @@ func (r *Runtime) checkConfigUnits(ctx context.Context, data []byte, panel bool)
 		}
 		if err := validatePanelAddresses(service, published); err != nil {
 			return err
+		}
+		if len(destinations) > 0 {
+			addresses, err := service.panelAddresses()
+			if err != nil {
+				return err
+			}
+			for _, destination := range destinations {
+				if slices.Contains(addresses, strings.TrimSuffix(destination, "/32")) {
+					return errors.New("Xray target is an address of this node")
+				}
+			}
 		}
 		// Check the sandbox without altering the running revision's policy.
 		return r.checkServiceUnits(ctx, nil, nil, false, networkPolicyBase)

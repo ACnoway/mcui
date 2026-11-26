@@ -67,3 +67,13 @@ const vision = { ...tls, vless_streams: { 1080: { network: 'tcp', security: 'tls
 assert.equal(new URL(buildVlessLink(vision, 1080, id, 'vision')).searchParams.get('flow'), 'xtls-rprx-vision')
 assert.equal(buildXrayClient(vision, 1080, 10808, id).outbounds[0].settings.flow, 'xtls-rprx-vision')
 assert.throws(() => buildVlessLink({ ...tls, vless_flows: { 1080: 'xtls-rprx-vision' } }, 1080, id, 'invalid'))
+const panelReality = { ...base, schema_version: 5, vless_streams: { 1080: {
+  network: 'tcp', security: 'reality', reality: { target: 'www.example.com:443', server_names: ['www.example.com'],
+    public_key: key, short_id: '0123456789abcdef' },
+} }, vless_flows: { 1080: 'xtls-rprx-vision' } }
+const realityURL = new URL(buildVlessLink(panelReality, 1080, id, 'reality'))
+assert.equal(realityURL.searchParams.get('security'), 'reality')
+assert.equal(realityURL.searchParams.get('pbk'), key)
+assert.equal(realityURL.searchParams.get('sid'), '0123456789abcdef')
+assert.equal(realityURL.searchParams.get('sni'), 'www.example.com')
+assert.equal(buildXrayClient(panelReality, 1080, 10808, id).outbounds[0].streamSettings.realitySettings.password, key)

@@ -6,7 +6,8 @@ export const xrayProtocolName: Record<XrayProtocol, string> = {
 }
 
 export type XrayPublicEndpoint = { address: string; port: number }
-export type VLESSStream = { network: 'tcp' | 'ws' | 'grpc' | 'httpupgrade' | 'xhttp'; security?: 'tls'; path?: string; host?: string; service_name?: string; authority?: string; multi_mode?: boolean; mode?: 'auto' | 'packet-up' | 'stream-up' | 'stream-one' }
+export type VLESSReality = { target: string; server_names: string[]; public_key: string; short_id: string }
+export type VLESSStream = { network: 'tcp' | 'ws' | 'grpc' | 'httpupgrade' | 'xhttp'; security?: 'tls' | 'reality'; reality?: VLESSReality; path?: string; host?: string; service_name?: string; authority?: string; multi_mode?: boolean; mode?: 'auto' | 'packet-up' | 'stream-up' | 'stream-one' }
 
 export type XraySubscription = {
   schema_version: 1 | 2 | 3 | 4 | 5
@@ -86,12 +87,21 @@ export function validSubscription(value: unknown): value is XraySubscription {
       const port = Number(key)
       if (String(port) !== key || !ports.includes(port) || port_protocols[port] !== 'vless' || !stream || typeof stream !== 'object') return true
       if (typeof stream.network !== 'string' || !['tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp'].includes(stream.network)) return true
-      if (stream.security !== undefined && stream.security !== 'tls') return true
+      if (stream.security !== undefined && stream.security !== 'tls' && stream.security !== 'reality') return true
+      if (stream.security === 'reality') {
+        const reality = stream.reality
+        if (!reality || typeof reality.target !== 'string' || reality.target.length > 260 ||
+          !Array.isArray(reality.server_names) || !reality.server_names.length || reality.server_names.length > 8 ||
+          reality.server_names.some(name => typeof name !== 'string' || !/^[a-z0-9.-]{3,253}$/.test(name)) ||
+          typeof reality.public_key !== 'string' || !passwordPattern.test(reality.public_key) ||
+          typeof reality.short_id !== 'string' || !/^(?:[0-9a-f]{2}){1,8}$/.test(reality.short_id)) return true
+        if (stream.network === 'ws' || stream.network === 'httpupgrade') return true
+      } else if (stream.reality !== undefined) return true
       if (stream.host !== undefined && (typeof stream.host !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.host))) return true
       if (stream.authority !== undefined && (typeof stream.authority !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.authority))) return true
       if (stream.multi_mode !== undefined && typeof stream.multi_mode !== 'boolean') return true
       if (stream.service_name !== undefined && (typeof stream.service_name !== 'string' || !/^[A-Za-z0-9_.-]{0,128}$/.test(stream.service_name))) return true
-      if (stream.network === 'tcp') return stream.security !== 'tls' || !!stream.path || !!stream.host || !!stream.mode || !!stream.service_name || !!stream.authority || !!stream.multi_mode
+      if (stream.network === 'tcp') return !stream.security || !!stream.path || !!stream.host || !!stream.mode || !!stream.service_name || !!stream.authority || !!stream.multi_mode
       if (stream.network === 'grpc') return !!stream.path || !!stream.host || !!stream.mode
       return typeof stream.path !== 'string' || !stream.path.startsWith('/') || stream.path.length > 256 || /[\r\n\0]/.test(stream.path) ||
         !!stream.service_name || !!stream.authority || !!stream.multi_mode || (stream.network === 'xhttp' ? !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(stream.mode ?? '') : !!stream.mode)
@@ -100,7 +110,7 @@ export function validSubscription(value: unknown): value is XraySubscription {
       if (!vless_flows || typeof vless_flows !== 'object' || Array.isArray(vless_flows)) return false
       if (Object.entries(vless_flows).some(([key, flow]) => String(Number(key)) !== key ||
         !ports.includes(Number(key)) || flow !== 'xtls-rprx-vision' ||
-        vless_streams[Number(key)]?.network !== 'tcp' || vless_streams[Number(key)]?.security !== 'tls')) return false
+        vless_streams[Number(key)]?.network !== 'tcp' || !['tls', 'reality'].includes(vless_streams[Number(key)]?.security ?? ''))) return false
     }
   }
   if (entries.some(([, protocol]) => protocol === 'trojan') || Object.values(vless_streams ?? {}).some(stream => stream.security === 'tls')) {
@@ -177,6 +187,10 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
       serverName: 'localhost', fingerprint: 'unsafe', pinnedPeerCertSha256: trust.sha256,
       ...(vlessStream.network === 'grpc' ? { alpn: ['h2', 'http/1.1'] } : {}),
     } } : {}),
+    ...(vlessStream.security === 'reality' && vlessStream.reality ? { security: 'reality', realitySettings: {
+      serverName: vlessStream.reality.server_names[0], fingerprint: 'chrome', password: vlessStream.reality.public_key,
+      shortId: vlessStream.reality.short_id,
+    } } : {}),
   } : protocol === 'vless-reality' ? {
     network: 'raw', security: 'reality',
     realitySettings: {
@@ -222,6 +236,12 @@ export function buildVlessLink(subscription: XraySubscription, proxyPort: number
     params.set('sni', 'localhost')
     params.set('pcs', subscription.trojan_trust!.sha256)
     if (stream.network === 'grpc') params.set('alpn', 'h2,http/1.1')
+  }
+  if (stream?.security === 'reality' && stream.reality) {
+    params.set('sni', stream.reality.server_names[0])
+    params.set('fp', 'chrome')
+    params.set('pbk', stream.reality.public_key)
+    params.set('sid', stream.reality.short_id)
   }
   if (protocol === 'vless-reality') {
     params.set('sni', 'localhost')

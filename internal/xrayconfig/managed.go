@@ -67,7 +67,7 @@ func (p Plan) Valid() bool {
 		}
 		for user, flow := range in.VLESSFlows {
 			if in.Protocol != VLESS || in.VLESSStream == nil || in.VLESSStream.Network != "tcp" ||
-				in.VLESSStream.Security != "tls" || flow != "xtls-rprx-vision" || !slices.Contains(in.Users, user) {
+				(in.VLESSStream.Security != "tls" && in.VLESSStream.Security != "reality") || flow != "xtls-rprx-vision" || !slices.Contains(in.Users, user) {
 				return false
 			}
 		}

@@ -10,7 +10,7 @@ type Client = { username: string; credential: string; flow?: 'xtls-rprx-vision' 
 type ClientEdit = Client & { originalUsername?: string }
 export type PanelInboundChange = { remove: true } | {
   protocol: Protocol; clients: Client[]; destination?: Destination; copy_routes_from?: number
-  public_endpoint?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream
+  public_endpoint?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream; reality_target?: string; reality_names?: string[]; rotate_reality?: boolean
 }
 
 const props = defineProps<{
@@ -29,7 +29,8 @@ const protocols: { value: Protocol; label: string }[] = [
 const form = ref<{
   port: number; editing: boolean; copyFrom?: number; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
   published: boolean; publicAddress: string; publicPort: number; rotateTLS: boolean
-  transport: VLESSStream['network']; tls: boolean; path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
+  transport: VLESSStream['network']; tls: boolean; reality: boolean; realityTarget: string; realityNames: string; rotateReality: boolean
+  path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
 } | null>(null)
 const error = ref('')
 const download = ref<{ inbound: Inbound; username: string; revision: number; localPort: number; password: string; error: string } | null>(null)
@@ -77,6 +78,8 @@ function open(inbound?: Inbound, copy = false) {
     publicPort: inbound?.public_endpoint?.port ?? 443, rotateTLS: false,
     transport: inbound?.vless_stream?.network ?? 'tcp', path: inbound?.vless_stream?.path ?? '/',
     tls: inbound?.vless_stream?.security === 'tls',
+    reality: inbound?.vless_stream?.security === 'reality', realityTarget: inbound?.vless_stream?.reality?.target ?? '',
+    realityNames: inbound?.vless_stream?.reality?.server_names.join(',') ?? '', rotateReality: false,
     host: inbound?.vless_stream?.host ?? '', serviceName: inbound?.vless_stream?.service_name ?? '', mode: inbound?.vless_stream?.mode ?? 'auto',
     authority: inbound?.vless_stream?.authority ?? '', multiMode: inbound?.vless_stream?.multi_mode ?? false,
   }
@@ -101,16 +104,19 @@ async function submit() {
   try {
     await props.save(draft.port, {
       protocol: draft.protocol, clients: draft.clients.map(({ username, credential, flow }) => ({ username, credential,
-        flow: draft.protocol === 'vless' && draft.transport === 'tcp' && draft.tls && flow ? flow : undefined })),
+        flow: draft.protocol === 'vless' && draft.transport === 'tcp' && (draft.tls || draft.reality) && flow ? flow : undefined })),
       destination: !draft.copyFrom && draft.address && targets(draft.port).length <= 1 ? { address: draft.address, port: draft.targetPort } : undefined,
       copy_routes_from: draft.copyFrom,
       public_endpoint: (draft.protocol === '' || draft.protocol === 'trojan' || draft.protocol === 'vless') && draft.published ? { address: draft.publicAddress, port: draft.publicPort } : undefined,
       rotate_tls: (draft.protocol === 'trojan' || (draft.protocol === 'vless' && draft.tls)) && draft.rotateTLS ? true : undefined,
-      vless_stream: draft.protocol !== 'vless' || (draft.transport === 'tcp' && !draft.tls) ? undefined : draft.transport === 'tcp'
-        ? { network: 'tcp', security: 'tls' }
+      vless_stream: draft.protocol !== 'vless' || (draft.transport === 'tcp' && !draft.tls && !draft.reality) ? undefined : draft.transport === 'tcp'
+        ? { network: 'tcp', security: draft.reality ? 'reality' : 'tls' }
         : draft.transport === 'grpc'
-          ? { network: 'grpc', security: draft.tls ? 'tls' : undefined, service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined }
-          : { network: draft.transport, security: draft.tls ? 'tls' : undefined, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}) },
+          ? { network: 'grpc', security: draft.reality ? 'reality' : draft.tls ? 'tls' : undefined, service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined }
+          : { network: draft.transport, security: draft.reality ? 'reality' : draft.tls ? 'tls' : undefined, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}) },
+      reality_target: draft.protocol === 'vless' && draft.reality ? draft.realityTarget : undefined,
+      reality_names: draft.protocol === 'vless' && draft.reality ? draft.realityNames.split(',').map(name => name.trim()).filter(Boolean) : undefined,
+      rotate_reality: draft.protocol === 'vless' && draft.reality && draft.rotateReality ? true : undefined,
     })
     form.value = null
   } catch (cause) {
@@ -213,12 +219,18 @@ async function remove(port: number) {
       </select></label>
       <label>监听端口 <input v-model.number="form.port" type="number" min="1024" max="65535" required :disabled="form.editing" /></label>
       <template v-if="form.protocol === 'vless'">
-        <label><input v-model="form.tls" type="checkbox" :disabled="!trojan && !form.tls" /> 启用 TLS</label>
+        <label><input v-model="form.tls" type="checkbox" :disabled="(!trojan && !form.tls) || form.reality" /> 启用 TLS</label>
         <p v-if="form.tls" class="feedback">使用本节点共用的自动生成证书；客户端通过证书指纹验证。</p>
-        <label>传输方式 <select v-model="form.transport">
+        <label>传输方式 <select v-model="form.transport" @change="['ws', 'httpupgrade'].includes(form!.transport) && (form!.reality = false)">
           <option value="tcp">RAW / TCP</option><option value="ws">WebSocket</option><option value="grpc">gRPC</option>
           <option value="httpupgrade">HTTPUpgrade</option><option value="xhttp">XHTTP</option>
         </select></label>
+        <label><input v-model="form.reality" type="checkbox" :disabled="form.tls || ['ws', 'httpupgrade'].includes(form.transport)" /> 启用 REALITY</label>
+        <template v-if="form.reality">
+          <label>握手目标 <input v-model.trim="form.realityTarget" placeholder="www.example.com:443" required /></label>
+          <label>服务端名称（逗号分隔） <input v-model.trim="form.realityNames" placeholder="www.example.com" required /></label>
+          <label v-if="form.editing"><input v-model="form.rotateReality" type="checkbox" /> 重新生成 REALITY 密钥和 Short ID</label>
+        </template>
         <template v-if="form.transport === 'grpc'">
           <label>gRPC serviceName <input v-model="form.serviceName" maxlength="128" pattern="[A-Za-z0-9_.\-]*" /></label>
           <label>gRPC authority <input v-model="form.authority" maxlength="253" pattern="[A-Za-z0-9.\-:]*" /></label>
@@ -246,7 +258,7 @@ async function remove(port: number) {
           </div>
         </template>
         <p v-else class="feedback">在「客户端」中解除绑定或轮换凭据。</p>
-        <label v-if="form.protocol === 'vless' && form.transport === 'tcp' && form.tls">Flow
+        <label v-if="form.protocol === 'vless' && form.transport === 'tcp' && (form.tls || form.reality)">Flow
           <select v-model="client.flow"><option value="">无</option><option value="xtls-rprx-vision">xtls-rprx-vision</option></select>
         </label>
       </fieldset>
@@ -255,7 +267,7 @@ async function remove(port: number) {
       </div>
       <template v-if="form.protocol === '' || form.protocol === 'trojan' || (form.protocol === 'vless' && (publicVless || form.published))">
         <label><input v-model="form.published" type="checkbox" :disabled="!addresses.length && !form.published" /> 启用公网 TCP 接入</label>
-        <p v-if="form.protocol === 'vless' && form.published && !form.tls" class="feedback">此 VLESS 入口不提供传输加密，请在可信网络或受保护的传输通道中使用。</p>
+        <p v-if="form.protocol === 'vless' && form.published && !form.tls && !form.reality" class="feedback">此 VLESS 入口不提供传输加密，请在可信网络或受保护的传输通道中使用。</p>
         <p v-if="form.protocol === '' && form.published" class="feedback">公网 SOCKS5 使用明文 TCP。认证密码和代理流量没有传输加密，请仅在可信网络或受保护的隧道中使用。</p>
         <p v-if="!addresses.length" class="feedback">节点暂未上报可绑定的公网 IPv4。</p>
         <template v-if="form.published">

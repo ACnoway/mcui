@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 
 	"github.com/ACnoway/mcui/internal/security"
@@ -14,10 +15,11 @@ import (
 // PanelConfiguration carries encrypted credentials in port and username order.
 // A plan with one user per inbound retains its original wire encoding.
 type PanelConfiguration struct {
-	Credentials []string  `json:"credentials"`
-	DirectPorts []int     `json:"direct_ports,omitempty"`
-	TLS         *PanelTLS `json:"tls,omitempty"`
-	Statistics  bool      `json:"statistics,omitempty"`
+	Credentials []string             `json:"credentials"`
+	DirectPorts []int                `json:"direct_ports,omitempty"`
+	TLS         *PanelTLS            `json:"tls,omitempty"`
+	Reality     map[int]PanelReality `json:"reality,omitempty"`
+	Statistics  bool                 `json:"statistics,omitempty"`
 }
 
 func (p PanelConfiguration) valid(plan Plan) bool {
@@ -25,6 +27,7 @@ func (p PanelConfiguration) valid(plan Plan) bool {
 		return false
 	}
 	usesTLS := false
+	realityCount := 0
 	offset := 0
 	lastDirectPort := 0
 	for _, port := range p.DirectPorts {
@@ -47,6 +50,13 @@ func (p PanelConfiguration) valid(plan Plan) bool {
 				return false
 			}
 		}
+		if inbound.Protocol == VLESS && inbound.VLESSStream != nil && inbound.VLESSStream.Security == "reality" {
+			identity, ok := p.Reality[inbound.Port]
+			if !ok || !identity.Valid() || !reflect.DeepEqual(identity.RealitySettings, *inbound.VLESSStream.Reality) {
+				return false
+			}
+			realityCount++
+		}
 		length := 43
 		if inbound.Protocol == VLESS || inbound.Protocol == VMess {
 			length = 36
@@ -58,7 +68,7 @@ func (p PanelConfiguration) valid(plan Plan) bool {
 		}
 		offset += len(inbound.Users)
 	}
-	return offset == len(p.Credentials) && usesTLS == (p.TLS != nil) && (!usesTLS || p.TLS.valid())
+	return offset == len(p.Credentials) && len(p.Reality) == realityCount && usesTLS == (p.TLS != nil) && (!usesTLS || p.TLS.valid())
 }
 
 func PanelProtocol(protocol string) bool {
@@ -208,6 +218,15 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 			if inbound.UsesTLS() {
 				tlsStream := tls.streamSettings()
 				stream["security"], stream["tlsSettings"] = tlsStream["security"], tlsStream["tlsSettings"]
+			} else if inbound.VLESSStream.Security == "reality" {
+				identity := c.Panel.Reality[inbound.Port]
+				privateKey, err := identity.open(private, inbound.Port)
+				if err != nil {
+					return nil, Reference{}, err
+				}
+				stream["security"] = "reality"
+				stream["realitySettings"] = map[string]any{"target": identity.Target, "serverNames": identity.ServerNames,
+					"privateKey": privateKey, "shortIds": []string{identity.ShortID}}
 			}
 			entry["streamSettings"] = stream
 		}

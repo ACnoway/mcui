@@ -3,6 +3,7 @@
 package xrayruntime
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
@@ -75,5 +76,48 @@ func TestPanelVLESSAppliedTransportMatchesSignedDraft(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPanelRealityAppliedInventoryOmitsPrivateKey(t *testing.T) {
+	r := newRuntime(t, &fakeService{})
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(key.Bytes())
+	if err := r.writeControl(panelKeyFile, []byte(`"`+encoded+`"`)); err != nil {
+		t.Fatal(err)
+	}
+	public := base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
+	identity, err := xrayconfig.NewPanelReality(public, 1080, "93.184.216.34:443", []string{"www.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := xrayconfig.Inbound{Port: 1080, Protocol: xrayconfig.VLESS, Users: []string{"alice"},
+		VLESSStream: &xrayconfig.VLESSStream{Network: "tcp", Security: "reality", Reality: &identity.RealitySettings}}
+	box, err := xrayconfig.SealPanelCredential(public, in, "00000000-0000-4000-8000-000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := xrayconfig.Configuration{Inbounds: xrayconfig.Plan{in}, Network: &xrayconfig.Network{Outbounds: []xrayconfig.Outbound{}, Routes: []xrayconfig.Route{}},
+		Panel: &xrayconfig.PanelConfiguration{Credentials: []string{box}, Reality: map[int]xrayconfig.PanelReality{1080: *identity}}}
+	data, ref, err := draft.RenderPanel(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations, _, _, err := configurationNetwork(data)
+	if err != nil || len(destinations) != 1 || destinations[0] != "93.184.216.34/32" {
+		t.Fatalf("REALITY target not validated: %v", err)
+	}
+	if err := r.writeControl(configName(ref), data); err != nil {
+		t.Fatal(err)
+	}
+	release := stageFixture(t, r, xrayconfig.Version)
+	view := r.Inventory(Status{Current: selection{Release: release, Running: true, Revision: 1, Config: ref}}, "", true)
+	draft.Panel = nil
+	if view.Applied == nil || view.AppliedConfiguration().Encode() != draft.Encode() || bytes.Contains([]byte(view.Applied.Encode()), []byte(identity.Key)) ||
+		bytes.Contains([]byte(view.Applied.Encode()), []byte("privateKey")) {
+		t.Fatalf("REALITY inventory did not preserve the public signed configuration: %+v", view.Applied)
 	}
 }
