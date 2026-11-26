@@ -75,6 +75,7 @@ for arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "$build/$arch/mcui-helper" ./cmd/mcui-helper
   if [[ -d $build/xray-bootstrap ]]; then
     CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "$build/$arch/mcui-xray" ./cmd/mcui-xray
+    CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "$build/$arch/mcui-manifest" ./cmd/mcui-manifest
   fi
   if (( ${#runtime[@]} )); then
     CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -o "$build/$arch/mcui-runtime" ./cmd/mcui-runtime

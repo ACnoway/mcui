@@ -50,7 +50,7 @@ MCUI_AGENT_INSTALLER_MASTER_CA=/etc/mcui-master/agent-trust-ca.pem
 bash scripts/build-agent-installer.sh /tmp/mcui-agent-install.sh --managed-core
 ```
 
-这个安装包在 Debian/systemd 节点执行接入命令时，安装 Xray 管理单元、配置 Agent 与 Helper 验证 Xray 生命周期任务的公钥，并准备本地 chrony NTS 时钟。节点上的签名任务经 systemd 创建的 Unix 套接字读取经验证的时间。管理员可在主控面板选择官方 Xray 版本；上游 NTS 未同步时签名任务等待可信时间。
+这个安装包在 Debian/systemd 节点执行接入命令时，安装 Xray 管理单元、配置 Agent 与 Helper 验证 Xray 生命周期任务的公钥，并准备本地 chrony NTS 时钟。包内的 `mcui-manifest` 时钟辅助程序安装到 `/usr/local/bin/mcui-manifest`，供 `mcui-node-clock@.service` 以 `node-time` 子命令读取认证时间；Agent 和 Helper 通过 systemd 创建的 Unix 套接字读取该时间。管理员可在主控面板选择官方 Xray 版本；上游 NTS 未同步时签名任务等待可信时间。
 
 在全新 amd64 节点上，该包还准备 iproute2、slirp4netns、入站凭据密钥和隔离网络服务。节点需支持 TUN、网络命名空间和 systemd 的地址过滤。保留状态的重新接入默认沿用原有配置模式。可按维护流程显式迁移旧节点。 [主控添加入站](./phase-4-xray-inbound.md#从主控添加入站) · [旧节点迁移](./phase-4-xray-inbound.md#将旧节点迁移到主控定义模式)
 

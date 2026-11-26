@@ -84,6 +84,7 @@ install_xray_bootstrap() {
     install -o root -g root -m 0644 -- "$profile/mcui-nts.sources" "$chrony_source"
   fi
 
+  install -o root -g root -m 0755 -- "$stage/$arch/mcui-manifest" /usr/local/bin/mcui-manifest
   install -o root -g root -m 0755 -- "$stage/$arch/mcui-xray" /usr/local/bin/mcui-xray
   install -o root -g root -m 0644 -- "$stage/units/"mcui-xray*.service \
     "$stage/units/mcui-node-clock.socket" "$stage/units/mcui-node-clock@.service" "$units/"

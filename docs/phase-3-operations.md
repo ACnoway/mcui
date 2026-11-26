@@ -76,7 +76,7 @@ mcui-xray recover
 
 ## 5. 启用远程 Xray 安装
 
-在已接入阶段 2 任务运行时的节点上，先按第 1、2 节安装并初始化 Xray 单元。主控启用 HTTPS、Cloudflare NTS 认证时间及运维授权策略。单机部署可省略独立检查点。Agent 和 Helper 读取 root 管理的 Xray 安装任务公钥，分别验签并校验官方制品摘要。直连官方源不可用时，两个服务可凭当前签名任务和有效租约向 Master 请求精确匹配的缓存。[单机备份恢复](./phase-2-operations.md#单机运行与备份恢复)
+在已接入阶段 2 任务运行时的节点上，先按第 1、2 节安装并初始化 Xray 单元。Xray bootstrap 安装包会将 `mcui-manifest` 时钟辅助程序部署到 `/usr/local/bin/mcui-manifest`；`mcui-node-clock@.service` 通过它读取 chrony NTS 认证时间，Agent 和 Helper 再经 Unix 套接字获取时间。主控启用 HTTPS、Cloudflare NTS 认证时间及运维授权策略。单机部署可省略独立检查点。Agent 和 Helper 读取 root 管理的 Xray 安装任务公钥，分别验签并校验官方制品摘要。直连官方源不可用时，两个服务可凭当前签名任务和有效租约向 Master 请求精确匹配的缓存。[单机备份恢复](./phase-2-operations.md#单机运行与备份恢复)
 
 将以下配置作为 root 管理的 `/etc/mcui-agent/xray-install.env`，按可信发布材料替换实际值：
 
