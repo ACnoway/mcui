@@ -392,12 +392,17 @@ func configurationNetwork(data []byte) ([]string, []publishedInbound, bool, erro
 			}
 			tags := slices.Clone(rule.Tags)
 			slices.Sort(tags)
-			if len(tags) != len(socksTags) || !slices.Equal(tags, socksTags) {
-				return nil, nil, false, errors.New("Xray direct route must cover every SOCKS inbound")
+			if len(slices.Compact(slices.Clone(tags))) != len(tags) {
+				return nil, nil, false, errors.New("duplicate Xray direct route tag")
 			}
-			for _, tag := range rule.Tags {
-				if inboundProtocols[tag] != "socks" {
-					return nil, nil, false, errors.New("Xray direct outbound is reserved for SOCKS inbounds")
+			for _, tag := range socksTags {
+				if !slices.Contains(tags, tag) {
+					return nil, nil, false, errors.New("Xray direct route must cover every SOCKS inbound")
+				}
+			}
+			for _, tag := range tags {
+				if inboundProtocols[tag] != "socks" && inboundProtocols[tag] != xrayconfig.VLESS {
+					return nil, nil, false, errors.New("Xray direct outbound is reserved for SOCKS and VLESS inbounds")
 				}
 			}
 			directRules++

@@ -115,7 +115,12 @@ func TestVLESSTransportConnections(t *testing.T) {
 		{Network: "xhttp", Security: "tls", Path: "/xhttp", Mode: "auto"},
 	} {
 		t.Run(stream.Network, func(t *testing.T) {
-			target, err := net.Listen("tcp4", "127.0.0.1:0")
+			targetAddress := "127.0.0.1"
+			direct := os.Getenv("MCUI_TEST_VLESS_DIRECT") == "1"
+			if direct {
+				targetAddress = "93.184.216.34"
+			}
+			target, err := net.Listen("tcp4", net.JoinHostPort(targetAddress, "0"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,6 +170,9 @@ func TestVLESSTransportConnections(t *testing.T) {
 				t.Fatal(err)
 			}
 			draft := Configuration{Inbounds: Plan{in}, Network: &Network{Outbounds: []Outbound{}, Routes: []Route{}}, Panel: &PanelConfiguration{Credentials: []string{sealed}, TLS: identity}}
+			if direct {
+				draft.Panel.DirectPorts = []int{serverPort}
+			}
 			data, _, err := draft.RenderPanel(key)
 			if err != nil {
 				t.Fatal(err)
@@ -173,11 +181,13 @@ func TestVLESSTransportConnections(t *testing.T) {
 			if err := json.Unmarshal(data, &server); err != nil {
 				t.Fatal(err)
 			}
-			server["outbounds"] = []any{map[string]any{"protocol": "freedom", "settings": map[string]any{
-				"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": target.Addr().(*net.TCPAddr).Port}},
-			}}}
+			if !direct {
+				server["outbounds"] = []any{map[string]any{"protocol": "freedom", "settings": map[string]any{
+					"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": target.Addr().(*net.TCPAddr).Port}},
+				}}}
+				delete(server, "routing")
+			}
 			server["log"] = map[string]string{"loglevel": "debug"}
-			delete(server, "routing")
 			clientStream := stream.render()
 			if identity != nil {
 				clientStream["security"] = "tls"
@@ -252,7 +262,9 @@ func TestVLESSTransportConnections(t *testing.T) {
 				t.Fatalf("SOCKS negotiation: %x %v", response, err)
 			}
 			port := target.Addr().(*net.TCPAddr).Port
-			_, _ = conn.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1, byte(port >> 8), byte(port)})
+			ip := net.ParseIP(targetAddress).To4()
+			request := []byte{5, 1, 0, 1, ip[0], ip[1], ip[2], ip[3], byte(port >> 8), byte(port)}
+			_, _ = conn.Write(request)
 			reply := make([]byte, 10)
 			if _, err := io.ReadFull(conn, reply); err != nil || reply[1] != 0 {
 				t.Fatalf("SOCKS connect: %x %v", reply, err)
@@ -261,6 +273,45 @@ func TestVLESSTransportConnections(t *testing.T) {
 			result := make([]byte, 4)
 			if _, err := io.ReadFull(conn, result); err != nil || string(result) != "pong" {
 				t.Fatalf("proxy exchange: %q %v", result, err)
+			}
+			if direct && stream.Network == "tcp" {
+				for _, blockedAddress := range []string{"127.0.0.1", "169.254.169.254"} {
+					forbidden, err := net.Listen("tcp4", net.JoinHostPort(blockedAddress, "0"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer forbidden.Close()
+					accepted := make(chan struct{}, 1)
+					go func() {
+						c, err := forbidden.Accept()
+						if err == nil {
+							_ = c.Close()
+							accepted <- struct{}{}
+						}
+					}()
+					probe, err := net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", clientPort), time.Second)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer probe.Close()
+					_ = probe.SetDeadline(time.Now().Add(3 * time.Second))
+					_, _ = probe.Write([]byte{5, 1, 0})
+					if _, err := io.ReadFull(probe, response); err != nil || response[1] != 0 {
+						t.Fatal("forbidden SOCKS negotiation", err)
+					}
+					blockedPort := forbidden.Addr().(*net.TCPAddr).Port
+					blockedIP := net.ParseIP(blockedAddress).To4()
+					_, _ = probe.Write([]byte{5, 1, 0, 1, blockedIP[0], blockedIP[1], blockedIP[2], blockedIP[3], byte(blockedPort >> 8), byte(blockedPort)})
+					if _, err := io.ReadFull(probe, reply); err != nil || reply[1] != 0 {
+						t.Fatal("forbidden SOCKS request", err)
+					}
+					_, _ = probe.Write([]byte("ping"))
+					select {
+					case <-accepted:
+						t.Fatalf("VLESS direct outbound reached protected target %s", blockedAddress)
+					case <-time.After(time.Second):
+					}
+				}
 			}
 			if stream.Network == "tcp" && identity != nil {
 				clientStream["tlsSettings"].(map[string]any)["pinnedPeerCertSha256"] = strings.Repeat("f", 64)
@@ -284,7 +335,7 @@ func TestVLESSTransportConnections(t *testing.T) {
 				if _, err := io.ReadFull(bad, response); err != nil || response[1] != 0 {
 					t.Fatal("bad-pin SOCKS negotiation failed", err)
 				}
-				_, _ = bad.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1, byte(port >> 8), byte(port)})
+				_, _ = bad.Write(request)
 				if _, err := io.ReadFull(bad, reply); err != nil || reply[1] != 0 {
 					t.Fatal("bad-pin SOCKS request failed", err)
 				}

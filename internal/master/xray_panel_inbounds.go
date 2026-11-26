@@ -61,7 +61,7 @@ func encodePanelInbounds(entries []panelInbound, identity *xrayconfig.PanelTLS, 
 		}
 		draft.Inbounds = append(draft.Inbounds, entry.Inbound)
 		draft.Panel.Credentials = append(draft.Panel.Credentials, entry.Credentials...)
-		if entry.Inbound.Protocol == "" {
+		if entry.Inbound.Protocol == "" || entry.Inbound.Protocol == xrayconfig.VLESS {
 			draft.Panel.DirectPorts = append(draft.Panel.DirectPorts, entry.Inbound.Port)
 		}
 	}

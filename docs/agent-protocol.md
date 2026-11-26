@@ -75,7 +75,7 @@ VLESS/REALITY 草稿项使用 `protocol: "vless-reality"`，并在 `users` 之�
 
 自定义网络草稿使用 `{"inbounds":[...],"network":{"outbounds":[...],"routes":[...]}}` 格式，最大 3072 字节。出站项绑定 `tag` 及 `destination`，目的含 `address` 和 `port`。路由条目按匹配顺序排列，各自绑定 `inbound_port` 和 `outbound_tag`。领取时须声明 `xray_routing=v1` 并具有草稿中入站的相应能力。心跳的 `catalog.routing_destinations` 携带节点批准的目的，`applied_network` 从已提交配置复原。旧入站草稿继续使用数组格式和原能力声明。
 
-主控定义的草稿在 `network` 后附加 `panel.credentials` 数组，元素按入站端口顺序排列，每项是接收节点的 HPKE 密文；`panel.direct_ports` 只允许标记 SOCKS5 入站使用受保护的公网 Freedom 出站。心跳用 `panel_key` 通告节点的 X25519 公钥，主控首次保存时绑定该公钥。新草稿仍在 3072 字节限制内，并额外要求领取方声明 `xray_panel_inbounds=v2`。不支持旧版主控入站草稿节点。[主控入站流程](./phase-4-xray-inbound.md#从主控添加入站)
+主控定义的草稿在 `network` 后附加 `panel.credentials` 数组，元素按入站端口顺序排列，每项是接收节点的 HPKE 密文；`panel.direct_ports` 允许标记 SOCKS5 和 VLESS 入站使用受保护的公网 Freedom 出站。心跳用 `panel_key` 通告节点的 X25519 公钥，主控首次保存时绑定该公钥。新草稿仍在 3072 字节限制内，并额外要求领取方声明 `xray_panel_inbounds=v2`。不支持旧版主控入站草稿节点。[主控入站流程](./phase-4-xray-inbound.md#从主控添加入站)
 
 主控定义的 VLESS 入站可带 `vless_stream`，包含 `network`、可选 `security: "tls"` 和对应的路径、Host、gRPC service name、authority、multiMode 或 XHTTP mode；字段随草稿签名，并从节点已提交配置恢复后进行对账。订阅使用 schema 5，按已授权的端口返回 `vless_streams`。TLS 复用节点主控定义入站共用的密封证书私钥与 `tls_cert_sha256`，订阅只返回已应用修订的公开证书及指纹。节点目录模式不接受这些扩展字段。
 

@@ -194,7 +194,7 @@ async function remove(port: number) {
         <th scope="row">{{ inbound.public_endpoint ? destinationLabel(inbound.public_endpoint) : `127.0.0.1:${inbound.port}` }}</th>
         <td>{{ protocolLabel(inbound.protocol) }}</td>
         <td>{{ inbound.users.join('、') }}<template v-if="centrallyBound(inbound.port)"> · 已在「客户端」绑定</template></td>
-        <td>{{ !inbound.protocol ? '直连公网（内网目标拒绝）' : targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
+        <td>{{ !inbound.protocol || inbound.protocol === 'vless' ? `${targets(inbound.port).map(destinationLabel).join('、')}${targets(inbound.port).length ? '，其余' : ''}直连公网（内网目标拒绝）` : targets(inbound.port).map(destinationLabel).join('、') || '拒绝全部' }}</td>
         <td><div class="actions">
           <button type="button" class="outline" :disabled="busy" @click="open(inbound)">编辑</button>
           <button type="button" class="outline" :disabled="busy || inbounds.length >= 4" @click="open(inbound, true)">复制</button>
@@ -273,8 +273,9 @@ async function remove(port: number) {
       <p v-else-if="form.protocol === ''">SOCKS5 使用公网直连出站；节点策略会拒绝回环、私网、链路本地和元数据目标。</p>
       <p v-else-if="form.editing && targets(form.port).length > 1">此入站有多条放行规则。到「路由」编辑目标和顺序。</p>
       <template v-else>
-        <label>允许的目标 IPv4 <input v-model.trim="form.address" inputmode="decimal" placeholder="留空拒绝全部" /></label>
+        <label>允许的目标 IPv4 <input v-model.trim="form.address" inputmode="decimal" :placeholder="form.protocol === 'vless' ? '留空使用公网直连' : '留空拒绝全部'" /></label>
         <label>目标 TCP 端口 <input v-model.number="form.targetPort" type="number" min="1" max="65535" :required="!!form.address" :disabled="!form.address" /></label>
+        <p v-if="form.protocol === 'vless'" class="feedback">未匹配指定目标的连接走公网直连；节点策略会拒绝回环、私网、链路本地和元数据目标。</p>
       </template>
       <p v-if="duplicate" class="notice" role="alert">该端口已在草稿中使用。</p>
       <p v-if="duplicateClient" class="notice" role="alert">同一个入站的客户端用户名不能重复。</p>

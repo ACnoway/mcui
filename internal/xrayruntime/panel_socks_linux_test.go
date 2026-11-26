@@ -32,6 +32,10 @@ func TestConfigurationNetworkValidatesSocksDirectPolicy(t *testing.T) {
 	if err != nil || !direct {
 		t.Fatalf("valid SOCKS direct configuration was rejected: %v", err)
 	}
+	vless := strings.ReplaceAll(strings.Replace(config, `"protocol":"socks"`, `"protocol":"vless"`, 1), "socks-1080", "vless-1080")
+	if _, _, direct, err := configurationNetwork([]byte(vless)); err != nil || !direct {
+		t.Fatalf("valid protected VLESS direct configuration was rejected: %v", err)
+	}
 	for name, changed := range map[string]string{
 		"non-SOCKS inbound":      strings.Replace(config, `"protocol":"socks"`, `"protocol":"trojan"`, 1),
 		"incomplete final rules": strings.Replace(config, `,"169.254.0.0/16"`, "", 1),

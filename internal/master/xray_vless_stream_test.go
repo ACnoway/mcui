@@ -92,6 +92,9 @@ func TestVLESSTLSRotationAndSubscriptionTrust(t *testing.T) {
 	if !draft.Valid() || draft.Inbounds[0].TLSCertSHA256 != next.Trust.SHA256 || draft.Panel.TLS != next {
 		t.Fatal("TLS rotation did not update the signed identity")
 	}
+	if len(draft.Panel.DirectPorts) != 1 || draft.Panel.DirectPorts[0] != in.Port {
+		t.Fatal("panel VLESS inbound is missing its protected direct route")
+	}
 	grant := subscriptionGrant{revision: 1, plan: draft.Inbounds, trojan: &next.Trust}
 	payload := grant.payload("alice", grant.ports("alice"), 2000000000)
 	if payload["trojan_trust"] != &next.Trust || payload["schema_version"] != 5 {

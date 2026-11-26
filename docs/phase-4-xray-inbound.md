@@ -8,6 +8,10 @@
 
 RAW TCP + TLS 可为各客户端单独启用 `xtls-rprx-vision` flow。flow 随入站授权签名，只有已生效并获授权的对应客户端会在订阅和分享链接中收到该值。
 
+主控定义 VLESS 默认走受保护的公网直连出站；已配置的目标路由优先，其他流量走直连。回环、私网、链路本地和元数据等地址仍被节点策略拒绝。
+
+2026-11-26 在网络受限的 Debian 13 QEMU 虚拟机中，以官方 Xray `26.10.31` 测试上述 VLESS 传输经 Freedom 访问模拟公网 IPv4；RAW + TLS + Vision 测试中，回环和模拟元数据地址未收到连接。此测试验证 Xray 出站规则，不代替节点 systemd 地址策略和宿主网络直监听的验收。
+
 2026-11-26 使用远程隔离检出与 Xray `26.10.31` 测试了 WebSocket、gRPC（普通与多路）、HTTPUpgrade 和 XHTTP 四种模式的回环数据交换及节点已生效配置对账；另验证 RAW + TLS + Vision、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 的 TLS 握手与数据交换，以及错误证书指纹被拒绝。此测试不覆盖公网中继或 REALITY 组合。
 
 订阅页面可以根据已授权的 VLESS 入站及用户输入的凭据生成 `vless://` 分享链接和二维码。链接包含 UUID，节点目录 REALITY 链接还包含 Short ID，请按凭据保管。回环地址仅在能够访问节点回环网络的环境中有效。此功能参考 [3x-ui v3.11.0 的 VLESS 分享格式](https://github.com/MHSanaei/3x-ui/blob/c621ba9014a6aa21fd7c9ecf45655e44e24ebf13/frontend/src/lib/xray/inbound-link.ts)，不代表其他传输或安全组合已接入。
@@ -243,7 +247,7 @@ Trojan 模板适用于 Linux amd64 的 Xray `v26.10.31`。监听固定在专用�
 
 1. 将 Master、独立签发服务、Agent、Helper 和 `mcui-xray` 更新到支持自定义路由的同一版本。在节点的 `managed-inbounds.json` 添加 `routing_destinations`，最多列出四个批准的公网 IPv4 TCP 端点，每项使用 `address` 和 `port`。保留 `destination_ip` 和 `destination_port` 作为默认模式的目标。若自定义模式也要访问该目标，将它列入 `routing_destinations`。
 2. 为每个批准地址在 Xray 的 `IPAddressAllow` 中加入相应的 `/32`，同时配置命名空间路由及防火墙，再执行 `systemctl daemon-reload`。保留现有生效配置的网络许可，直到新配置成功应用。
-3. 在「出站」启用自定义配置，为选中的目标添加 Freedom 出站。在「路由」为已获客户端授权的入站添加规则，并选择目标出站。每条规则匹配该入站、目标 IPv4 和 TCP 端口，未匹配的流量交给默认的 `deny` 出站。没有放行规则的自定义配置会拒绝全部业务流量。移除某个入站的最后一条客户端授权时，草稿同时移除该入站及其路由。
+3. 在「出站」启用自定义配置，为选中的目标添加 Freedom 出站。在「路由」为已获客户端授权的入站添加规则，并选择目标出站。每条规则匹配该入站、目标 IPv4 和 TCP 端口；主控定义的 SOCKS5 和 VLESS 入站未匹配流量走受保护公网直连，节点目录模式及其他受控入站未匹配流量交给 `deny` 出站。移除某个入站的最后一条客户端授权时，草稿同时移除该入站及其路由。
 4. 保存草稿，等待节点预览，再核对并下发。若要恢复默认模式，在「路由」或「出站」选择「恢复节点默认路由」，保存并签发新修订。
 
 在「路由」可选择入站并输入目标 IPv4 和 TCP 端口，点击「测试草稿路由」。面板按草稿中的规则顺序显示首条匹配规则及对应出站，没有匹配时显示默认拒绝。测试根据当前编辑的草稿计算，无需下发配置，也不会发起网络连接。

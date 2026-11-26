@@ -29,7 +29,7 @@ func (p PanelConfiguration) valid(plan Plan) bool {
 	lastDirectPort := 0
 	for _, port := range p.DirectPorts {
 		index := slices.IndexFunc(plan, func(inbound Inbound) bool { return inbound.Port == port })
-		if port <= lastDirectPort || index < 0 || plan[index].Protocol != "" {
+		if port <= lastDirectPort || index < 0 || (plan[index].Protocol != "" && plan[index].Protocol != VLESS) {
 			return false
 		}
 		lastDirectPort = port
