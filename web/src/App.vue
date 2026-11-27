@@ -1433,7 +1433,7 @@ onMounted(async () => {
                 </tbody>
               </table>
             </div>
-            <p v-else class="empty">{{ panelXray ? '节点尚未上报面板可管理的入站目录。' : '等待节点上报 Xray 状态。' }}</p>
+            <p v-else class="empty">{{ panelXray ? '节点尚未报告可用的主控定义入站能力（需要受支持的 Xray 版本和节点公钥）。首次接入请使用含 Xray 引导的安装包。此模式不需要上报入站目录。' : '等待节点上报 Xray 状态。' }}</p>
             <div v-if="panelXray?.current.config" class="revision-summary">
               <strong>节点当前配置</strong>
               <code>{{ panelXray.current.config.sha256 }}</code>
@@ -1687,6 +1687,7 @@ onMounted(async () => {
 
     <PanelDialog v-if="installCommand" :title="'安装 Agent · ' + installCommand.node.name" @close="installCommand = null">
       <p v-if="error" class="notice" role="alert">{{ error }}</p>
+      <p v-if="installCommand.node.pending" class="feedback">首次接入主控入站节点时，请使用含 Xray 引导的安装包；安装器会自动初始化入站能力。</p>
       <label>在节点服务器终端执行<textarea :value="installCommand.command" readonly rows="8" spellcheck="false"></textarea></label>
       <p>一次性命令，{{ new Date(installCommand.expires_at * 1000).toLocaleString() }} 过期。补发命令会使未兑换的旧命令失效。</p>
       <button type="button" @click="copyInstallCommand">{{ commandCopied ? '已复制' : '复制命令' }}</button>
