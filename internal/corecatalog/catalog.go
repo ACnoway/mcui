@@ -20,7 +20,7 @@ import (
 const (
 	maxResponseBytes = 16 << 20
 	pageSize         = 10
-	installPageSize  = 100
+	installPageSize  = 30
 	cacheLifetime    = 10 * time.Minute
 	staleLifetime    = 24 * time.Hour
 	MaxPage          = 10
@@ -137,7 +137,7 @@ func NewClient() *Client {
 	}
 }
 
-// ListXrayReleases returns up to 100 official Xray releases for installation
+// ListXrayReleases returns up to 30 official Xray releases for installation
 // choices. The general catalog remains paged in groups of ten.
 func (c *Client) ListXrayReleases(ctx context.Context) (Snapshot, error) {
 	if c == nil || c.httpClient == nil || c.now == nil {
