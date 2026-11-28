@@ -1,6 +1,13 @@
-node_modules/
+bin/
 dist/
-coverage/
+internal/master/dist/*
+!internal/master/dist/.gitkeep
+frontend/node_modules/
+frontend/dist/
 *.db
 *.db-shm
 *.db-wal
+*.exe
+*.test
+*.out
+.env
