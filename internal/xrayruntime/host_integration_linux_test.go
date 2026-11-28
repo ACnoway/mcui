@@ -458,7 +458,7 @@ while True:
 		"log":      map[string]string{"loglevel": "none"},
 		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": clientPort, "protocol": "socks"}},
 		"outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"address": "::1", "port": goodPort, "id": uuid, "encryption": "none", "flow": "xtls-rprx-vision"},
-			"streamSettings": map[string]any{"network": "raw", "security": "reality", "realitySettings": map[string]any{"serverName": "www.example.com", "fingerprint": "chrome", "password": identity.PublicKey, "shortId": identity.ShortID}}}},
+			"streamSettings": map[string]any{"network": "raw", "security": "reality", "realitySettings": map[string]any{"serverName": "www.example.com", "fingerprint": "chrome", "password": identity.PublicKey, "shortId": identity.ShortIDs[0], "spiderX": identity.SpiderX}}}},
 	})
 	if err != nil {
 		t.Fatal(err)

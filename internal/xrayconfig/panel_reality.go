@@ -12,27 +12,43 @@ import (
 	"net/netip"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/ACnoway/mcui/internal/security"
 )
 
-// PanelReality contains public REALITY settings and a private key sealed to one node.
-// The enclosing configuration is signed and must not expose Key in subscriptions.
+// PanelReality contains REALITY settings, the editable private key, and a copy
+// sealed to one node for rendering. The panel API returns PrivateKey only to
+// administrators who can edit the node's inbound draft.
 type PanelReality struct {
 	RealitySettings
-	Key string `json:"key"`
+	PrivateKey string `json:"private_key"`
+	Key        string `json:"key"`
 }
 
 // RealitySettings is the non-secret portion of an inbound's REALITY identity.
 type RealitySettings struct {
-	Target      string   `json:"target"`
-	ServerNames []string `json:"server_names"`
-	PublicKey   string   `json:"public_key"`
-	ShortID     string   `json:"short_id"`
+	Target       string   `json:"target"`
+	ServerNames  []string `json:"server_names"`
+	PublicKey    string   `json:"public_key"`
+	ShortIDs     []string `json:"short_ids"`
+	Show         bool     `json:"show"`
+	Xver         int      `json:"xver"`
+	Fingerprint  string   `json:"fingerprint"`
+	SpiderX      string   `json:"spider_x"`
+	MaxTimeDiff  int64    `json:"max_time_diff"`
+	MinClientVer string   `json:"min_client_ver"`
+	MaxClientVer string   `json:"max_client_ver"`
 }
 
 var realityDNSName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
 var panelShortID = regexp.MustCompile(`^(?:[0-9a-f]{2}){1,8}$`)
+var realityClientVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var realityFingerprint = map[string]bool{
+	"chrome": true, "firefox": true, "safari": true, "ios": true, "android": true,
+	"edge": true, "360": true, "qq": true, "random": true, "randomized": true,
+	"randomizednoalpn": true, "unsafe": true,
+}
 
 func validRealityName(name string) bool {
 	return len(name) <= 253 && realityDNSName.MatchString(name)
@@ -42,7 +58,10 @@ func validRealityName(name string) bool {
 func (p RealitySettings) Valid() bool {
 	host, port, err := net.SplitHostPort(p.Target)
 	if err != nil || host == "" || len(p.Target) > 260 || !security.ValidNodeSecret(p.PublicKey) ||
-		!panelShortID.MatchString(p.ShortID) || len(p.ServerNames) == 0 || len(p.ServerNames) > 8 {
+		len(p.ShortIDs) == 0 || len(p.ShortIDs) > 8 || len(p.ServerNames) == 0 || len(p.ServerNames) > 8 ||
+		p.Xver < 0 || p.Xver > 2 || !realityFingerprint[p.Fingerprint] || len(p.SpiderX) > 256 ||
+		!strings.HasPrefix(p.SpiderX, "/") || strings.ContainsAny(p.SpiderX, "\r\n\x00") ||
+		p.MaxTimeDiff < 0 || p.MaxTimeDiff > 86_400_000 || !validRealityClientVersions(p.MinClientVer, p.MaxClientVer) {
 		return false
 	}
 	n, err := strconv.Atoi(port)
@@ -59,6 +78,37 @@ func (p RealitySettings) Valid() bool {
 			return false
 		}
 		seen[name] = true
+	}
+	seenShortIDs := make(map[string]bool, len(p.ShortIDs))
+	for _, id := range p.ShortIDs {
+		if !panelShortID.MatchString(id) || strings.Trim(id, "0") == "" || seenShortIDs[id] {
+			return false
+		}
+		seenShortIDs[id] = true
+	}
+	return true
+}
+
+func validRealityClientVersions(minimum, maximum string) bool {
+	if (minimum != "" && !realityClientVersion.MatchString(minimum)) || (maximum != "" && !realityClientVersion.MatchString(maximum)) {
+		return false
+	}
+	if minimum == "" || maximum == "" {
+		return true
+	}
+	minParts, maxParts := strings.Split(minimum, "."), strings.Split(maximum, ".")
+	for i := range minParts {
+		minValue, errMin := strconv.ParseUint(minParts[i], 10, 32)
+		maxValue, errMax := strconv.ParseUint(maxParts[i], 10, 32)
+		if errMin != nil || errMax != nil {
+			return false
+		}
+		if minValue < maxValue {
+			return true
+		}
+		if minValue > maxValue {
+			return false
+		}
 	}
 	return true
 }
@@ -80,7 +130,10 @@ func ValidRealityTargetInput(target string) bool {
 	return validRealityName(host)
 }
 
-func (p PanelReality) Valid() bool { return p.RealitySettings.Valid() && validPanelBox(p.Key, 32) }
+func (p PanelReality) Valid() bool {
+	public, err := RealityPublicKey(p.PrivateKey)
+	return p.RealitySettings.Valid() && err == nil && public == p.PublicKey && validPanelBox(p.Key, 32)
+}
 
 func (p PanelReality) context(port int) []byte {
 	return fmt.Appendf(nil, "MCUI-XRAY-PANEL-REALITY-V1\n%d\n%s", port, p.PublicKey)
@@ -88,9 +141,6 @@ func (p PanelReality) context(port int) []byte {
 
 // NewPanelReality creates a fresh identity and seals its private key to the node.
 func NewPanelReality(nodeKey string, port int, target string, names []string) (*PanelReality, error) {
-	if port < 1 || port > 65535 {
-		return nil, errors.New("invalid REALITY inbound port")
-	}
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
@@ -99,14 +149,41 @@ func NewPanelReality(nodeKey string, port int, target string, names []string) (*
 	if _, err := rand.Read(short); err != nil {
 		return nil, err
 	}
-	p := &PanelReality{RealitySettings: RealitySettings{Target: target, ServerNames: append([]string(nil), names...),
-		PublicKey: base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), ShortID: hex.EncodeToString(short)}}
-	p.Key, err = sealPanelSecret(nodeKey, p.context(port), key.Bytes())
+	privateKey := base64.RawURLEncoding.EncodeToString(key.Bytes())
+	settings := RealitySettings{
+		Target: target, ServerNames: append([]string(nil), names...), ShortIDs: []string{hex.EncodeToString(short)},
+		Show: false, Xver: 0, Fingerprint: "chrome", SpiderX: "/", MaxTimeDiff: 120_000,
+	}
+	settings.PublicKey = base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
+	return NewPanelRealityWithSettings(nodeKey, port, settings, privateKey)
+}
+
+// NewPanelRealityWithSettings seals an administrator-supplied X25519 key to
+// the node while retaining it in the editable master draft.
+func NewPanelRealityWithSettings(nodeKey string, port int, settings RealitySettings, privateKey string) (*PanelReality, error) {
+	if port < 1 || port > 65535 || !security.ValidNodeSecret(privateKey) {
+		return nil, errors.New("invalid REALITY inbound key or port")
+	}
+	privateBytes, err := base64.RawURLEncoding.Strict().DecodeString(privateKey)
+	if err != nil || len(privateBytes) != 32 || base64.RawURLEncoding.EncodeToString(privateBytes) != privateKey {
+		return nil, errors.New("invalid REALITY private key")
+	}
+	private, err := ecdh.X25519().NewPrivateKey(privateBytes)
+	if err != nil {
+		return nil, err
+	}
+	publicKey := base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes())
+	if settings.PublicKey != "" && settings.PublicKey != publicKey {
+		return nil, errors.New("REALITY public key does not match private key")
+	}
+	settings.PublicKey = publicKey
+	p := &PanelReality{RealitySettings: settings, PrivateKey: privateKey}
+	p.Key, err = sealPanelSecret(nodeKey, p.context(port), privateBytes)
 	if err != nil {
 		return nil, err
 	}
 	if !p.Valid() {
-		return nil, errors.New("invalid REALITY target or server names")
+		return nil, errors.New("invalid REALITY settings")
 	}
 	return p, nil
 }
@@ -121,7 +198,7 @@ func (p PanelReality) open(private hpke.PrivateKey, port int) (string, error) {
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(data)
 	public, err := RealityPublicKey(encoded)
-	if err != nil || public != p.PublicKey {
+	if err != nil || public != p.PublicKey || encoded != p.PrivateKey {
 		return "", errors.New("REALITY public key mismatch")
 	}
 	return encoded, nil

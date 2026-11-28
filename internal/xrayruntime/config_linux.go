@@ -113,10 +113,15 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						MultiMode   bool   `json:"multiMode"`
 					} `json:"grpcSettings"`
 					Reality struct {
-						PrivateKey  string   `json:"privateKey"`
-						Target      string   `json:"target"`
-						ServerNames []string `json:"serverNames"`
-						ShortIDs    []string `json:"shortIds"`
+						Show         bool     `json:"show"`
+						Xver         int      `json:"xver"`
+						PrivateKey   string   `json:"privateKey"`
+						Target       string   `json:"target"`
+						ServerNames  []string `json:"serverNames"`
+						ShortIDs     []string `json:"shortIds"`
+						MaxTimeDiff  int64    `json:"maxTimeDiff"`
+						MinClientVer string   `json:"minClientVer"`
+						MaxClientVer string   `json:"maxClientVer"`
 					} `json:"realitySettings"`
 					TLS struct {
 						Certificates []struct {
@@ -169,7 +174,11 @@ func (r *Runtime) Inventory(state Status, encoded string, managed bool) lifecycl
 						if err != nil || len(reality.ShortIDs) != 1 {
 							return view
 						}
-						stream.Reality = &xrayconfig.RealitySettings{Target: reality.Target, ServerNames: reality.ServerNames, PublicKey: public, ShortID: reality.ShortIDs[0]}
+						stream.Reality = &xrayconfig.RealitySettings{
+							Target: reality.Target, ServerNames: reality.ServerNames, PublicKey: public, ShortIDs: reality.ShortIDs,
+							Show: reality.Show, Xver: reality.Xver, Fingerprint: "chrome", SpiderX: "/", MaxTimeDiff: reality.MaxTimeDiff,
+							MinClientVer: reality.MinClientVer, MaxClientVer: reality.MaxClientVer,
+						}
 					}
 					entry.VLESSStream = stream
 				}

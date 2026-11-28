@@ -28,7 +28,7 @@ func TestPanelRealitySealsNodeAndPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	opened, err := reality.open(private, 443)
-	if err != nil {
+	if err != nil || opened != reality.PrivateKey {
 		t.Fatal(err)
 	}
 	derived, err := RealityPublicKey(opened)
@@ -77,7 +77,8 @@ func TestPanelRealityRendersOnlyMatchingSealedIdentity(t *testing.T) {
 	}
 	data, ref, err := draft.RenderPanel(key)
 	if err != nil || !ref.Matches(data) || !bytes.Contains(data, []byte(`"security":"reality"`)) ||
-		!bytes.Contains(data, []byte(`"privateKey":`)) || bytes.Contains([]byte(draft.Encode()), []byte(`"privateKey"`)) {
+		!bytes.Contains(data, []byte(`"privateKey":`)) || !bytes.Contains(data, []byte(`"show":false`)) ||
+		!bytes.Contains(data, []byte(`"maxTimeDiff":120000`)) || bytes.Contains([]byte(draft.Encode()), []byte(`"privateKey"`)) {
 		t.Fatalf("invalid REALITY rendering or draft: %v", err)
 	}
 	wrong := *identity

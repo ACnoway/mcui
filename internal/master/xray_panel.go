@@ -326,6 +326,12 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	configReady = inventory.Xray.Version != "" && corecatalog.ValidXrayRelease(inventory.Xray.Version, inventory.Xray.SHA256) && xrayCandidate(inventory.Xray, draft)
 	sort.Slice(versions, func(i, j int) bool { return corecatalog.CompareXrayVersions(versions[i], versions[j]) > 0 })
 	plan, _ := xrayconfig.ParseConfiguration(draft)
+	draftRealityPrivateKeys := make(map[int]string)
+	if plan.Panel != nil {
+		for port, identity := range plan.Panel.Reality {
+			draftRealityPrivateKeys[port] = identity.PrivateKey
+		}
+	}
 	usageReason := "capability_unverified"
 	if inventory.Architecture == xrayconfig.Architecture && inventory.Xray.Version == xrayconfig.Version &&
 		inventory.Xray.ConfigRevision > 0 {
@@ -336,16 +342,17 @@ func (s *Server) panelXrayOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	result := map[string]any{
 		"architecture": inventory.Architecture, "current": inventory.Xray, "state": fingerprint,
-		"versions":         versions,
-		"config_ready":     configReady,
-		"draft":            plan.Inbounds,
-		"draft_network":    plan.Network,
-		"managed_bindings": bindings,
-		"draft_previewed":  xrayDraftPreviewed(inventory.Xray, draft),
-		"panel_inbounds":   inventory.Xray.PanelKey != "" && inventory.Xray.Version == xrayconfig.Version,
-		"panel_trust":      panelTrust,
-		"draft_statistics": plan.Panel != nil && plan.Panel.Statistics,
-		"usage":            usage,
+		"versions":                   versions,
+		"config_ready":               configReady,
+		"draft":                      plan.Inbounds,
+		"draft_reality_private_keys": draftRealityPrivateKeys,
+		"draft_network":              plan.Network,
+		"managed_bindings":           bindings,
+		"draft_previewed":            xrayDraftPreviewed(inventory.Xray, draft),
+		"panel_inbounds":             inventory.Xray.PanelKey != "" && inventory.Xray.Version == xrayconfig.Version,
+		"panel_trust":                panelTrust,
+		"draft_statistics":           plan.Panel != nil && plan.Panel.Statistics,
+		"usage":                      usage,
 	}
 	if inventory.Xray.StatisticsActive {
 		traffic, err := s.store.XrayTraffic(r.Context(), r.PathValue("node"))

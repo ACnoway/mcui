@@ -13,11 +13,12 @@ const maxInboundClients = 8
 const maxNodeClients = 16
 export type PanelInboundChange = { remove: true } | {
   protocol: Protocol; clients: Client[]; destination?: Destination; copy_routes_from?: number
-  public_endpoint?: Destination; host_listen?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream; reality_target?: string; reality_names?: string[]; rotate_reality?: boolean
+  public_endpoint?: Destination; host_listen?: Destination; rotate_tls?: boolean; vless_stream?: VLESSStream; reality_private_key?: string
 }
 
 const props = defineProps<{
   inbounds: Inbound[]; network: Network | null; busy: boolean
+  realityPrivateKeys: Record<number, string>
   managedBindings: { port: number; credential: string }[]
   save: (port: number, change: PanelInboundChange) => Promise<void>
   multiClient: boolean; trojan: boolean; publicVless: boolean; hostAvailable: boolean; appliedVerified: boolean
@@ -34,7 +35,9 @@ const form = ref<{
   port: number; editing: boolean; copyFrom?: number; protocol: Protocol; clients: ClientEdit[]; address: string; targetPort: number
   published: boolean; publicAddress: string; publicPort: number; rotateTLS: boolean
   hostMode: boolean; listenAddress: string; listenPort: number
-  transport: VLESSStream['network']; tls: boolean; reality: boolean; realityTarget: string; realityNames: string; rotateReality: boolean
+  transport: VLESSStream['network']; tls: boolean; reality: boolean; realityTarget: string; realityNames: string
+  realityPublicKey: string; realityPrivateKey: string; realityShortIDs: string; realityShow: boolean; realityXver: number
+  realityFingerprint: string; realitySpiderX: string; realityMaxTimeDiff: number; realityMinClientVer: string; realityMaxClientVer: string
   path: string; host: string; serviceName: string; authority: string; multiMode: boolean; mode: NonNullable<VLESSStream['mode']>
 } | null>(null)
 const error = ref('')
@@ -109,7 +112,16 @@ function open(inbound?: Inbound, copy = false) {
     transport: inbound?.vless_stream?.network ?? 'tcp', path: inbound?.vless_stream?.path ?? '',
     tls: inbound?.vless_stream?.security === 'tls',
     reality: inbound?.vless_stream?.security === 'reality', realityTarget: inbound?.vless_stream?.reality?.target ?? '',
-    realityNames: inbound?.vless_stream?.reality?.server_names.join(',') ?? '', rotateReality: false,
+    realityNames: inbound?.vless_stream?.reality?.server_names.join(',') ?? '',
+    realityPublicKey: copy ? '' : inbound?.vless_stream?.reality?.public_key ?? '',
+    realityPrivateKey: copy ? '' : inbound ? props.realityPrivateKeys[inbound.port] ?? '' : '',
+    realityShortIDs: copy ? randomShortID() : inbound?.vless_stream?.reality?.short_ids.join(',') ?? randomShortID(),
+    realityShow: inbound?.vless_stream?.reality?.show ?? false, realityXver: inbound?.vless_stream?.reality?.xver ?? 0,
+    realityFingerprint: inbound?.vless_stream?.reality?.fingerprint ?? 'chrome',
+    realitySpiderX: inbound?.vless_stream?.reality?.spider_x ?? '/',
+    realityMaxTimeDiff: inbound?.vless_stream?.reality?.max_time_diff ?? 120000,
+    realityMinClientVer: inbound?.vless_stream?.reality?.min_client_ver ?? '',
+    realityMaxClientVer: inbound?.vless_stream?.reality?.max_client_ver ?? '',
     host: inbound?.vless_stream?.host ?? '', serviceName: inbound?.vless_stream?.service_name ?? '', mode: inbound?.vless_stream?.mode ?? 'auto',
     authority: inbound?.vless_stream?.authority ?? '', multiMode: inbound?.vless_stream?.multi_mode ?? false,
   }
@@ -139,6 +151,39 @@ function generateCredential(client: Client, protocol = form.value?.protocol ?? '
   credentialsCopied.value = false
 }
 
+function base64URL(bytes: Uint8Array) {
+  return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+}
+
+function randomShortID() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(8)), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function getNewRealityKeyPair() {
+  const draft = form.value
+  if (!draft) return
+  try {
+    const pair = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']) as CryptoKeyPair
+    const publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
+    const privateInfo = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))
+    draft.realityPublicKey = base64URL(publicKey)
+    draft.realityPrivateKey = base64URL(privateInfo.slice(-32))
+    validationError.value = ''
+  } catch {
+    error.value = '当前浏览器无法生成 X25519 密钥对。'
+  }
+}
+
+function generateShortIDs() {
+  if (form.value) form.value.realityShortIDs = randomShortID()
+}
+
+function generateSpiderX() {
+  if (!form.value) return
+  const bytes = crypto.getRandomValues(new Uint8Array(8))
+  form.value.realitySpiderX = '/' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
 function changeProtocol(protocol: Protocol) {
   const draft = form.value
   if (!draft || draft.protocol === protocol) return
@@ -154,6 +199,16 @@ function changeProtocol(protocol: Protocol) {
     draft.reality = false
     draft.realityTarget = ''
     draft.realityNames = ''
+    draft.realityPublicKey = ''
+    draft.realityPrivateKey = ''
+    draft.realityShortIDs = randomShortID()
+    draft.realityShow = false
+    draft.realityXver = 0
+    draft.realityFingerprint = 'chrome'
+    draft.realitySpiderX = '/'
+    draft.realityMaxTimeDiff = 120000
+    draft.realityMinClientVer = ''
+    draft.realityMaxClientVer = ''
     draft.path = ''
     draft.host = ''
     draft.serviceName = ''
@@ -163,7 +218,6 @@ function changeProtocol(protocol: Protocol) {
   }
   if (!['', 'trojan', 'vless'].includes(protocol)) draft.published = false
   if (protocol !== 'vless' && protocol !== 'trojan') draft.rotateTLS = false
-  if (protocol !== 'vless') draft.rotateReality = false
   activeTab.value = 'basic'
   validationError.value = ''
 }
@@ -289,8 +343,40 @@ function validateForm(): { tab: TabKey; message: string } | null {
     }
     if (draft.reality) {
       const names = draft.realityNames.split(',').map(name => name.trim()).filter(Boolean)
-      if (!draft.realityTarget.trim() || names.length === 0 || names.length > 16 || new Set(names).size !== names.length) {
-        return { tab: 'security', message: 'REALITY 需要握手目标和不重复的服务器名称（最多 16 个）。' }
+      if (!draft.realityTarget.trim() || names.length === 0 || names.length > 8 || new Set(names).size !== names.length) {
+        return { tab: 'security', message: 'REALITY 需要握手目标和不重复的服务器名称（最多 8 个）。' }
+      }
+      const shortIDs = draft.realityShortIDs.split(',').map(id => id.trim()).filter(Boolean)
+      if (!/^[A-Za-z0-9_-]{43}$/.test(draft.realityPrivateKey) || !/^[A-Za-z0-9_-]{43}$/.test(draft.realityPublicKey)) {
+        return { tab: 'security', message: '请填写有效的 REALITY 公钥和私钥，或生成新密钥对。' }
+      }
+      if (!shortIDs.length || shortIDs.length > 8 || new Set(shortIDs).size !== shortIDs.length ||
+          shortIDs.some(id => !/^(?:[0-9a-f]{2}){1,8}$/.test(id) || /^0+$/.test(id))) {
+        return { tab: 'security', message: 'Short IDs 须为 1–8 个不重复的小写十六进制值。' }
+      }
+      if (!['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'randomizednoalpn', 'unsafe'].includes(draft.realityFingerprint)) {
+        return { tab: 'security', message: '请选择有效的 uTLS 指纹。' }
+      }
+      if (!Number.isInteger(draft.realityXver) || draft.realityXver < 0 || draft.realityXver > 2) {
+        return { tab: 'security', message: 'Xver 须为 0–2 的整数。' }
+      }
+      if (!draft.realitySpiderX.startsWith('/') || draft.realitySpiderX.length > 256 || /[\r\n\0]/.test(draft.realitySpiderX)) {
+        return { tab: 'security', message: 'SpiderX 必须以 / 开头且不超过 256 个字符。' }
+      }
+      if (!Number.isInteger(draft.realityMaxTimeDiff) || draft.realityMaxTimeDiff < 0 || draft.realityMaxTimeDiff > 86400000) {
+        return { tab: 'security', message: '时间偏差须为 0–86400000 毫秒的整数。' }
+      }
+      const clientVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+      if ((draft.realityMinClientVer && !clientVersion.test(draft.realityMinClientVer)) ||
+          (draft.realityMaxClientVer && !clientVersion.test(draft.realityMaxClientVer))) {
+        return { tab: 'security', message: '客户端版本须使用 x.y.z 格式。' }
+      }
+      if (draft.realityMinClientVer && draft.realityMaxClientVer) {
+        const min = draft.realityMinClientVer.split('.').map(Number)
+        const max = draft.realityMaxClientVer.split('.').map(Number)
+        if (min.some((part, index) => part > max[index] && min.slice(0, index).every((value, i) => value === max[i]))) {
+          return { tab: 'security', message: '最低客户端版本不能高于最高版本。' }
+        }
       }
     }
   }
@@ -361,6 +447,19 @@ async function submit() {
   }
   validationError.value = ''
   try {
+    const realitySettings = draft.reality ? {
+      target: draft.realityTarget,
+      server_names: draft.realityNames.split(',').map(name => name.trim()).filter(Boolean),
+      public_key: draft.realityPublicKey,
+      short_ids: draft.realityShortIDs.split(',').map(id => id.trim()).filter(Boolean),
+      show: draft.realityShow,
+      xver: draft.realityXver,
+      fingerprint: draft.realityFingerprint,
+      spider_x: draft.realitySpiderX,
+      max_time_diff: draft.realityMaxTimeDiff,
+      min_client_ver: draft.realityMinClientVer,
+      max_client_ver: draft.realityMaxClientVer,
+    } : undefined
     await props.save(draft.port, {
       protocol: draft.protocol, clients: draft.clients.map(({ username, credential, flow }) => ({ username, credential,
         flow: draft.protocol === 'vless' && draft.transport === 'tcp' && (draft.tls || draft.reality) && flow ? flow : undefined })),
@@ -370,13 +469,11 @@ async function submit() {
       host_listen: draft.hostMode ? { address: draft.listenAddress, port: draft.listenPort } : undefined,
       rotate_tls: (draft.protocol === 'trojan' || (draft.protocol === 'vless' && draft.tls)) && draft.rotateTLS ? true : undefined,
       vless_stream: draft.protocol !== 'vless' || (draft.transport === 'tcp' && !draft.tls && !draft.reality) ? undefined : draft.transport === 'tcp'
-        ? { network: 'tcp', security: draft.reality ? 'reality' : 'tls' }
+        ? { network: 'tcp', security: draft.reality ? 'reality' : 'tls', ...(realitySettings ? { reality: realitySettings } : {}) }
         : draft.transport === 'grpc'
-          ? { network: 'grpc', security: draft.reality ? 'reality' : draft.tls ? 'tls' : undefined, service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined }
-          : { network: draft.transport, security: draft.reality ? 'reality' : draft.tls ? 'tls' : undefined, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}) },
-      reality_target: draft.protocol === 'vless' && draft.reality ? draft.realityTarget : undefined,
-      reality_names: draft.protocol === 'vless' && draft.reality ? draft.realityNames.split(',').map(name => name.trim()).filter(Boolean) : undefined,
-      rotate_reality: draft.protocol === 'vless' && draft.reality && draft.rotateReality ? true : undefined,
+          ? { network: 'grpc', security: draft.reality ? 'reality' : draft.tls ? 'tls' : undefined, service_name: draft.serviceName || undefined, authority: draft.authority || undefined, multi_mode: draft.multiMode || undefined, ...(realitySettings ? { reality: realitySettings } : {}) }
+          : { network: draft.transport, security: draft.reality ? 'reality' : draft.tls ? 'tls' : undefined, path: draft.path, host: draft.host || undefined, ...(draft.transport === 'xhttp' ? { mode: draft.mode } : {}), ...(realitySettings ? { reality: realitySettings } : {}) },
+      reality_private_key: draft.protocol === 'vless' && draft.reality ? draft.realityPrivateKey : undefined,
     })
     form.value = null
   } catch (cause) {
@@ -541,8 +638,23 @@ async function remove(port: number) {
           <label><input v-model="form.reality" type="checkbox" :disabled="form.tls || ['ws', 'httpupgrade'].includes(form.transport)" @change="clearUnavailableFlows" /> 启用 REALITY</label>
           <template v-if="form.reality">
             <label>握手目标 <input v-model.trim="form.realityTarget" placeholder="www.example.com:443 或公网 IPv4:端口" /></label>
-            <label>服务端名称（逗号分隔） <input v-model.trim="form.realityNames" placeholder="www.example.com" /></label>
-            <label v-if="form.editing"><input v-model="form.rotateReality" type="checkbox" /> 重新生成 REALITY 密钥和 Short ID</label>
+            <label>SNI / 服务端名称（逗号分隔，最多 8 个） <input v-model.trim="form.realityNames" placeholder="www.example.com" /></label>
+            <label><input v-model="form.realityShow" type="checkbox" /> Show</label>
+            <label>Xver <input v-model.number="form.realityXver" type="number" min="0" max="2" /></label>
+            <label>uTLS 指纹 <select v-model="form.realityFingerprint">
+              <option v-for="fingerprint in ['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'randomizednoalpn', 'unsafe']" :key="fingerprint" :value="fingerprint">{{ fingerprint }}</option>
+            </select></label>
+            <label>Short IDs（逗号分隔） <input v-model.trim="form.realityShortIDs" placeholder="16 位小写十六进制" /></label>
+            <div class="actions"><button type="button" class="outline" :disabled="busy" @click="generateShortIDs">生成 Short ID</button></div>
+            <label>SpiderX <input v-model.trim="form.realitySpiderX" maxlength="256" placeholder="/" /></label>
+            <div class="actions"><button type="button" class="outline" :disabled="busy" @click="generateSpiderX">随机 SpiderX</button></div>
+            <label>最大时间偏差（毫秒） <input v-model.number="form.realityMaxTimeDiff" type="number" min="0" max="86400000" /></label>
+            <label>最低客户端版本 <input v-model.trim="form.realityMinClientVer" placeholder="x.y.z，可留空" /></label>
+            <label>最高客户端版本 <input v-model.trim="form.realityMaxClientVer" placeholder="x.y.z，可留空" /></label>
+            <label>REALITY 公钥 <input v-model.trim="form.realityPublicKey" autocomplete="off" spellcheck="false" /></label>
+            <label>REALITY 私钥 <textarea v-model.trim="form.realityPrivateKey" autocomplete="off" spellcheck="false" rows="2" /></label>
+            <div class="actions"><button type="button" class="outline" :disabled="busy" @click="getNewRealityKeyPair">获取新证书</button></div>
+            <p class="feedback">按钮会生成新的 X25519 密钥对。私钥会保存在主控草稿中，并在此编辑表单回显。</p>
           </template>
           <label v-if="form.tls && inbounds.some(entry => entry.tls_cert_sha256)"><input v-model="form.rotateTLS" type="checkbox" /> 轮换节点共用 TLS 证书</label>
           <p v-if="!form.tls && !form.reality" class="feedback">此入站不启用传输加密。账号凭据仍在主控和节点间加密传递。</p>

@@ -116,7 +116,8 @@ func testPanelRealityConnection(t *testing.T, binary, network string) {
 	const id = "00000000-0000-4000-8000-000000000001"
 	stream := &VLESSStream{Network: network, Security: "reality", Reality: &identity.RealitySettings}
 	clientStream := map[string]any{"network": network, "security": "reality", "realitySettings": map[string]any{
-		"serverName": "www.example.com", "fingerprint": "chrome", "password": identity.PublicKey, "shortId": identity.ShortID}}
+		"serverName": "www.example.com", "fingerprint": identity.Fingerprint, "password": identity.PublicKey,
+		"shortId": identity.ShortIDs[0], "spiderX": identity.SpiderX}}
 	flow := ""
 	switch network {
 	case "tcp":

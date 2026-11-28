@@ -7,7 +7,7 @@ import XrayClients from './XrayClients.vue'
 import XrayNetworkEditor from './XrayNetworkEditor.vue'
 import XrayPanelInbounds, { type PanelInboundChange } from './XrayPanelInbounds.vue'
 import { copyNetwork, destinationLabel, type Destination, type Network } from './xrayManagement'
-import { xrayProtocolName, type XrayProtocol, type XrayPublicEndpoint } from './xraySubscription'
+import { xrayProtocolName, type VLESSStream, type XrayProtocol, type XrayPublicEndpoint } from './xraySubscription'
 
 type NodeRecord = { id: string; name: string; group: string; last_seen: number; disabled: boolean; pending: boolean }
 type Audit = { at: number; actor: string; action: string; resource: string; outcome: string }
@@ -27,7 +27,8 @@ type XrayConfigReference = { port: number; sha256: string; size: number }
 type XrayPortProtocol = Exclude<XrayProtocol, 'socks'>
 type XrayInbound = {
   port: number; protocol?: XrayPortProtocol; tls_cert_sha256?: string; reality_public_key?: string
-  public_endpoint?: XrayPublicEndpoint; users: string[]
+  public_endpoint?: XrayPublicEndpoint; host_listen?: XrayPublicEndpoint; vless_stream?: VLESSStream
+  vless_flows?: Record<string, 'xtls-rprx-vision'>; users: string[]
 }
 type XrayCatalog = {
   ports: number[]; users: string[] | null; http_ports?: number[]
@@ -51,6 +52,7 @@ type PanelXrayOptions = {
   }
   state: string; versions: string[]; config_ready: boolean
   draft: XrayInbound[] | null; draft_previewed: boolean
+  draft_reality_private_keys?: Record<number, string>
   panel_inbounds?: boolean
   panel_trust?: { certificate: string; sha256: string } | null
   draft_statistics?: boolean
@@ -1396,6 +1398,7 @@ onMounted(async () => {
           <p v-if="draftConflict" class="notice" role="alert">主控草稿已更新。放弃未保存修改后，重新核对当前草稿。</p>
           <p v-if="panelXray.panel_inbounds && draftTab === 'inbound' && xrayDraftDirty" class="feedback">编辑入站前，请保存或放弃未保存的路由和出站修改。</p>
           <XrayPanelInbounds v-if="panelXray.panel_inbounds && draftTab === 'inbound'" :key="selectedNode.id" :inbounds="panelXray.draft ?? []"
+            :reality-private-keys="panelXray.draft_reality_private_keys ?? {}"
             :multi-client="!!panelXray.current.panel_multi_client"
             :host-available="!!panelXray.current.panel_host"
             :public-vless="!!panelXray.current.panel_public_vless" :applied-verified="appliedConfigVerified"

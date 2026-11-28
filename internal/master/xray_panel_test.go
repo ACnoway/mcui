@@ -851,11 +851,20 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		copyChange.State = options()
 		expect(copyInbound(copyChange), http.StatusConflict)
 		expect(copyInbound(panelInboundChange{State: options(), Remove: true}), http.StatusOK)
+		realityPrivateKey := strings.Repeat("Q", 43)
+		realityPublicKey, err := xrayconfig.RealityPublicKey(realityPrivateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
 		realityChange := panelInboundChange{
 			State: options(), Protocol: xrayconfig.VLESS,
-			Clients:       []panelInboundClient{{Username: "reality-user", Credential: "00000000-0000-4000-8000-000000000001", Flow: "xtls-rprx-vision"}},
-			VLESSStream:   &xrayconfig.VLESSStream{Network: "tcp", Security: "reality"},
-			RealityTarget: "93.184.216.34:443", RealityNames: []string{"www.example.com"},
+			Clients: []panelInboundClient{{Username: "reality-user", Credential: "00000000-0000-4000-8000-000000000001", Flow: "xtls-rprx-vision"}},
+			VLESSStream: &xrayconfig.VLESSStream{Network: "tcp", Security: "reality", Reality: &xrayconfig.RealitySettings{
+				Target: "93.184.216.34:443", ServerNames: []string{"www.example.com"}, PublicKey: realityPublicKey,
+				ShortIDs: []string{"0123456789abcdef", "abcdef0123456789"}, Show: true, Xver: 1,
+				Fingerprint: "firefox", SpiderX: "/hello", MaxTimeDiff: 45_000, MinClientVer: "25.0.0", MaxClientVer: "26.10.31",
+			}},
+			RealityPrivateKey: realityPrivateKey,
 		}
 		expect(copyInbound(realityChange), http.StatusOK)
 		realityNode, err := s.store.NodeByID(t.Context(), client.nodeID)
@@ -866,14 +875,33 @@ func testPanelXraySelectSignDeliverAndConfirm(t *testing.T, checkpoint func(*tes
 		if err != nil || len(realityDraft.Panel.Reality) != 1 || realityDraft.Inbounds[1].VLESSFlows["reality-user"] != "xtls-rprx-vision" {
 			t.Fatalf("REALITY draft lost identity or flow: %v", err)
 		}
+		realityOptions := admin(http.MethodGet, nil, "")
+		expect(realityOptions, http.StatusOK)
+		var realityOptionView struct {
+			PrivateKeys map[int]string `json:"draft_reality_private_keys"`
+		}
+		if err := json.Unmarshal(realityOptions.Body.Bytes(), &realityOptionView); err != nil ||
+			realityOptionView.PrivateKeys[1081] != realityPrivateKey {
+			t.Fatalf("REALITY private key was not returned for inbound editing: %v", err)
+		}
 		firstKey := realityDraft.Panel.Reality[1081].PublicKey
+		if realityDraft.Panel.Reality[1081].PrivateKey != realityPrivateKey ||
+			len(realityDraft.Panel.Reality[1081].ShortIDs) != 2 || !realityDraft.Panel.Reality[1081].Show ||
+			realityDraft.Panel.Reality[1081].Fingerprint != "firefox" || realityDraft.Panel.Reality[1081].MaxTimeDiff != 45_000 {
+			t.Fatal("REALITY editable settings or private key were not retained in the draft")
+		}
 		if _, _, err := realityDraft.RenderPanel(private); err != nil {
 			t.Fatalf("REALITY draft did not render: %v", err)
 		}
 		realityChange.State, realityChange.Clients[0].Credential = options(), ""
-		realityChange.RealityTarget = direct.PanelAddresses[0] + ":443"
+		realityChange.VLESSStream.Reality.Target = direct.PanelAddresses[0] + ":443"
 		expect(copyInbound(realityChange), http.StatusBadRequest)
-		realityChange.RealityTarget, realityChange.RotateReality = "93.184.216.34:443", true
+		realityChange.VLESSStream.Reality.Target = "93.184.216.34:443"
+		realityChange.RealityPrivateKey = strings.Repeat("M", 43)
+		realityChange.VLESSStream.Reality.PublicKey, err = xrayconfig.RealityPublicKey(realityChange.RealityPrivateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
 		expect(copyInbound(realityChange), http.StatusOK)
 		realityNode, err = s.store.NodeByID(t.Context(), client.nodeID)
 		if err != nil {

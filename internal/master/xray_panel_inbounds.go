@@ -13,21 +13,19 @@ import (
 )
 
 type panelInboundChange struct {
-	State          string                    `json:"state"`
-	Remove         bool                      `json:"remove,omitempty"`
-	Protocol       string                    `json:"protocol,omitempty"`
-	Username       string                    `json:"username,omitempty"`
-	Credential     string                    `json:"credential,omitempty"`
-	Clients        []panelInboundClient      `json:"clients,omitempty"`
-	CopyRoutesFrom int                       `json:"copy_routes_from,omitempty"`
-	Destination    xrayconfig.Destination    `json:"destination,omitzero"`
-	Public         xrayconfig.PublicEndpoint `json:"public_endpoint,omitzero"`
-	HostListen     *xrayconfig.HostListener  `json:"host_listen,omitempty"`
-	RotateTLS      bool                      `json:"rotate_tls,omitempty"`
-	VLESSStream    *xrayconfig.VLESSStream   `json:"vless_stream,omitempty"`
-	RealityTarget  string                    `json:"reality_target,omitempty"`
-	RealityNames   []string                  `json:"reality_names,omitempty"`
-	RotateReality  bool                      `json:"rotate_reality,omitempty"`
+	State             string                    `json:"state"`
+	Remove            bool                      `json:"remove,omitempty"`
+	Protocol          string                    `json:"protocol,omitempty"`
+	Username          string                    `json:"username,omitempty"`
+	Credential        string                    `json:"credential,omitempty"`
+	Clients           []panelInboundClient      `json:"clients,omitempty"`
+	CopyRoutesFrom    int                       `json:"copy_routes_from,omitempty"`
+	Destination       xrayconfig.Destination    `json:"destination,omitzero"`
+	Public            xrayconfig.PublicEndpoint `json:"public_endpoint,omitzero"`
+	HostListen        *xrayconfig.HostListener  `json:"host_listen,omitempty"`
+	RotateTLS         bool                      `json:"rotate_tls,omitempty"`
+	VLESSStream       *xrayconfig.VLESSStream   `json:"vless_stream,omitempty"`
+	RealityPrivateKey string                    `json:"reality_private_key,omitempty"`
 }
 
 type panelInboundClient struct {
@@ -40,6 +38,16 @@ type panelInbound struct {
 	Inbound     xrayconfig.Inbound
 	Credentials []string
 	Reality     *xrayconfig.PanelReality
+}
+
+func validRealityPrivateKey(value string) bool {
+	_, err := xrayconfig.RealityPublicKey(value)
+	return err == nil
+}
+
+func validRealityKeyPair(publicKey, privateKey string) bool {
+	derived, err := xrayconfig.RealityPublicKey(privateKey)
+	return err == nil && derived == publicKey
 }
 
 func panelInbounds(draft xrayconfig.Configuration) []panelInbound {
@@ -181,15 +189,21 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	wantsReality := in.VLESSStream != nil && in.VLESSStream.Security == "reality"
 	streamValid := in.VLESSStream.Valid()
-	if wantsReality && in.VLESSStream.Reality == nil {
+	if wantsReality && in.VLESSStream.Reality != nil {
 		probe := *in.VLESSStream
-		probe.Reality = &xrayconfig.RealitySettings{Target: "93.184.216.34:443", ServerNames: in.RealityNames, PublicKey: strings.Repeat("A", 43), ShortID: "00"}
-		streamValid = xrayconfig.ValidRealityTargetInput(in.RealityTarget) && probe.Valid()
+		reality := *probe.Reality
+		inputTarget := reality.Target
+		reality.Target = "93.184.216.34:443"
+		probe.Reality = &reality
+		streamValid = xrayconfig.ValidRealityTargetInput(inputTarget) && probe.Valid() &&
+			validRealityKeyPair(reality.PublicKey, in.RealityPrivateKey)
+	} else if wantsReality {
+		streamValid = false
 	}
-	if (in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0 || in.VLESSStream != nil || in.HostListen != nil)) ||
+	if (in.Remove && (in.Protocol != "" || in.Username != "" || in.Credential != "" || in.Clients != nil || in.Destination != (xrayconfig.Destination{}) || in.CopyRoutesFrom != 0 || in.VLESSStream != nil || in.HostListen != nil || in.RealityPrivateKey != "")) ||
 		(in.HostListen != nil && !in.HostListen.Valid()) ||
 		!streamValid || (in.VLESSStream != nil && in.Protocol != xrayconfig.VLESS) ||
-		(wantsReality && in.VLESSStream.Reality != nil) || (!wantsReality && (in.RealityTarget != "" || in.RealityNames != nil || in.RotateReality)) ||
+		(wantsReality && (in.VLESSStream.Reality == nil || !validRealityPrivateKey(in.RealityPrivateKey))) || (!wantsReality && in.RealityPrivateKey != "") ||
 		(in.CopyRoutesFrom != 0 && (in.CopyRoutesFrom < 1024 || in.CopyRoutesFrom > 65535 || in.CopyRoutesFrom == port || in.Destination != (xrayconfig.Destination{}))) ||
 		(in.Clients != nil && (len(in.Clients) < 1 || len(in.Clients) > xrayconfig.MaxInboundUsers || in.Username != "" || in.Credential != "")) ||
 		(in.Protocol != xrayconfig.Trojan && !(in.Protocol == xrayconfig.VLESS && in.VLESSStream != nil && in.VLESSStream.Security == "tls") && in.RotateTLS) ||
@@ -214,7 +228,7 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 		realityTarget := ""
 		if wantsReality {
 			var err error
-			realityTarget, err = pinRealityTarget(r.Context(), in.RealityTarget)
+			realityTarget, err = pinRealityTarget(r.Context(), in.VLESSStream.Reality.Target)
 			if err != nil {
 				http.Error(w, "REALITY target must resolve to public IPv4 addresses", http.StatusBadRequest)
 				return
@@ -312,12 +326,14 @@ func (s *Server) savePanelXrayInbound(w http.ResponseWriter, r *http.Request) {
 				entry := panelInbound{Inbound: xrayconfig.Inbound{Port: port, Protocol: in.Protocol, PublicEndpoint: in.Public, HostListen: in.HostListen, VLESSStream: in.VLESSStream}}
 				if wantsReality {
 					var identity *xrayconfig.PanelReality
-					if previous.Reality != nil && !in.RotateReality {
+					settings := *in.VLESSStream.Reality
+					settings.Target = realityTarget
+					if previous.Reality != nil && previous.Reality.PrivateKey == in.RealityPrivateKey {
 						copy := *previous.Reality
-						copy.Target, copy.ServerNames = realityTarget, slices.Clone(in.RealityNames)
+						copy.RealitySettings = settings
 						identity = &copy
 					} else {
-						identity, err = xrayconfig.NewPanelReality(inv.Xray.PanelKey, port, realityTarget, in.RealityNames)
+						identity, err = xrayconfig.NewPanelRealityWithSettings(inv.Xray.PanelKey, port, settings, in.RealityPrivateKey)
 						if err != nil {
 							return lifecycleauth.ErrDenied
 						}

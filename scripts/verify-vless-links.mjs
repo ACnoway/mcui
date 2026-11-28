@@ -69,11 +69,15 @@ assert.equal(buildXrayClient(vision, 1080, 10808, id).outbounds[0].settings.flow
 assert.throws(() => buildVlessLink({ ...tls, vless_flows: { 1080: 'xtls-rprx-vision' } }, 1080, id, 'invalid'))
 const panelReality = { ...base, schema_version: 5, vless_streams: { 1080: {
   network: 'tcp', security: 'reality', reality: { target: 'www.example.com:443', server_names: ['www.example.com'],
-    public_key: key, short_id: '0123456789abcdef' },
+    public_key: key, short_ids: ['0123456789abcdef'], show: false, xver: 0, fingerprint: 'firefox',
+    spider_x: '/reality', max_time_diff: 30000, min_client_ver: '25.0.0', max_client_ver: '26.10.31' },
 } }, vless_flows: { 1080: 'xtls-rprx-vision' } }
 const realityURL = new URL(buildVlessLink(panelReality, 1080, id, 'reality'))
 assert.equal(realityURL.searchParams.get('security'), 'reality')
 assert.equal(realityURL.searchParams.get('pbk'), key)
 assert.equal(realityURL.searchParams.get('sid'), '0123456789abcdef')
+assert.equal(realityURL.searchParams.get('fp'), 'firefox')
+assert.equal(realityURL.searchParams.get('spx'), '/reality')
 assert.equal(realityURL.searchParams.get('sni'), 'www.example.com')
 assert.equal(buildXrayClient(panelReality, 1080, 10808, id).outbounds[0].streamSettings.realitySettings.password, key)
+assert.equal(buildXrayClient(panelReality, 1080, 10808, id).outbounds[0].streamSettings.realitySettings.fingerprint, 'firefox')

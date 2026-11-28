@@ -229,8 +229,18 @@ func (c Configuration) RenderPanel(key *ecdh.PrivateKey) ([]byte, Reference, err
 					return nil, Reference{}, err
 				}
 				stream["security"] = "reality"
-				stream["realitySettings"] = map[string]any{"target": identity.Target, "serverNames": identity.ServerNames,
-					"privateKey": privateKey, "shortIds": []string{identity.ShortID}}
+				stream["realitySettings"] = map[string]any{
+					"show": identity.Show, "target": identity.Target, "xver": identity.Xver,
+					"serverNames": identity.ServerNames, "privateKey": privateKey,
+					"shortIds": identity.ShortIDs, "maxTimeDiff": identity.MaxTimeDiff,
+				}
+				realitySettings := stream["realitySettings"].(map[string]any)
+				if identity.MinClientVer != "" {
+					realitySettings["minClientVer"] = identity.MinClientVer
+				}
+				if identity.MaxClientVer != "" {
+					realitySettings["maxClientVer"] = identity.MaxClientVer
+				}
 			}
 			entry["streamSettings"] = stream
 		}

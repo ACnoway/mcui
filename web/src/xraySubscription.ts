@@ -6,7 +6,11 @@ export const xrayProtocolName: Record<XrayProtocol, string> = {
 }
 
 export type XrayPublicEndpoint = { address: string; port: number }
-export type VLESSReality = { target: string; server_names: string[]; public_key: string; short_id: string }
+export type VLESSReality = {
+  target: string; server_names: string[]; public_key: string; short_ids: string[]
+  show: boolean; xver: number; fingerprint: string; spider_x: string; max_time_diff: number
+  min_client_ver: string; max_client_ver: string
+}
 export type VLESSStream = { network: 'tcp' | 'ws' | 'grpc' | 'httpupgrade' | 'xhttp'; security?: 'tls' | 'reality'; reality?: VLESSReality; path?: string; host?: string; service_name?: string; authority?: string; multi_mode?: boolean; mode?: 'auto' | 'packet-up' | 'stream-up' | 'stream-one' }
 
 export type XraySubscription = {
@@ -94,7 +98,15 @@ export function validSubscription(value: unknown): value is XraySubscription {
           !Array.isArray(reality.server_names) || !reality.server_names.length || reality.server_names.length > 8 ||
           reality.server_names.some(name => typeof name !== 'string' || !/^[a-z0-9.-]{3,253}$/.test(name)) ||
           typeof reality.public_key !== 'string' || !passwordPattern.test(reality.public_key) ||
-          typeof reality.short_id !== 'string' || !/^(?:[0-9a-f]{2}){1,8}$/.test(reality.short_id)) return true
+          !Array.isArray(reality.short_ids) || reality.short_ids.length < 1 || reality.short_ids.length > 8 ||
+          reality.short_ids.some(id => typeof id !== 'string' || !/^(?:[0-9a-f]{2}){1,8}$/.test(id) || /^0+$/.test(id)) ||
+          new Set(reality.short_ids).size !== reality.short_ids.length || typeof reality.show !== 'boolean' ||
+          !Number.isInteger(reality.xver) || reality.xver < 0 || reality.xver > 2 ||
+          !['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'randomizednoalpn', 'unsafe'].includes(reality.fingerprint) ||
+          typeof reality.spider_x !== 'string' || !reality.spider_x.startsWith('/') || reality.spider_x.length > 256 ||
+          /[\r\n\0]/.test(reality.spider_x) || !Number.isSafeInteger(reality.max_time_diff) ||
+          reality.max_time_diff < 0 || reality.max_time_diff > 86400000 ||
+          !validRealityClientVersions(reality.min_client_ver, reality.max_client_ver)) return true
         if (stream.network === 'ws' || stream.network === 'httpupgrade') return true
       } else if (stream.reality !== undefined) return true
       if (stream.host !== undefined && (typeof stream.host !== 'string' || !/^[A-Za-z0-9.:-]{0,253}$/.test(stream.host))) return true
@@ -137,6 +149,19 @@ export function subscriptionEndpoint(subscription: XraySubscription, port: numbe
 const passwordPattern = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/
 const uuidV4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const shadowsocksKey = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/
+
+function validRealityClientVersions(minimum: string, maximum: string) {
+  const pattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+  if ((minimum && !pattern.test(minimum)) || (maximum && !pattern.test(maximum))) return false
+  if (!minimum || !maximum) return true
+  const minParts = minimum.split('.').map(Number)
+  const maxParts = maximum.split('.').map(Number)
+  for (let index = 0; index < 3; index++) {
+    if (minParts[index] < maxParts[index]) return true
+    if (minParts[index] > maxParts[index]) return false
+  }
+  return true
+}
 
 function outboundSettings(subscription: XraySubscription, port: number, protocol: XrayProtocol, credential: string) {
   const { address, port: endpointPort } = subscriptionEndpoint(subscription, port)
@@ -188,8 +213,8 @@ export function buildXrayClient(subscription: XraySubscription, proxyPort: numbe
       ...(vlessStream.network === 'grpc' ? { alpn: ['h2', 'http/1.1'] } : {}),
     } } : {}),
     ...(vlessStream.security === 'reality' && vlessStream.reality ? { security: 'reality', realitySettings: {
-      serverName: vlessStream.reality.server_names[0], fingerprint: 'chrome', password: vlessStream.reality.public_key,
-      shortId: vlessStream.reality.short_id,
+      serverName: vlessStream.reality.server_names[0], fingerprint: vlessStream.reality.fingerprint, password: vlessStream.reality.public_key,
+      shortId: vlessStream.reality.short_ids[0], spiderX: vlessStream.reality.spider_x,
     } } : {}),
   } : protocol === 'vless-reality' ? {
     network: 'raw', security: 'reality',
@@ -239,9 +264,10 @@ export function buildVlessLink(subscription: XraySubscription, proxyPort: number
   }
   if (stream?.security === 'reality' && stream.reality) {
     params.set('sni', stream.reality.server_names[0])
-    params.set('fp', 'chrome')
+    params.set('fp', stream.reality.fingerprint)
     params.set('pbk', stream.reality.public_key)
-    params.set('sid', stream.reality.short_id)
+    params.set('sid', stream.reality.short_ids[0])
+    params.set('spx', stream.reality.spider_x)
   }
   if (protocol === 'vless-reality') {
     params.set('sni', 'localhost')

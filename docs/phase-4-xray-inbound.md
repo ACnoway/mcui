@@ -6,7 +6,7 @@
 
 主控定义的 VLESS 入站支持 RAW TCP、WebSocket、gRPC、HTTPUpgrade 和 XHTTP 基础传输，可启用公网 TCP 入口，并可选择 TLS。TLS 使用该节点主控定义入站共用的自动生成证书，私钥加密下发；客户端通过证书 SHA-256 指纹验证，分享链接携带该指纹。证书有效期为 90 天，可在入站表单轮换；轮换影响共用证书的入站，须应用修订并重新生成客户端配置。客户端配置和分享链接使用已生效修订中的传输参数。更新 Agent、Helper 和主控后，节点上报 `panel_public_vless` 才能保存公网入口。自定义证书、mKCP 及更多高级传输参数仍在开发中。
 
-RAW TCP、gRPC 和 XHTTP 可选择 REALITY，填写握手目标 `域名:端口` 或 `公网 IPv4:端口` 和一个或多个服务器名称。主控在保存时解析域名，要求所有 IPv4 结果均为公网地址，并将其中一个地址固定到签名配置；目标地址变化后须重新保存和下发。编辑表单显示固定后的地址。每个入站的私钥加密给节点，公开的公钥和 Short ID 随已生效修订用于客户端配置与分享链接。可在入站表单轮换身份，生效后须更新客户端。RAW TCP + TLS 或 REALITY 可为各客户端单独启用 `xtls-rprx-vision` flow；只有已生效并获授权的对应客户端收到该值。未启用 TLS 或 REALITY 的入站不提供传输加密。
+RAW TCP、gRPC 和 XHTTP 可选择 REALITY，填写握手目标 `域名:端口` 或 `公网 IPv4:端口` 和一个或多个服务器名称。主控在保存时解析域名，要求所有 IPv4 结果均为公网地址，并将其中一个地址固定到签名配置；目标地址变化后须重新保存和下发。编辑表单显示固定后的地址。Reality 表单提供 Show、xver、uTLS 指纹、Short IDs 列表、SpiderX、最低/最高客户端版本、最大时间偏差（毫秒）及公钥、私钥；「获取新证书」按钮生成新的 X25519 密钥对。私钥保存在主控草稿中供管理员编辑时回显，并另外封装给节点；客户端订阅不包含私钥。公开的公钥、Short IDs、uTLS 和 SpiderX 随已生效修订用于客户端配置与分享链接，Short IDs 列表的第一项用于生成分享。最大时间偏差写入 Xray `maxTimeDiff`，默认 `120000` 毫秒。更换密钥或 Short IDs 后，须应用修订并更新客户端。RAW TCP + TLS 或 REALITY 可为各客户端单独启用 `xtls-rprx-vision` flow；只有已生效并获授权的对应客户端收到该值。未启用 TLS 或 REALITY 的入站不提供传输加密。
 
 2026-11-26 在 `ro` 的网络受限 Debian 13 QEMU 虚拟机中使用官方 Xray `26.10.31` 验证 RAW + REALITY + Vision、gRPC + REALITY 和 XHTTP + REALITY 的握手及数据交换，握手目标使用模拟公网 IPv4 上的本地 TLS 服务。此验证不覆盖宿主网络直监听或公网中继。
 
@@ -22,7 +22,7 @@ RAW TCP、gRPC 和 XHTTP 可选择 REALITY，填写握手目标 `域名:端口` 
 
 ### 创建流程
 
-创建和编辑窗口按 3x-ui 的分区表单组织为「基本设置、传输、安全、客户端、路由、确认」。协议选择仅展示当前主控入站支持的 SOCKS5、HTTP、VLESS、VMess 和 Trojan/TLS；传输、安全选项会随协议变化。VLESS 可选择 RAW TCP、WebSocket、gRPC、HTTPUpgrade 或 XHTTP，并按兼容组合启用 TLS 或 REALITY。宿主监听、公布地址、客户端凭据和出站目标在相应分区单独设置。
+创建和编辑窗口按 3x-ui 的分区表单组织为「基本设置、传输、安全、客户端、路由、确认」。协议选择仅展示当前主控入站支持的 SOCKS5、HTTP、VLESS、VMess 和 Trojan/TLS；传输、安全选项会随协议变化。VLESS 可选择 RAW TCP、WebSocket、gRPC、HTTPUpgrade 或 XHTTP，并按兼容组合启用 TLS 或 REALITY。REALITY 支持 Show、xver、uTLS 指纹、多个 Short IDs、SpiderX、最大时间偏差、可编辑公私钥和生成新密钥对按钮；公私钥不匹配时主控拒绝保存。宿主监听、公布地址、客户端凭据和出站目标在相应分区单独设置。
 
 新增客户端时自动生成合规用户名和随机凭据。UUID 协议使用 UUID v4；密码型协议使用 32 字节 Base64URL 凭据。可在「客户端」分区添加、移除客户端或复制凭据清单。每个入站最多 8 个客户端，每个节点最多 16 个客户端授权。编辑已有用户时，留空代表保留节点中已加密的凭据；已绑定的客户端需先在「客户端」页解绑或轮换。
 
